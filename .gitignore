@@ -1,0 +1,9 @@
+node_modules
+.env
+dist
+yarn.lock
+package-lock.json
+eas.json
+uploads/technique/
+uploads/technique/*.mp4
+uploads/profile/
