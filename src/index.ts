@@ -9,6 +9,12 @@ import techniqueRouter from './technique/techniqueRouter'
 import profileRouter from './profile/profileRouter'
 import bodyParser from 'body-parser'
 import path from 'path'
+import {
+  handleMetaWebhookEvent,
+  handleMetaWebhookVerification,
+} from './webhooks/metaFacebookWebhook'
+import { getPrivacyPolicyHtml } from './privacyPolicyHtml'
+import { getDataDeletionHtml } from './dataDeletionHtml'
 
 const app = express()
 
@@ -62,6 +68,13 @@ app.use('/api/auth/profile', profileRouter)
 
 app.all('/api/auth/*', toNodeHandler(auth))
 
+app.get('/api/webhooks/facebook', handleMetaWebhookVerification)
+app.post(
+  '/api/webhooks/facebook',
+  express.raw({ type: 'application/json' }),
+  handleMetaWebhookEvent
+)
+
 app.use(bodyParser.urlencoded({ extended: true }))
 app.use(bodyParser.json())
 app.use(express.json({ limit: '50mb' }))
@@ -69,6 +82,28 @@ app.use(express.json({ limit: '50mb' }))
 app.get('/', (req, res) => {
   res.send('Hello World!')
 })
+
+function sendPrivacyPolicy(res: express.Response) {
+  res
+    .status(200)
+    .setHeader('Content-Type', 'text/html; charset=utf-8')
+    .setHeader('Cache-Control', 'public, max-age=3600')
+    .send(getPrivacyPolicyHtml())
+}
+
+app.get('/privacy', (_req, res) => sendPrivacyPolicy(res))
+app.get('/privacy-policy', (_req, res) => sendPrivacyPolicy(res))
+
+function sendDataDeletion(res: express.Response) {
+  res
+    .status(200)
+    .setHeader('Content-Type', 'text/html; charset=utf-8')
+    .setHeader('Cache-Control', 'public, max-age=3600')
+    .send(getDataDeletionHtml())
+}
+
+app.get('/data-deletion', (_req, res) => sendDataDeletion(res))
+app.get('/user-data-deletion', (_req, res) => sendDataDeletion(res))
 
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
 app.use('/chat', chatRouter)
