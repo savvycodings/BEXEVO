@@ -6,6 +6,7 @@ import { auth } from './auth'
 import chatRouter from './chat/chatRouter'
 import imagesRouter from './images/imagesRouter'
 import techniqueRouter from './technique/techniqueRouter'
+import trainRouter from './train/trainRouter'
 import profileRouter from './profile/profileRouter'
 import bodyParser from 'body-parser'
 import path from 'path'
@@ -22,7 +23,14 @@ app.use(cors({
   origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Accept', 'X-Requested-With'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Cache-Control',
+    'Accept',
+    'X-Requested-With',
+    'X-Admin-Train-Secret',
+  ],
 }))
 
 app.use('/api/auth', (req, _res, next) => {
@@ -35,7 +43,10 @@ app.use('/api/auth', (req, _res, next) => {
   if (origin === 'http://localhost:8081' || origin === 'http://127.0.0.1:8081') {
     _res.header('Access-Control-Allow-Origin', origin)
     _res.header('Access-Control-Allow-Credentials', 'true')
-    _res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Accept, X-Requested-With')
+    _res.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, Cache-Control, Accept, X-Requested-With, X-Admin-Train-Secret',
+    )
     _res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,PATCH,OPTIONS')
     _res.header('Vary', 'Origin')
   }
@@ -64,6 +75,7 @@ app.use('/api/auth', (req, _res, next) => {
 })
 
 app.use('/api/auth/technique', techniqueRouter)
+app.use('/api/auth/train', trainRouter)
 app.use('/api/auth/profile', profileRouter)
 
 app.all('/api/auth/*', toNodeHandler(auth))
@@ -109,6 +121,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
 app.use('/chat', chatRouter)
 app.use('/images', imagesRouter)
 app.use('/technique', techniqueRouter)
+app.use('/train', trainRouter)
 app.use('/profile', profileRouter)
 
 app.listen(3050, () => {

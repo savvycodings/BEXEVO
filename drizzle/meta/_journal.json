@@ -36,6 +36,20 @@
       "when": 1773873015070,
       "tag": "0004_first_starjammers",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1743000000000,
+      "tag": "0005_train_video",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1774474988957,
+      "tag": "0006_heavy_mister_sinister",
+      "breakpoints": true
     }
   ]
 }

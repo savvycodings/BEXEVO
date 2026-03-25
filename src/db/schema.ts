@@ -137,6 +137,21 @@ export const techniqueVideo = pgTable("technique_video", {
   createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
 
+/** Admin training uploads: labeled stroke + video file on disk (same layout as technique_video). */
+export const trainVideo = pgTable("train_video", {
+  id: text("id").primaryKey(),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  strokeName: text("strokeName").notNull(),
+  cloudinaryPublicId: text("cloudinaryPublicId").notNull(),
+  cloudinaryUrl: text("cloudinaryUrl").notNull(),
+  secureUrl: text("secureUrl"),
+  bytes: text("bytes"),
+  format: text("format"),
+  createdAt: timestamp("createdAt").notNull().defaultNow(),
+});
+
 export const techniqueAnalysis = pgTable("technique_analysis", {
   id: text("id").primaryKey(),
   techniqueVideoId: text("techniqueVideoId")
