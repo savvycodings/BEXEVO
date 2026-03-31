@@ -4,6 +4,8 @@ import {
   boolean,
   timestamp,
   jsonb,
+  integer,
+  pgEnum,
 } from "drizzle-orm/pg-core";
 
 export type TechniqueCorrectionImage = {
@@ -137,6 +139,35 @@ export const techniqueVideo = pgTable("technique_video", {
   createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
 
+export const trainViewProfileEnum = pgEnum("train_view_profile", [
+  "front",
+  "side",
+  "behind",
+]);
+
+/** Admin training taxonomy (stored on train_video; Modal still receives a single movement_label string). */
+export const trainCategoryEnum = pgEnum("train_category", [
+  "ground_strokes",
+  "net_play",
+  "defence_glass",
+  "save_return",
+  "overhead",
+  "tactical_specials",
+]);
+
+export const trainStrokePresetEnum = pgEnum("train_stroke_preset", [
+  "forehand_drive",
+  "backhand_drive",
+  "forehand_lob",
+  "backhand_lob",
+]);
+
+export const trainSkillLevelEnum = pgEnum("train_skill_level", [
+  "beginner",
+  "intermediate",
+  "advanced",
+]);
+
 /** Admin training uploads: labeled stroke + video file on disk (same layout as technique_video). */
 export const trainVideo = pgTable("train_video", {
   id: text("id").primaryKey(),
@@ -144,12 +175,72 @@ export const trainVideo = pgTable("train_video", {
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
   strokeName: text("strokeName").notNull(),
+  category: trainCategoryEnum("category").notNull(),
+  strokePreset: trainStrokePresetEnum("strokePreset").notNull(),
+  skillLevel: trainSkillLevelEnum("skillLevel").notNull(),
   cloudinaryPublicId: text("cloudinaryPublicId").notNull(),
   cloudinaryUrl: text("cloudinaryUrl").notNull(),
   secureUrl: text("secureUrl"),
   bytes: text("bytes"),
   format: text("format"),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
+});
+
+export type TrainPoseFrame = {
+  frame_idx: number;
+  landmarks: Record<
+    string,
+    { x: number; y: number; z?: number; visibility?: number }
+  >;
+};
+
+export type TrainSampleExtractionMeta = {
+  processed_at?: string;
+  sampler?: { stride?: number };
+  model?: {
+    provider?: string;
+    name?: string;
+    model_complexity?: number;
+  };
+  normalized_label?: {
+    canonical_stroke?: string;
+    stroke_family?: string;
+    aliases?: string[];
+    confidence?: number;
+    [key: string]: unknown;
+  } | null;
+  train_video_id?: string | null;
+  [key: string]: unknown;
+};
+
+export const trainSample = pgTable("train_sample", {
+  id: text("id").primaryKey(),
+  trainVideoId: text("trainVideoId")
+    .notNull()
+    .references(() => trainVideo.id, { onDelete: "cascade" }),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  strokeNameSnapshot: text("strokeNameSnapshot").notNull(),
+  status: text("status").notNull(),
+  frameCount: integer("frameCount"),
+  totalFrames: integer("totalFrames"),
+  poseSequence: jsonb("poseSequence").$type<TrainPoseFrame[]>(),
+  extractionMeta: jsonb("extractionMeta").$type<TrainSampleExtractionMeta>(),
+  errorMessage: text("errorMessage"),
+  modalJobId: text("modalJobId"),
+  createdAt: timestamp("createdAt").notNull().defaultNow(),
+  updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+});
+
+export const trainVideoViewProfile = pgTable("train_video_view_profile", {
+  id: text("id").primaryKey(),
+  trainVideoId: text("trainVideoId")
+    .notNull()
+    .references(() => trainVideo.id, { onDelete: "cascade" }),
+  viewProfile: trainViewProfileEnum("viewProfile").notNull(),
+  createdAt: timestamp("createdAt").notNull().defaultNow(),
+  updatedAt: timestamp("updatedAt").notNull().defaultNow(),
 });
 
 export const techniqueAnalysis = pgTable("technique_analysis", {

@@ -240,4 +240,64 @@ router.post("/basic", async (req, res) => {
   }
 });
 
+router.post("/game", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const hasRankingRaw = req.body?.hasRanking;
+    const hasRanking =
+      hasRankingRaw === true || hasRankingRaw === "true"
+        ? true
+        : hasRankingRaw === false || hasRankingRaw === "false"
+        ? false
+        : null;
+    const level = (req.body?.level || "").trim() || null;
+    const rankingOrg = (req.body?.rankingOrg || "").trim() || null;
+    const rankingValue = (req.body?.rankingValue || "").trim() || null;
+
+    if (hasRanking === null) {
+      return res.status(400).json({ error: "hasRanking must be true or false." });
+    }
+
+    if (hasRanking === false && !level) {
+      return res.status(400).json({ error: "Level is required when not ranked." });
+    }
+
+    if (hasRanking === true && (!rankingOrg || !rankingValue)) {
+      return res
+        .status(400)
+        .json({ error: "Ranking organization and value are required when ranked." });
+    }
+
+    const now = new Date();
+    await db
+      .insert(userProfile)
+      .values({
+        userId,
+        hasRanking,
+        level: hasRanking ? null : level,
+        rankingOrg: hasRanking ? rankingOrg : null,
+        rankingValue: hasRanking ? rankingValue : null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: userProfile.userId,
+        set: {
+          hasRanking,
+          level: hasRanking ? null : level,
+          rankingOrg: hasRanking ? rankingOrg : null,
+          rankingValue: hasRanking ? rankingValue : null,
+          updatedAt: now,
+        },
+      });
+
+    return res.json({ ok: true });
+  } catch (e: any) {
+    console.error("[Profile] game update error", e);
+    return res.status(500).json({ error: "Failed to update game settings" });
+  }
+});
+
 export default router;

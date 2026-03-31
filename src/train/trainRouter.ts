@@ -2,7 +2,7 @@
  * Training dataset uploads (admin-only via X-Admin-Train-Secret).
  *
  * Parallels technique video storage:
- * - POST multipart: field "video" (mp4/mov), field "strokeName" (e.g. backhand)
+ * - POST multipart: video + viewProfile + category + strokePreset + skillLevel (strokeName is derived for Modal)
  * - File written under uploads/train/{id}{ext}
  * - Row in train_video; public path /train/video/:id (also served under /api/auth/train/video/:id)
  * - GET streams bytes with Range support like techniqueRouter /video/:id
@@ -14,7 +14,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { fromNodeHeaders } from "better-auth/node";
 import { auth } from "../auth";
-import { db, trainVideo } from "../db";
+import { db, trainSample, trainVideo, trainVideoViewProfile } from "../db";
 import { eq } from "drizzle-orm";
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
@@ -31,10 +31,178 @@ const upload = multer({
 const UPLOAD_ROOT = path.join(process.cwd(), "uploads", "train");
 const ADMIN_SECRET = (): string =>
   (process.env.ADMIN_TRAIN_SECRET || "xevodev").trim();
+const TRAIN_MODAL_WEBHOOK_URL = (): string =>
+  (process.env.TRAIN_MODAL_WEBHOOK_URL || "").trim();
 
 const router = express.Router();
 router.use(express.json({ limit: "2mb" }));
 router.use(express.urlencoded({ extended: true }));
+type TrainViewProfile = "front" | "side" | "behind";
+
+const TRAIN_CATEGORIES = [
+  "ground_strokes",
+  "net_play",
+  "defence_glass",
+  "save_return",
+  "overhead",
+  "tactical_specials",
+] as const;
+type TrainCategory = (typeof TRAIN_CATEGORIES)[number];
+
+const TRAIN_STROKE_PRESETS = [
+  "forehand_drive",
+  "backhand_drive",
+  "forehand_lob",
+  "backhand_lob",
+] as const;
+type TrainStrokePreset = (typeof TRAIN_STROKE_PRESETS)[number];
+
+const TRAIN_SKILL_LEVELS = ["beginner", "intermediate", "advanced"] as const;
+type TrainSkillLevel = (typeof TRAIN_SKILL_LEVELS)[number];
+
+const CATEGORY_LABEL: Record<TrainCategory, string> = {
+  ground_strokes: "Ground strokes",
+  net_play: "Net play",
+  defence_glass: "Defence & glass",
+  save_return: "Save & return",
+  overhead: "Overhead",
+  tactical_specials: "Tactical specials",
+};
+
+const PRESET_LABEL: Record<TrainStrokePreset, string> = {
+  forehand_drive: "Forehand drive",
+  backhand_drive: "Backhand drive",
+  forehand_lob: "Forehand lob",
+  backhand_lob: "Backhand lob",
+};
+
+const LEVEL_LABEL: Record<TrainSkillLevel, string> = {
+  beginner: "Beginner",
+  intermediate: "Intermediate",
+  advanced: "Advanced",
+};
+
+function parseViewProfile(raw: unknown): TrainViewProfile | null {
+  const v = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  if (v === "front" || v === "side" || v === "behind") return v;
+  return null;
+}
+
+function parseCategory(raw: unknown): TrainCategory | null {
+  const v = String(raw ?? "").trim();
+  return (TRAIN_CATEGORIES as readonly string[]).includes(v) ? (v as TrainCategory) : null;
+}
+
+function parseStrokePreset(raw: unknown): TrainStrokePreset | null {
+  const v = String(raw ?? "").trim();
+  return (TRAIN_STROKE_PRESETS as readonly string[]).includes(v) ? (v as TrainStrokePreset) : null;
+}
+
+function parseSkillLevel(raw: unknown): TrainSkillLevel | null {
+  const v = String(raw ?? "").trim();
+  return (TRAIN_SKILL_LEVELS as readonly string[]).includes(v) ? (v as TrainSkillLevel) : null;
+}
+
+/** Single line for strokeName column + Modal movement_label (Modal contract unchanged). */
+function buildMovementLabel(
+  preset: TrainStrokePreset,
+  category: TrainCategory,
+  level: TrainSkillLevel
+): string {
+  return `${PRESET_LABEL[preset]} · ${CATEGORY_LABEL[category]} · ${LEVEL_LABEL[level]}`;
+}
+
+function getPublicVideoBase(): string {
+  const publicVideoBase = (process.env.PUBLIC_VIDEO_BASE_URL || "").trim();
+  const publicBase = (process.env.PUBLIC_BASE_URL || "").trim();
+  const authBase = (process.env.BETTER_AUTH_URL || "").trim();
+  return publicVideoBase || publicBase || authBase || "http://localhost:3050";
+}
+
+async function triggerTrainExtraction(params: {
+  sampleId: string;
+  trainVideoId: string;
+  strokeName: string;
+  videoPublicPath: string;
+}): Promise<void> {
+  const modalUrl = TRAIN_MODAL_WEBHOOK_URL();
+  if (!modalUrl) {
+    console.warn("[Train] TRAIN_MODAL_WEBHOOK_URL missing; sample left queued", {
+      sampleId: params.sampleId,
+    });
+    return;
+  }
+
+  const baseUrl = getPublicVideoBase().replace(/\/+$/, "");
+  const videoUrl = params.videoPublicPath.startsWith("http")
+    ? params.videoPublicPath
+    : `${baseUrl}${params.videoPublicPath.startsWith("/") ? "" : "/"}${params.videoPublicPath}`;
+
+  if (
+    !/localhost|127\.0\.0\.1/i.test(modalUrl) &&
+    /localhost|127\.0\.0\.1/i.test(videoUrl)
+  ) {
+    console.error("[Train] Modal cannot reach local video URL; marking sample failed", {
+      sampleId: params.sampleId,
+      videoUrl,
+    });
+    await db
+      .update(trainSample)
+      .set({
+        status: "failed",
+        errorMessage:
+          "Server misconfiguration: set PUBLIC_VIDEO_BASE_URL (or PUBLIC_BASE_URL) to a public URL reachable by Modal.",
+      })
+      .where(eq(trainSample.id, params.sampleId));
+    return;
+  }
+
+  void fetch(modalUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      video_url: videoUrl,
+      sample_id: params.sampleId,
+      movement_label: params.strokeName,
+      train_video_id: params.trainVideoId,
+    }),
+  })
+    .then(async (r) => {
+      const body = (await r.json().catch(() => null)) as any;
+      console.log("[Train] Modal trigger response", {
+        sampleId: params.sampleId,
+        statusCode: r.status,
+        bodyStatus: body?.status,
+        bodyMessage: body?.message ?? null,
+      });
+      if (!r.ok || body?.status === "error") {
+        await db
+          .update(trainSample)
+          .set({
+            status: "failed",
+            errorMessage:
+              body?.message ||
+              `Modal trigger failed with HTTP ${r.status}`,
+          })
+          .where(eq(trainSample.id, params.sampleId));
+      }
+    })
+    .catch(async (err: any) => {
+      console.error("[Train] Modal trigger exception", {
+        sampleId: params.sampleId,
+        message: err?.message ?? String(err),
+      });
+      await db
+        .update(trainSample)
+        .set({
+          status: "failed",
+          errorMessage: err?.message || "Modal request failed",
+        })
+        .where(eq(trainSample.id, params.sampleId));
+    });
+}
 
 function assertAdminTrain(req: express.Request, res: express.Response): boolean {
   const expected = ADMIN_SECRET();
@@ -98,14 +266,33 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const strokeName = String(req.body?.strokeName ?? "")
-      .trim()
-      .slice(0, 120);
-    if (!strokeName) {
-      console.log("[Train] Upload rejected: strokeName missing or empty", {
-        bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body) : [],
+    const category = parseCategory(req.body?.category);
+    if (!category) {
+      return res.status(400).json({
+        error:
+          "category must be one of: ground_strokes, net_play, defence_glass, save_return, overhead, tactical_specials",
       });
-      return res.status(400).json({ error: "strokeName is required" });
+    }
+    const strokePreset = parseStrokePreset(req.body?.strokePreset);
+    if (!strokePreset) {
+      return res.status(400).json({
+        error:
+          "strokePreset must be one of: forehand_drive, backhand_drive, forehand_lob, backhand_lob",
+      });
+    }
+    const skillLevel = parseSkillLevel(req.body?.skillLevel);
+    if (!skillLevel) {
+      return res.status(400).json({
+        error: "skillLevel must be one of: beginner, intermediate, advanced",
+      });
+    }
+    const strokeName = buildMovementLabel(strokePreset, category, skillLevel);
+    const viewProfile = parseViewProfile(req.body?.viewProfile);
+    if (!viewProfile) {
+      console.log("[Train] Upload rejected: invalid viewProfile", {
+        raw: req.body?.viewProfile,
+      });
+      return res.status(400).json({ error: "viewProfile must be one of front, side, behind" });
     }
 
     if (!req.file?.buffer) {
@@ -121,6 +308,9 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
 
     console.log("[Train] Accepting upload", {
       userId: `${userId.slice(0, 8)}…`,
+      category,
+      strokePreset,
+      skillLevel,
       strokeName,
       originalname: req.file.originalname,
       mimetype: req.file.mimetype,
@@ -145,26 +335,60 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       id,
       userId,
       strokeName,
+      category,
+      strokePreset,
+      skillLevel,
       cloudinaryPublicId: filePath,
       cloudinaryUrl: publicPath,
       secureUrl: publicPath,
       bytes: String(req.file.size ?? ""),
       format: ext.replace(".", "") || undefined,
     });
+    const viewProfileId = randomUUID();
+    await db.insert(trainVideoViewProfile).values({
+      id: viewProfileId,
+      trainVideoId: id,
+      viewProfile,
+    });
+    const sampleId = randomUUID();
+    await db.insert(trainSample).values({
+      id: sampleId,
+      trainVideoId: id,
+      userId,
+      strokeNameSnapshot: strokeName,
+      status: "queued",
+    });
 
     console.log("[Train] Upload OK — saved and DB row inserted", {
       id,
+      category,
+      strokePreset,
+      skillLevel,
       strokeName,
+      viewProfile,
+      sampleId,
       publicPath,
       bytes: req.file.size,
     });
 
+    await triggerTrainExtraction({
+      sampleId,
+      trainVideoId: id,
+      strokeName,
+      videoPublicPath: publicPath,
+    });
+
     return res.json({
       id,
+      sampleId,
       url: publicPath,
       strokeName,
+      category,
+      strokePreset,
+      skillLevel,
+      viewProfile,
       message:
-        "Stored for training. DELETE /train/video/:id with admin header to remove.",
+        "Stored for training and queued for extraction. DELETE /train/video/:id with admin header to remove.",
     });
   } catch (e: any) {
     console.error("[Train] Upload error (exception):", e?.message ?? e, e?.stack);
@@ -284,6 +508,26 @@ router.get("/video/:id", async (req, res) => {
   } catch (e: any) {
     console.error("[Train] Stream error:", e);
     return res.status(500).json({ error: "Failed to stream video" });
+  }
+});
+
+router.get("/sample/:id", async (req, res) => {
+  try {
+    if (!assertAdminTrain(req, res)) return;
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "Missing id" });
+
+    const row = await db.query.trainSample.findFirst({
+      where: (ts, { and, eq: _eq }) => and(_eq(ts.id, id), _eq(ts.userId, userId)),
+    });
+    if (!row) return res.status(404).json({ error: "Not found" });
+    return res.json(row);
+  } catch (e: any) {
+    console.error("[Train] Sample fetch error:", e);
+    return res.status(500).json({ error: "Failed to fetch sample" });
   }
 });
 
