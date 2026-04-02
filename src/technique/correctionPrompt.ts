@@ -1,3 +1,5 @@
+import type { LabeledPoseFrame } from "./impactPoseContext";
+
 const GEMINI_API_BASE =
   "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_MODEL = "gemini-2.5-flash-image";
@@ -71,6 +73,24 @@ const DEFAULT_SHOT_AND_HANDEDNESS: ShotAndHandedness = {
   },
 };
 
+/** When true, image correction assumes right-handed striker (override classifier). Replace with profile-backed hand later. */
+export const CORRECTION_IMAGES_ASSUME_RIGHT_HANDED = true;
+
+/** Shot classification from GPT + dominant hand used for Gemini (may be forced right-handed). */
+export function mergeCorrectionShotAndHandedness(
+  classified: ShotAndHandedness | null
+): ShotAndHandedness {
+  const shot = classified?.shot ?? DEFAULT_SHOT_AND_HANDEDNESS.shot;
+  const handedness = CORRECTION_IMAGES_ASSUME_RIGHT_HANDED
+    ? {
+        dominant_hand: "right-handed" as const,
+        confidence: 1,
+        evidence: ["assumed_right_handed_for_correction_image"],
+      }
+    : classified?.handedness ?? DEFAULT_SHOT_AND_HANDEDNESS.handedness;
+  return { shot, handedness };
+}
+
 function clampConfidence(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value ?? 0);
   if (!Number.isFinite(n)) return 0;
@@ -84,10 +104,28 @@ function normalizeDominantHand(value: unknown): DominantHand {
   return "unknown";
 }
 
+function formatLandmarksForPrompt(
+  landmarks: FrameLandmarks,
+  poseSequence?: LabeledPoseFrame[] | null
+): string {
+  if (poseSequence && poseSequence.length > 0) {
+    return `POSE SEQUENCE (chronological — user-marked ball impact; infer shot from preparation → impact → follow-through, not from a single idle frame):
+${poseSequence
+  .map(
+    (p) =>
+      `${p.phase.toUpperCase()} (video frame index ${p.frame}):\n${JSON.stringify(p.landmarks, null, 2)}`
+  )
+  .join("\n\n")}`;
+  }
+  return `CURRENT LANDMARKS (single sample — weaker context):
+${JSON.stringify(landmarks, null, 2)}`;
+}
+
 export async function classifyShotAndHandedness(
   recommendations: string[],
   diagnosis: string,
-  landmarks: FrameLandmarks
+  landmarks: FrameLandmarks,
+  poseSequence?: LabeledPoseFrame[] | null
 ): Promise<ShotAndHandedness> {
   const prompt = `You are a world-class padel biomechanics classifier.
 
@@ -99,8 +137,7 @@ ${diagnosis}
 COACH RECOMMENDATIONS:
 ${recommendations.map((r, i) => `${i + 1}. ${r}`).join("\n")}
 
-CURRENT LANDMARKS:
-${JSON.stringify(landmarks, null, 2)}
+${formatLandmarksForPrompt(landmarks, poseSequence)}
 
 Output ONLY valid JSON matching:
 {
@@ -127,8 +164,10 @@ Output ONLY valid JSON matching:
 }
 
 Rules:
+- When a POSE SEQUENCE is provided, weight preparation + impact + follow-through together; the impact-phase sample is closest to ball contact — do not classify from a random frame that might be standing still before the swing.
 - Preserve left-handed interpretation if evidence indicates left dominance.
 - Do NOT use camera-left/camera-right as forehand/backhand by itself.
+- Base handedness and shot type on pose, racket/body orientation, and movement — not on hairstyle, hair length, clothing style, or other appearance stereotypes.
 - If uncertain, return "unknown" with lower confidence.
 - Return JSON only.`;
 
@@ -198,9 +237,10 @@ Rules:
 export async function translateRecommendationsToDeltas(
   recommendations: string[],
   diagnosis: string,
-  landmarks: FrameLandmarks
+  landmarks: FrameLandmarks,
+  poseSequence?: LabeledPoseFrame[] | null
 ): Promise<LandmarkDelta[]> {
-  const prompt = `You are a sports biomechanics expert. Given these padel coach recommendations and the player's current body landmark positions (normalized 0-1, origin top-left of video frame), output a JSON array of specific landmark adjustments needed.
+  const prompt = `You are a sports biomechanics expert. Given these padel coach recommendations and the player's body landmark positions (normalized 0-1, origin top-left of video frame), output a JSON array of specific landmark adjustments needed.
 
 COACH DIAGNOSIS:
 ${diagnosis}
@@ -208,8 +248,7 @@ ${diagnosis}
 COACH RECOMMENDATIONS:
 ${recommendations.map((r, i) => `${i + 1}. ${r}`).join("\n")}
 
-CURRENT LANDMARKS:
-${JSON.stringify(landmarks, null, 2)}
+${formatLandmarksForPrompt(landmarks, poseSequence)}
 
 Respond ONLY with a valid JSON array matching this schema:
 [
@@ -228,6 +267,12 @@ Rules:
 - direction: "increase" or "decrease"
 - magnitude: "small" (subtle tweak), "moderate" (noticeable change), "large" (significant repositioning)
 - Focus on the 3-5 most impactful corrections
+- Keep adjustments local to posture (limbs, torso, hips, shoulders); do not imply moving the player to a different court position or side of the frame.
+- Do not use head, nose, ear, or eye landmarks to change gaze or head angle — assume the player already looks at the ball; focus corrections from the neck down.
+- Preserve the same phase of the shot as in the landmarks (e.g. overhead reach stays overhead — do not phrase deltas as if the player should drop into a neutral ready stance or wait for serve).
+- If the pose is overhead preparation (lean, racket loaded behind), deltas must only tweak mechanics within that arc — never imply standing tall with racket down or in front as if the ball has not arrived.
+- If landmarks imply impact or mid-swing, do not phrase corrections as if the moment were pre-contact or reception only — stay in the same instant of the stroke.
+- Output only skeletal/pose adjustments for biomechanics — never recommendations about hair, face, clothing, or identity.
 - Only respond with valid JSON, no markdown, no explanation`;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -288,9 +333,9 @@ export async function generateCorrectedImage(
   shotAndHandedness?: ShotAndHandedness | null
 ): Promise<string | null> {
   const instructions = deltasToInstructions(deltas);
-  const shot = shotAndHandedness?.shot ?? DEFAULT_SHOT_AND_HANDEDNESS.shot;
-  const handedness =
-    shotAndHandedness?.handedness ?? DEFAULT_SHOT_AND_HANDEDNESS.handedness;
+  const { shot, handedness } = mergeCorrectionShotAndHandedness(
+    shotAndHandedness ?? null
+  );
 
   const textPrompt = `You are a sports visualization engine that creates photorealistic corrected-pose images for athletes.
 
@@ -317,16 +362,39 @@ ${instructions}
 TASK:
 Regenerate this EXACT image — same person, same clothing, same court, same camera angle, same lighting, same background — but adjust ONLY the player's body position to reflect the corrections above.
 
-The result must look like a real photograph of the same person in the same environment, just with improved body mechanics. Do NOT change clothing, face, court, or surroundings. Do NOT add text, labels, or overlays.`;
+Keep the player anchored in the same spot on the court and in the frame: small joint and posture fixes only — do NOT move or "teleport" the athlete to another side of the court, another zone, or a different place in the image (that breaks alignment with the original for comparison views).
+
+Preserve the SAME moment of play as the source: if the player is reaching overhead, tracking upward, or preparing a specific stroke, keep that action — do NOT re-stage them into a different phase (e.g. neutral "ready" stance, waiting for serve, or relaxed waiting). Keep racket height intent and body lean consistent with the stroke.
+
+HEAD AND EYE LINE (source of truth): Copy the head, neck, face, and apparent eye direction from the source frame exactly — do NOT rotate or tilt the head, redirect the gaze, lift the chin, or "fix" where they are looking. They are already tracking the ball; treat head/eye line as fixed and apply corrections to shoulders, torso, arms, hips, and legs only.
+
+IMPACT / CONTACT: If the source shows the ball at or near the racket, mid-swing, motion blur, or the hitting moment, you MUST keep that same impact instant — this product teaches how to strike the ball better, not a generic stance. Refine joint angles and posture only; do NOT replace a dynamic hit with a passive "waiting for the ball" pose. Preserve ball–racket relationship when both appear, and preserve the sense of motion (blur) if present.
+
+OVERHEAD / SWING ARC (critical): If the source shows preparation for an overhead (smash, bandeja, high volley prep) — e.g. body leaning back, racket loaded behind the head or shoulders, non-hitting arm up for balance/tracking, eyes on an incoming ball above — you MUST keep that full athletic arc and loading. Do NOT collapse this into an upright "the ball has not arrived yet" or neutral ready stance with the racket low or parked in front. The player must still be arcing to strike, not passively waiting for play to start.
+
+COURT FLOOR: Do NOT add, extend, remove, or redraw white lines, service boxes, T-lines, or any painted markings on the blue court. The visible floor graphics must match the source; never hallucinate extra line art on the surface.
+
+SCALE AND FRAMING: Match the source image's zoom and composition exactly — the player must NOT appear larger, smaller, closer, or farther from the camera. Same apparent size in the frame (height/width footprint) as the reference; no crop change, no digital zoom, no "hero shot" enlargement. This is required for side-by-side before/after alignment.
+
+The result must look like a real photograph of the same individual in the same environment, just with improved body mechanics. Hair is frozen to the source: same length, cut, and volume — never lengthen, restyle, or add flowing hair. Match the reference frame for face, hair, apparent age, body build, and gender presentation — do not gender-swap, de-age, "beautify," or change hair length or hairstyle (e.g. short hair must remain short). Do NOT change clothing, face identity, court, or surroundings. Do NOT add or remove the padel racket or the ball — if there is no ball in the source frame, the output must not show a ball. Do NOT add text, labels, or overlays.`;
 
   const invariantBlock = `
 NON-NEGOTIABLE INVARIANTS:
-1) Preserve player identity, clothing, court, camera angle, and lighting.
-2) Preserve dominant hand exactly (${handedness.dominant_hand}); do NOT mirror left/right body mechanics.
-3) Keep the racket visible and attached to the dominant-hand side.
-4) Interpret forehand/backhand from player orientation (player-centric), not image left/right.
-5) Only modify biomechanical posture needed for corrections; keep all other details unchanged.
-6) Do not add text, labels, watermarks, skeleton overlays, or extra objects.`;
+1) Preserve player identity: same face, skin tone, apparent age, and body build as the input image.
+2) HAIR FREEZE — Hair length, cut, color, and volume must match the source image exactly. Do NOT lengthen, shorten, restyle, or add flowing/long hair; short or voluminous hair must stay that way. Do not "beautify" or salon-style the hair. This is a hard requirement.
+3) APPEARANCE LOCK — match the input photo exactly for: facial hair; glasses, hat, headband, or jewelry; visible clothing and shoes. Do not invent makeup or accessories that are not in the source.
+4) Do not change apparent gender presentation or demographics; do not replace the athlete with a different-looking person.
+5) Preserve clothing, court, camera angle, and lighting. Do NOT edit the environment: no new white lines, service boxes, or court markings on the blue surface; no redrawn floor graphics — match the source floor exactly.
+6) SPATIAL LOCK — The player stays in the same court position and the same region of the image as the source. Do NOT translate or relocate the whole body to a different side of the court, different depth, or different lateral position. Adjust limbs, torso, hips, and shoulders within that fixed footprint; existing visible court lines, net, glass, and walls must align with the source — no sliding the figure across the scene, and do not add lines that were not in the source.
+7) HEAD, FACE, AND EYE-LINE FREEZE — Match head orientation, neck angle, face, and where the eyes appear to look from the source pixel-for-pixel in intent. Do NOT change gaze direction, head tilt, or facial pose to "improve" tracking; the source already shows correct ball focus. No new facial expression or eye line.
+8) SCALE AND FRAMING LOCK — Match the reference image's field of view and scale exactly. Do NOT zoom, crop differently, or change the player's apparent size (no making the athlete larger/taller in frame or closer to camera). Output must overlay the original for comparison: same pixel extent of the figure, same camera distance feel.
+9) MOMENT AND SWING-ARC LOCK — Preserve the same phase of play and tactical intent as the source. If the player is in overhead preparation (lean back, racket behind head/shoulders) or mid-swing, keep that full athletic shape — do NOT collapse into a neutral upright stance, hands-and-racket low in front, or passive reception. Preserve body lean and racket load height; do not re-choreograph into a different stroke moment. Head/eye line stay per (7), not reinterpreted by the model.
+10) IMPACT AND CONTACT LOCK — The lesson is better ball striking; the output must show the SAME stroke instant as the source (impact, contact, ball near racket, OR the same preparation/arc if that is what the frame shows). If the source shows a hit or pre-hit loaded arc, keep that — same ball–racket relationship when visible, same swing phase. Do NOT remove the hit or the overhead arc to produce a static waiting pose. Do not "sanitize" motion blur into a stiff catalog pose unless the source was already static.
+11) Preserve dominant hand exactly (${handedness.dominant_hand}); do NOT mirror left/right body mechanics.
+12) PADEL RACKET AND BALL — Do not add or remove equipment. If the source frame has no visible ball, do NOT add a ball. If a ball is visible, keep it (do not erase it). If the padel racket is not in the frame, do NOT add one; if it is visible, do NOT remove it or replace it with a different racket. Only adjust pose; equipment inventory must match the source image.
+13) Interpret forehand/backhand from player orientation (player-centric), not image left/right.
+14) Only modify biomechanical posture needed for corrections (below the neck / without altering head pose per (7)); no cosmetic or stylistic changes.
+15) Do not add text, labels, watermarks, skeleton overlays, or extra objects.`;
 
   const parts: any[] = [
     { text: `${textPrompt}\n\n${invariantBlock}` },

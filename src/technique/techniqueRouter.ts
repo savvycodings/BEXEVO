@@ -11,12 +11,18 @@ import { extractFrame, resolveVideoPath } from './frameExtractor'
 import {
   translateRecommendationsToDeltas,
   classifyShotAndHandedness,
+  mergeCorrectionShotAndHandedness,
   generateCorrectedImage,
   type FrameLandmarks,
   type CorrectionResult,
   type ShotAndHandedness,
 } from './correctionPrompt'
 import { calibrateTechniqueScore } from './scoreCalibration'
+import {
+  buildImpactPoseSequenceForMetrics,
+  resolveVideoDurationMsForImpact,
+  type LabeledPoseFrame,
+} from './impactPoseContext'
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024
 const upload = multer({
@@ -303,7 +309,11 @@ router.post('/analyze', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { techniqueVideoId } = req.body as { techniqueVideoId?: string }
+    const { techniqueVideoId, clips, videoDurationMs } = req.body as {
+      techniqueVideoId?: string
+      clips?: Array<{ startMs: number; endMs: number }>
+      videoDurationMs?: number
+    }
     if (!techniqueVideoId) {
       return res.status(400).json({ error: 'Missing techniqueVideoId' })
     }
@@ -393,20 +403,55 @@ router.post('/analyze', async (req, res) => {
       return res.status(500).json({ error: 'MediaPipe analysis failed' })
     }
 
-    const metrics = modalRes.metrics
+    let metrics: any = { ...modalRes.metrics }
+    const poseDataEarly = metrics.pose_data as
+      | Array<{ frame: number; landmarks: FrameLandmarks }>
+      | undefined
+    const clipList =
+      Array.isArray(clips) && clips.length > 0 ? clips : undefined
+    const vdur = resolveVideoDurationMsForImpact(
+      videoDurationMs,
+      metrics.total_frames ?? 0,
+      poseDataEarly
+    )
+    if (clipList && vdur) {
+      const seq = buildImpactPoseSequenceForMetrics(
+        metrics.pose_data,
+        metrics.total_frames ?? 0,
+        vdur,
+        clipList
+      )
+      const clientSentDuration =
+        typeof videoDurationMs === 'number' && videoDurationMs > 0
+      metrics = {
+        ...metrics,
+        video_duration_ms: vdur,
+        user_clips: clipList,
+        video_duration_ms_source: clientSentDuration ? 'client' : 'inferred',
+        ...(seq?.length ? { impact_pose_sequence: seq } : {}),
+      }
+    }
+
     console.log('[Technique] Modal metrics received', {
       analysisId,
       summary: {
         total_frames: metrics?.total_frames,
         analyzed_frames: metrics?.analyzed_frames,
         pose_samples: Array.isArray(metrics?.pose_data) ? metrics.pose_data.length : 0,
+        impact_sequence_phases: metrics?.impact_pose_sequence?.length ?? 0,
       },
     })
     let aiAnalysis: any = null
     let feedbackText: string | null = null
 
     try {
-      const poseSummary = JSON.stringify(metrics.pose_data ?? [])
+      const poseSummary = metrics.impact_pose_sequence?.length
+        ? JSON.stringify({
+            note: 'User marked ball impact (clip end). Phases: preparation → impact (nearest frame to impact) → follow-through. Prefer this sequence for shot type and movement.',
+            impact_pose_sequence: metrics.impact_pose_sequence,
+            all_pose_samples: metrics.pose_data ?? [],
+          })
+        : JSON.stringify(metrics.pose_data ?? [])
       const prompt = `
 Analyze the video strictly from a padel coaching perspective, not general biomechanics.
 
@@ -806,6 +851,30 @@ router.post('/correction-images', async (req, res) => {
         .json({ error: 'No pose data or AI analysis available' })
     }
 
+    let poseSequence = metrics?.impact_pose_sequence as
+      | LabeledPoseFrame[]
+      | undefined
+    const durationForRebuild = resolveVideoDurationMsForImpact(
+      typeof metrics?.video_duration_ms === 'number'
+        ? metrics.video_duration_ms
+        : undefined,
+      metrics?.total_frames ?? 0,
+      poseData
+    )
+    if (
+      (!poseSequence || poseSequence.length === 0) &&
+      metrics?.user_clips?.length &&
+      durationForRebuild
+    ) {
+      poseSequence =
+        buildImpactPoseSequenceForMetrics(
+          poseData,
+          metrics?.total_frames ?? 0,
+          durationForRebuild,
+          metrics.user_clips
+        ) ?? undefined
+    }
+
     const video = await db.query.techniqueVideo.findFirst({
       where: (tv, { eq: _eq }) => _eq(tv.id, analysis.techniqueVideoId),
     })
@@ -833,6 +902,16 @@ router.post('/correction-images', async (req, res) => {
     const framesToGenerate = requestedFrames.filter(
       (f) => !cachedByFrame.has(f.frame)
     )
+
+    const impactFrameNum = poseSequence?.find((p) => p.phase === 'impact')?.frame
+    if (impactFrameNum != null && framesToGenerate.length > 1) {
+      framesToGenerate.sort(
+        (a, b) =>
+          Math.abs(a.frame - impactFrameNum) -
+          Math.abs(b.frame - impactFrameNum)
+      )
+    }
+
     if (framesToGenerate.length === 0) {
       const responseCorrections = requestedFrameIndices
         ? orderCorrectionsByFrames(cachedByFrame, requestedFrameIndices)
@@ -846,15 +925,21 @@ router.post('/correction-images', async (req, res) => {
       frames: framesToGenerate.map((f) => f.frame),
     })
 
+    const landmarksForGpt =
+      poseSequence?.find((p) => p.phase === 'impact')?.landmarks ??
+      framesToGenerate[0].landmarks
+
     const deltas = await translateRecommendationsToDeltas(
       enAnalysis.recommendations ?? [],
       enAnalysis.diagnosis ?? '',
-      framesToGenerate[0].landmarks
+      landmarksForGpt,
+      poseSequence ?? null
     )
 
     console.log('[Technique] GPT landmark deltas', {
       deltaCount: deltas.length,
       deltas: deltas.map((d) => `${d.landmark} ${d.axis} ${d.direction}`),
+      usedImpactSequence: !!poseSequence?.length,
     })
 
     let shotAndHandedness: ShotAndHandedness | null = null
@@ -862,7 +947,8 @@ router.post('/correction-images', async (req, res) => {
       shotAndHandedness = await classifyShotAndHandedness(
         enAnalysis.recommendations ?? [],
         enAnalysis.diagnosis ?? '',
-        framesToGenerate[0].landmarks
+        landmarksForGpt,
+        poseSequence ?? null
       )
       console.log('[Technique] Shot + handedness classification', {
         shot: shotAndHandedness.shot.shot_name,
@@ -875,6 +961,13 @@ router.post('/correction-images', async (req, res) => {
       console.error('[Technique] Shot/handedness classification failed', classificationErr)
       shotAndHandedness = null
     }
+
+    const shotAndHandednessForImages =
+      mergeCorrectionShotAndHandedness(shotAndHandedness)
+    console.log('[Technique] Correction image handedness (effective)', {
+      classified: shotAndHandedness?.handedness?.dominant_hand,
+      effective: shotAndHandednessForImages.handedness.dominant_hand,
+    })
 
     const corrections: CorrectionResult[] = []
 
@@ -909,7 +1002,7 @@ router.post('/correction-images', async (req, res) => {
               deltas,
               enAnalysis.diagnosis ?? '',
               enAnalysis.recommendations ?? [],
-              shotAndHandedness
+              shotAndHandednessForImages
             )
 
             const originalDataUri = `data:image/png;base64,${frameBase64}`
@@ -958,7 +1051,8 @@ router.post('/correction-images', async (req, res) => {
         generated_at: new Date().toISOString(),
         frame_count: mergedCorrections.length,
         frame_indices: frameIndicesForContext,
-        shot_and_handedness: shotAndHandedness,
+        shot_and_handedness: shotAndHandednessForImages,
+        shot_and_handedness_classified: shotAndHandedness,
       }
       const updatedMetrics = {
         ...metrics,

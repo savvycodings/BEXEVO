@@ -50,6 +50,16 @@ export type TechniqueCorrectionContext = {
 export type TechniqueAnalysisMetrics = {
   total_frames?: number;
   analyzed_frames?: number;
+  /** Client-reported duration; used with user clips to anchor impact frame. */
+  video_duration_ms?: number;
+  /** Clips from technique UI (impact = clip endMs). */
+  user_clips?: Array<{ startMs: number; endMs: number }>;
+  /** Preparation / impact / follow-through samples derived from pose_data + impact time. */
+  impact_pose_sequence?: Array<{
+    phase: "preparation" | "impact" | "follow_through";
+    frame: number;
+    landmarks: Record<string, { x: number; y: number }>;
+  }>;
   pose_data?: Array<{
     frame: number;
     landmarks: Record<string, { x: number; y: number }>;
