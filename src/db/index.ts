@@ -8,7 +8,7 @@ if (!connectionString) {
   throw new Error("DATABASE_URL is not set");
 }
 
-const pool = new Pool({ connectionString });
+export const pool = new Pool({ connectionString });
 
 export const db = drizzle(pool, { schema });
 export * from "./schema";

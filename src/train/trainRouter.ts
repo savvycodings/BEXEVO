@@ -16,6 +16,10 @@ import { fromNodeHeaders } from "better-auth/node";
 import { auth } from "../auth";
 import { db, trainSample, trainVideo, trainVideoViewProfile } from "../db";
 import { eq } from "drizzle-orm";
+import {
+  runTrainEmbeddingBackfill,
+  indexTrainSampleEmbeddingIfReady,
+} from "../technique/trainRetrieval";
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const upload = multer({
@@ -187,6 +191,8 @@ async function triggerTrainExtraction(params: {
               `Modal trigger failed with HTTP ${r.status}`,
           })
           .where(eq(trainSample.id, params.sampleId));
+      } else if (body?.status === "success") {
+        await indexTrainSampleEmbeddingIfReady(params.sampleId);
       }
     })
     .catch(async (err: any) => {
@@ -508,6 +514,30 @@ router.get("/video/:id", async (req, res) => {
   } catch (e: any) {
     console.error("[Train] Stream error:", e);
     return res.status(500).json({ error: "Failed to stream video" });
+  }
+});
+
+/** Build pgvector rows for all completed train_sample pose sequences (admin). Run after migration 0011 + Neon `vector` extension. */
+router.post("/embeddings/backfill", async (req, res) => {
+  try {
+    if (!assertAdminTrain(req, res)) return;
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const out = await runTrainEmbeddingBackfill();
+    return res.json({
+      ok: true,
+      ...out,
+      specVersion: "v1",
+      dims: 128,
+    });
+  } catch (e: any) {
+    console.error("[Train] Embeddings backfill error:", e);
+    return res.status(500).json({
+      error: e?.message || "Backfill failed",
+      hint: "Ensure migration 0011 ran and CREATE EXTENSION vector is allowed on this database.",
+    });
   }
 });
 

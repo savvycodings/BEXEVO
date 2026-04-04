@@ -112,3 +112,22 @@ export function calibrateTechniqueScore(analysis: AnalysisLike): number {
   return Math.round(clampScore(adjusted))
 }
 
+/**
+ * When the closest pro-library clip is tagged `advanced`, keep the technique score in 8–10 only
+ * (excellent band). Stops very low calibrated scores next to an advanced reference.
+ */
+export function applyProLibraryTierScoreConstraint(
+  calibratedScore: number,
+  topNeighborSkillLevel: string | undefined | null
+): number {
+  if (!Number.isFinite(calibratedScore)) return calibratedScore
+  const rounded = Math.round(clampScore(calibratedScore))
+  const level = String(topNeighborSkillLevel ?? '')
+    .toLowerCase()
+    .trim()
+  if (level === 'advanced') {
+    return Math.max(8, Math.min(10, rounded))
+  }
+  return rounded
+}
+

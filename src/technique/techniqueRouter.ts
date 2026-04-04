@@ -17,12 +17,23 @@ import {
   type CorrectionResult,
   type ShotAndHandedness,
 } from './correctionPrompt'
-import { calibrateTechniqueScore } from './scoreCalibration'
+import {
+  calibrateTechniqueScore,
+  applyProLibraryTierScoreConstraint,
+} from './scoreCalibration'
 import {
   buildImpactPoseSequenceForMetrics,
   resolveVideoDurationMsForImpact,
   type LabeledPoseFrame,
 } from './impactPoseContext'
+import {
+  retrieveForTechniqueMetrics,
+  formatRetrievalForPrompt,
+} from './trainRetrieval'
+import {
+  downsamplePoseFramesForPrompt,
+  MAX_POSE_FRAMES_IN_GPT_PROMPT,
+} from './poseEmbedding'
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024
 const upload = multer({
@@ -441,19 +452,29 @@ router.post('/analyze', async (req, res) => {
         impact_sequence_phases: metrics?.impact_pose_sequence?.length ?? 0,
       },
     })
+
+    const retrieval = await retrieveForTechniqueMetrics(metrics)
+    metrics = { ...metrics, retrieval }
+
     let aiAnalysis: any = null
     let feedbackText: string | null = null
 
     try {
+      const poseDataForPrompt = downsamplePoseFramesForPrompt(
+        metrics.pose_data,
+        MAX_POSE_FRAMES_IN_GPT_PROMPT
+      )
       const poseSummary = metrics.impact_pose_sequence?.length
         ? JSON.stringify({
             note: 'User marked ball impact (clip end). Phases: preparation → impact (nearest frame to impact) → follow-through. Prefer this sequence for shot type and movement.',
             impact_pose_sequence: metrics.impact_pose_sequence,
-            all_pose_samples: metrics.pose_data ?? [],
+            all_pose_samples: poseDataForPrompt,
           })
-        : JSON.stringify(metrics.pose_data ?? [])
+        : JSON.stringify(poseDataForPrompt)
       const prompt = `
 Analyze the video strictly from a padel coaching perspective, not general biomechanics.
+
+${formatRetrievalForPrompt(metrics.retrieval)}
 
 Here is the pose data from several frames of the video (x,y coordinates are normalized 0-1, where 0,0 is top-left):
 
@@ -462,7 +483,7 @@ ${poseSummary}
 First, identify the type of shot (forehand, backhand, volley, bandeja, vibora, smash, etc.) based on context, contact point, and player positioning on court.
 
 Track the player's movement from preparation -> execution -> follow-through -> recovery, ensuring the entire body is analyzed, including:
-- Both arms (dominant and non-dominant)
+- Both arms (racket arm and support arm)
 - Racket (pala) path and angle
 - Shoulder and hip rotation
 - Footwork and stance
@@ -473,7 +494,7 @@ Evaluate technique specifically for padel efficiency, focusing on:
 - Preparation timing (early/late)
 - Compact vs excessive swing (important in padel)
 - Contact point relative to body and ball height
-- Use of non-dominant arm for balance and rotation
+- Use of the support arm for balance and rotation
 - Racket face control (open/closed)
 
 Analyze footwork using padel-specific movement patterns, such as:
@@ -567,6 +588,7 @@ Rules:
 - Assume the player is an intermediate-level padel player and tailor feedback to realistic improvements.
 - Write all feedback in a personal coaching voice, directly to the user (second person): use "you/your" in English and second person in Spanish.
 - Do not use third-person phrasing such as "the player", "they", or equivalent third-person constructions.
+- Do not mention handedness or which side the user plays: never say or imply left-handed, right-handed, left hand, right hand, left arm, right arm, dominant hand, or non-dominant hand in any user-facing text (all "en" and "es" fields including diagnosis, shot_context, strengths, technical_errors, actionable_corrections, observations, recommendations). Use neutral coaching terms only, such as racket arm, support arm, forehand or backhand, your swing, or contact side.
 - Never use em dashes in any output text.
 - First decide whether this is genuinely a Padel action context based on movement patterns.
 - Shot labeling discipline:
@@ -595,6 +617,7 @@ Rules:
         },
         body: JSON.stringify({
           model: 'gpt-5-mini-2025-08-07',
+          // gpt-5-mini only allows the default temperature (1); omit explicit temperature.
           response_format: { type: 'json_object' },
           messages: [
             {
@@ -632,11 +655,16 @@ Rules:
 
       if (typeof aiAnalysis?.score === 'number') {
         const modelRawScore = Math.max(0, Math.min(10, Number(aiAnalysis.score)))
-        const s = calibrateTechniqueScore({
+        const calibrated = calibrateTechniqueScore({
           ...aiAnalysis,
           score: modelRawScore,
         })
+        const topProSkill =
+          metrics?.retrieval?.neighbors?.[0]?.skill_level ??
+          metrics?.retrieval?.shot_hypothesis?.skill_level
+        const s = applyProLibraryTierScoreConstraint(calibrated, topProSkill)
         aiAnalysis.score_model_raw = Math.round(modelRawScore)
+        aiAnalysis.score_calibrated_before_pro_tier = calibrated
         aiAnalysis.score = s
         aiAnalysis.rating =
           s >= 8 ? 'excellent' : s >= 6 ? 'good' : s >= 3 ? 'needs_improvement' : 'poor'
@@ -687,6 +715,8 @@ Rules:
           : 0,
         ai_score: combinedMetrics?.ai_analysis?.score,
         ai_rating: combinedMetrics?.ai_analysis?.rating,
+        retrieval_confidence: combinedMetrics?.retrieval?.shot_hypothesis?.confidence,
+        retrieval_shot: combinedMetrics?.retrieval?.shot_hypothesis?.stroke_preset,
       },
     })
 
@@ -743,7 +773,70 @@ router.get('/analysis/:id', async (req, res) => {
   }
 })
 
-const MAX_CONCURRENT_FRAMES = 3
+/** Gemini image generation is heavy; parallel calls often fail with "fetch failed" / 429 — run sequentially. */
+const MAX_CONCURRENT_FRAMES = 1
+/** Cap generated / returned correction images to control image-model cost. */
+const MAX_CORRECTION_IMAGE_FRAMES = 5
+
+type PoseFrameRow = { frame: number; landmarks: FrameLandmarks }
+
+/** Evenly sample pose frames across the clip (spread of the motion). */
+function selectPoseFramesForCorrections(
+  poseData: PoseFrameRow[],
+  maxFrames: number
+): PoseFrameRow[] {
+  const sorted = [...poseData].sort((a, b) => a.frame - b.frame)
+  const n = sorted.length
+  if (n <= maxFrames) return sorted
+  const picked: PoseFrameRow[] = []
+  const seen = new Set<number>()
+  for (let k = 0; k < maxFrames; k++) {
+    const i = Math.round((k / (maxFrames - 1)) * (n - 1))
+    const p = sorted[i]
+    if (!seen.has(p.frame)) {
+      seen.add(p.frame)
+      picked.push(p)
+    }
+  }
+  let idx = 0
+  while (picked.length < maxFrames && idx < n) {
+    const p = sorted[idx++]
+    if (!seen.has(p.frame)) {
+      seen.add(p.frame)
+      picked.push(p)
+    }
+  }
+  return picked.sort((a, b) => a.frame - b.frame)
+}
+
+/** If metrics already hold more (legacy), return at most maxFrames spread across time. */
+function limitCorrectionsToMaxFrames<T extends { frame: number }>(
+  corrections: T[],
+  maxFrames: number
+): T[] {
+  if (corrections.length <= maxFrames) return corrections
+  const sorted = [...corrections].sort((a, b) => a.frame - b.frame)
+  const n = sorted.length
+  const picked: T[] = []
+  const seen = new Set<number>()
+  for (let k = 0; k < maxFrames; k++) {
+    const i = Math.round((k / (maxFrames - 1)) * (n - 1))
+    const c = sorted[i]
+    if (!seen.has(c.frame)) {
+      seen.add(c.frame)
+      picked.push(c)
+    }
+  }
+  let idx = 0
+  while (picked.length < maxFrames && idx < n) {
+    const c = sorted[idx++]
+    if (!seen.has(c.frame)) {
+      seen.add(c.frame)
+      picked.push(c)
+    }
+  }
+  return picked.sort((a, b) => a.frame - b.frame)
+}
 
 function looksLikeBadCachedCorrections(
   corrections: Array<{ frame: number; originalImage: string; correctedImage: string }>
@@ -781,7 +874,9 @@ router.post('/correction-images', async (req, res) => {
       frameIndices?: number[]
     }
     const requestedFrameIndices = Array.isArray(frameIndices)
-      ? Array.from(new Set(frameIndices.filter((f) => Number.isFinite(f))))
+      ? Array.from(
+          new Set(frameIndices.filter((f) => Number.isFinite(f)))
+        ).slice(0, MAX_CORRECTION_IMAGE_FRAMES)
       : null
 
     if (!analysisId) {
@@ -812,11 +907,15 @@ router.post('/correction-images', async (req, res) => {
         )
 
         if (!requestedFrameIndices || requestedFrameIndices.length === 0) {
+          const limited = limitCorrectionsToMaxFrames(
+            cachedCorrections,
+            MAX_CORRECTION_IMAGE_FRAMES
+          )
           console.log('[Technique] Returning cached correction images', {
             analysisId,
-            count: cachedCorrections.length,
+            count: limited.length,
           })
-          return res.json({ corrections: cachedCorrections })
+          return res.json({ corrections: limited })
         }
 
         const cachedRequested = orderCorrectionsByFrames(
@@ -888,9 +987,12 @@ router.post('/correction-images', async (req, res) => {
       return res.status(404).json({ error: 'Video file missing from disk' })
     }
 
-    const requestedFrames = requestedFrameIndices
-      ? poseData.filter((p) => requestedFrameIndices.includes(p.frame))
-      : poseData
+    const requestedFrames: PoseFrameRow[] =
+      requestedFrameIndices && requestedFrameIndices.length > 0
+        ? requestedFrameIndices
+            .map((fi) => poseData.find((p) => p.frame === fi))
+            .filter((p): p is PoseFrameRow => !!p)
+        : selectPoseFramesForCorrections(poseData, MAX_CORRECTION_IMAGE_FRAMES)
 
     if (requestedFrames.length === 0) {
       return res.status(400).json({ error: 'No matching frames found' })
@@ -913,10 +1015,13 @@ router.post('/correction-images', async (req, res) => {
     }
 
     if (framesToGenerate.length === 0) {
-      const responseCorrections = requestedFrameIndices
-        ? orderCorrectionsByFrames(cachedByFrame, requestedFrameIndices)
-        : cachedCorrections
-      return res.json({ corrections: responseCorrections })
+      const raw =
+        requestedFrameIndices && requestedFrameIndices.length > 0
+          ? orderCorrectionsByFrames(cachedByFrame, requestedFrameIndices)
+          : cachedCorrections
+      return res.json({
+        corrections: limitCorrectionsToMaxFrames(raw, MAX_CORRECTION_IMAGE_FRAMES),
+      })
     }
 
     console.log('[Technique] Generating correction images', {
@@ -1036,16 +1141,20 @@ router.post('/correction-images', async (req, res) => {
     const mergedByFrame = new Map<number, CorrectionResult>()
     for (const c of cachedCorrections) mergedByFrame.set(c.frame, c)
     for (const c of corrections) mergedByFrame.set(c.frame, c)
-    const mergedCorrections = Array.from(mergedByFrame.values()).sort(
-      (a, b) => a.frame - b.frame
+    const mergedCorrections = limitCorrectionsToMaxFrames(
+      Array.from(mergedByFrame.values()).sort((a, b) => a.frame - b.frame),
+      MAX_CORRECTION_IMAGE_FRAMES
     )
     const responseCorrections =
       requestedFrameIndices && requestedFrameIndices.length > 0
-        ? orderCorrectionsByFrames(mergedByFrame, requestedFrameIndices)
+        ? orderCorrectionsByFrames(
+            new Map(mergedCorrections.map((c) => [c.frame, c] as const)),
+            requestedFrameIndices
+          )
         : mergedCorrections
 
     try {
-      const frameIndicesForContext = requestedFrames.map((f) => f.frame)
+      const frameIndicesForContext = mergedCorrections.map((c) => c.frame)
       const correctionContext = {
         version: 'shot-handedness-v1',
         generated_at: new Date().toISOString(),

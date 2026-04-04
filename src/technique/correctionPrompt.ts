@@ -3,6 +3,12 @@ import type { LabeledPoseFrame } from "./impactPoseContext";
 const GEMINI_API_BASE =
   "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_MODEL = "gemini-2.5-flash-image";
+const GEMINI_IMAGE_MAX_ATTEMPTS = 4;
+const GEMINI_RETRY_BASE_MS = 900;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export type Landmark = { x: number; y: number };
 export type FrameLandmarks = Record<string, Landmark>;
@@ -407,42 +413,93 @@ NON-NEGOTIABLE INVARIANTS:
   ];
 
   const apiKey = process.env.GEMINI_API_KEY || "";
-  const response = await fetch(
-    `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          responseModalities: ["IMAGE"],
-        },
-      }),
-    }
-  );
-
-  const data = (await response.json()) as any;
-  const responseParts = data?.candidates?.[0]?.content?.parts || [];
-
-  const imagePart = responseParts.find((part: any) => {
-    const inlineData = part?.inlineData || part?.inline_data;
-    return inlineData?.data;
+  const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent`;
+  const body = JSON.stringify({
+    contents: [{ parts }],
+    generationConfig: {
+      responseModalities: ["IMAGE"],
+    },
   });
 
-  const inlineData = imagePart?.inlineData || imagePart?.inline_data;
-  if (!inlineData?.data) {
-    console.error(
-      "[CorrectionPrompt] Gemini returned no image for frame",
-      frameNumber,
-      JSON.stringify(data).slice(0, 500)
-    );
-    return null;
+  for (let attempt = 1; attempt <= GEMINI_IMAGE_MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body,
+      });
+
+      const rawText = await response.text();
+      let data: any = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        data = { _parseError: true, raw: rawText.slice(0, 200) };
+      }
+
+      if (!response.ok) {
+        const retryable =
+          response.status === 429 ||
+          response.status === 408 ||
+          response.status >= 500;
+        console.warn("[CorrectionPrompt] Gemini HTTP error", {
+          frameNumber,
+          status: response.status,
+          attempt,
+          retryable,
+          snippet: rawText.slice(0, 200),
+        });
+        if (retryable && attempt < GEMINI_IMAGE_MAX_ATTEMPTS) {
+          await sleep(GEMINI_RETRY_BASE_MS * attempt * attempt);
+          continue;
+        }
+        return null;
+      }
+
+      const responseParts = data?.candidates?.[0]?.content?.parts || [];
+
+      const imagePart = responseParts.find((part: any) => {
+        const inlineData = part?.inlineData || part?.inline_data;
+        return inlineData?.data;
+      });
+
+      const inlineData = imagePart?.inlineData || imagePart?.inline_data;
+      if (!inlineData?.data) {
+        const emptyRetryable =
+          attempt < GEMINI_IMAGE_MAX_ATTEMPTS &&
+          (data?.error?.code === 429 ||
+            data?.error?.status === "RESOURCE_EXHAUSTED");
+        console.error(
+          "[CorrectionPrompt] Gemini returned no image for frame",
+          frameNumber,
+          JSON.stringify(data).slice(0, 500)
+        );
+        if (emptyRetryable) {
+          await sleep(GEMINI_RETRY_BASE_MS * attempt * attempt);
+          continue;
+        }
+        return null;
+      }
+
+      const outMime =
+        inlineData.mimeType || inlineData.mime_type || "image/png";
+      return `data:${outMime};base64,${inlineData.data}`;
+    } catch (err: any) {
+      console.warn("[CorrectionPrompt] Gemini fetch failed", {
+        frameNumber,
+        attempt,
+        message: err?.message,
+      });
+      if (attempt < GEMINI_IMAGE_MAX_ATTEMPTS) {
+        await sleep(GEMINI_RETRY_BASE_MS * attempt * attempt);
+        continue;
+      }
+      return null;
+    }
   }
 
-  const outMime =
-    inlineData.mimeType || inlineData.mime_type || "image/png";
-  return `data:${outMime};base64,${inlineData.data}`;
+  return null;
 }

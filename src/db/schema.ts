@@ -47,6 +47,32 @@ export type TechniqueCorrectionContext = {
   } | null;
 };
 
+/** pgvector k-NN against train_sample_embedding + train_video labels */
+export type TechniqueRetrievalResult = {
+  spec_version: string;
+  embedding_dim: number;
+  query_embedding_ok: boolean;
+  neighbors: Array<{
+    train_sample_id: string;
+    train_video_id: string;
+    stroke_name: string;
+    category: string;
+    stroke_preset: string;
+    skill_level: string;
+    /** Cosine distance (pgvector `<=>` with cosine ops); lower = closer */
+    distance: number;
+  }>;
+  shot_hypothesis: {
+    stroke_preset: string | null;
+    category: string | null;
+    skill_level: string | null;
+    /** 0–1 from neighbor agreement + distance margin */
+    confidence: number;
+  };
+  /** Set when pgvector/table missing or query failed */
+  error?: string;
+};
+
 export type TechniqueAnalysisMetrics = {
   total_frames?: number;
   analyzed_frames?: number;
@@ -64,6 +90,8 @@ export type TechniqueAnalysisMetrics = {
     frame: number;
     landmarks: Record<string, { x: number; y: number }>;
   }>;
+  /** Pro-library similarity (train_sample_embedding); optional */
+  retrieval?: TechniqueRetrievalResult;
   ai_analysis?: unknown;
   correction_images?: TechniqueCorrectionImage[];
   correction_context?: TechniqueCorrectionContext;
