@@ -294,3 +294,71 @@ export const techniqueAnalysis = pgTable("technique_analysis", {
   feedbackText: text("feedbackText"),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
+
+/**
+ * fal.ai LoRA dataset uploads (admin/team collaboration).
+ *
+ * Stores raw image assets and a generated ZIP (served from /uploads) that can be used as
+ * `images_data_url` for `fal-ai/flux-lora-fast-training`.
+ */
+export const falLoraDataset = pgTable("fal_lora_dataset", {
+  id: text("id").primaryKey(),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  /** Human label for the dataset (e.g. "Forehand drive - side view") */
+  name: text("name").notNull(),
+  /** Optional: used by fal training depending on whether captions exist */
+  triggerWord: text("triggerWord"),
+  /** When true, fal treats this as style training */
+  isStyle: boolean("isStyle").notNull().default(false),
+  /** Public path under /uploads for the generated zip archive */
+  zipPath: text("zipPath"),
+  createdAt: timestamp("createdAt").notNull().defaultNow(),
+  updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+});
+
+export const falLoraImage = pgTable("fal_lora_image", {
+  id: text("id").primaryKey(),
+  datasetId: text("datasetId")
+    .notNull()
+    .references(() => falLoraDataset.id, { onDelete: "cascade" }),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  /** Same taxonomy as train_video so team uses consistent labels */
+  category: trainCategoryEnum("category").notNull(),
+  strokePreset: trainStrokePresetEnum("strokePreset").notNull(),
+  skillLevel: trainSkillLevelEnum("skillLevel").notNull(),
+  /** Optional view profile for images */
+  viewProfile: trainViewProfileEnum("viewProfile"),
+  /** Stored file path on disk (absolute) */
+  filePath: text("filePath").notNull(),
+  /** Public URL path (relative) served by /uploads */
+  publicPath: text("publicPath").notNull(),
+  /** Optional per-image caption (zip includes .txt) */
+  caption: text("caption"),
+  createdAt: timestamp("createdAt").notNull().defaultNow(),
+});
+
+export const falLoraTrainingRun = pgTable("fal_lora_training_run", {
+  id: text("id").primaryKey(),
+  datasetId: text("datasetId")
+    .notNull()
+    .references(() => falLoraDataset.id, { onDelete: "cascade" }),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  status: text("status").notNull(),
+  /** The exact images_data_url used for this run */
+  imagesDataUrl: text("imagesDataUrl").notNull(),
+  triggerWord: text("triggerWord"),
+  isStyle: boolean("isStyle").notNull().default(false),
+  steps: integer("steps"),
+  /** Result */
+  diffusersLoraFileUrl: text("diffusersLoraFileUrl"),
+  configFileUrl: text("configFileUrl"),
+  errorMessage: text("errorMessage"),
+  createdAt: timestamp("createdAt").notNull().defaultNow(),
+  updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+});

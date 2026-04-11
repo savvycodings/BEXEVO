@@ -20,6 +20,7 @@ import {
   runTrainEmbeddingBackfill,
   indexTrainSampleEmbeddingIfReady,
 } from "../technique/trainRetrieval";
+import falLoraRouter from "./falLoraRouter";
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const upload = multer({
@@ -42,6 +43,9 @@ const router = express.Router();
 router.use(express.json({ limit: "2mb" }));
 router.use(express.urlencoded({ extended: true }));
 type TrainViewProfile = "front" | "side" | "behind";
+
+// fal.ai LoRA dataset + training routes (admin header required)
+router.use("/fal-lora", falLoraRouter);
 
 const TRAIN_CATEGORIES = [
   "ground_strokes",
