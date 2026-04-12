@@ -4,8 +4,11 @@ import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import archiver from "archiver";
+<<<<<<< HEAD
 import { fal } from "@fal-ai/client";
 import { Agent, fetch as undiciFetch } from "undici";
+=======
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
 import { fromNodeHeaders } from "better-auth/node";
 import { eq, desc } from "drizzle-orm";
 import { auth } from "../auth";
@@ -26,6 +29,7 @@ const upload = multer({
 const ADMIN_SECRET = (): string =>
   (process.env.ADMIN_TRAIN_SECRET || "xevodev").trim();
 
+<<<<<<< HEAD
 /** fal docs use FAL_KEY; we also accept FAL_API_KEY for backwards compatibility */
 function resolveFalKey(): string {
   return String(process.env.FAL_API_KEY || process.env.FAL_KEY || "").trim();
@@ -268,6 +272,8 @@ function messageForFalNetworkFailure(err: unknown): { message: string; hint: str
   return { message: raw, hint: "" };
 }
 
+=======
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
 function assertAdminTrain(req: express.Request, res: express.Response): boolean {
   const expected = ADMIN_SECRET();
   const raw = req.headers["x-admin-train-secret"];
@@ -553,6 +559,18 @@ router.post("/run", express.json({ limit: "2mb" }), async (req, res) => {
       return res.status(400).json({ error: "Dataset missing zipPath (upload again)" });
     }
 
+<<<<<<< HEAD
+=======
+    const publicBase =
+      (process.env.PUBLIC_VIDEO_BASE_URL || "").trim() ||
+      (process.env.PUBLIC_BASE_URL || "").trim() ||
+      (process.env.BETTER_AUTH_URL || "").trim() ||
+      "http://localhost:3050";
+    const images_data_url = dataset.zipPath.startsWith("http")
+      ? dataset.zipPath
+      : `${publicBase.replace(/\/+$/, "")}${dataset.zipPath}`;
+
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
     const triggerWord =
       String(req.body?.triggerWord ?? dataset.triggerWord ?? "").trim() || undefined;
     const isStyle =
@@ -562,6 +580,7 @@ router.post("/run", express.json({ limit: "2mb" }), async (req, res) => {
     const stepsRaw = Number(req.body?.steps);
     const steps = Number.isFinite(stepsRaw) ? Math.max(1, Math.min(10000, Math.round(stepsRaw))) : undefined;
 
+<<<<<<< HEAD
     if (!resolveFalKey()) {
       return res.status(500).json({
         error: "FAL_KEY or FAL_API_KEY is not set (fal.ai docs use FAL_KEY)",
@@ -591,6 +610,8 @@ router.post("/run", express.json({ limit: "2mb" }), async (req, res) => {
       });
     }
 
+=======
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
     const runId = randomUUID();
     const now = new Date();
     await db.insert(falLoraTrainingRun).values({
@@ -609,16 +630,31 @@ router.post("/run", express.json({ limit: "2mb" }), async (req, res) => {
       updatedAt: now,
     });
 
+<<<<<<< HEAD
     const falKey = resolveFalKey()!;
 
     /** Matches OpenAPI `FluxLoraFastTrainingInput` — flat JSON on POST (same as official curl). */
     const payload: Record<string, unknown> = {
+=======
+    // Call fal training via our existing server endpoint module (avoid client exposing FAL key).
+    const falKey = String(process.env.FAL_API_KEY || "").trim();
+    if (!falKey) {
+      await db
+        .update(falLoraTrainingRun)
+        .set({ status: "failed", errorMessage: "FAL_API_KEY is not set", updatedAt: new Date() })
+        .where(eq(falLoraTrainingRun.id, runId));
+      return res.status(500).json({ error: "FAL_API_KEY is not set" });
+    }
+
+    const payload: any = {
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
       images_data_url,
       ...(triggerWord ? { trigger_word: triggerWord } : {}),
       ...(typeof steps === "number" ? { steps } : {}),
       ...(typeof isStyle === "boolean" ? { is_style: isStyle } : {}),
     };
 
+<<<<<<< HEAD
     const trainingEndpoint =
       String(process.env.FAL_FLUX_LORA_TRAINING_ENDPOINT || "").trim() ||
       "fal-ai/flux-lora-fast-training";
@@ -672,6 +708,28 @@ router.post("/run", express.json({ limit: "2mb" }), async (req, res) => {
         message: falSummary || "fal training failed",
         details: errBody ?? (err instanceof Error ? { message: err.message } : err),
       });
+=======
+    const r = await fetch("https://fal.run/fal-ai/flux-lora-fast-training", {
+      method: "POST",
+      headers: {
+        Authorization: `Key ${falKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = (await r.json().catch(() => null)) as any;
+
+    if (!r.ok) {
+      await db
+        .update(falLoraTrainingRun)
+        .set({
+          status: "failed",
+          errorMessage: `fal_train_failed_http_${r.status}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(falLoraTrainingRun.id, runId));
+      return res.status(502).json({ error: "fal_train_failed", status: r.status, details: data ?? null });
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
     }
 
     await db
@@ -684,15 +742,19 @@ router.post("/run", express.json({ limit: "2mb" }), async (req, res) => {
       })
       .where(eq(falLoraTrainingRun.id, runId));
 
+<<<<<<< HEAD
     const datasetImageRows = await db.query.falLoraImage.findMany({
       where: (img, { eq: _eq }) => _eq(img.datasetId, datasetId),
     });
 
+=======
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
     return res.json({
       ok: true,
       runId,
       diffusers_lora_file_url: data?.diffusers_lora_file?.url ?? null,
       config_file_url: data?.config_file?.url ?? null,
+<<<<<<< HEAD
       /** fal.ai `steps` input = optimizer iterations (often 500–2000), NOT number of images */
       training_steps_requested: steps ?? null,
       dataset_image_count: datasetImageRows.length,
@@ -702,6 +764,11 @@ router.post("/run", express.json({ limit: "2mb" }), async (req, res) => {
     });
   } catch (e: any) {
     console.error("[fal-lora/run]", e);
+=======
+      raw: data,
+    });
+  } catch (e: any) {
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
     return res.status(500).json({ error: e?.message || "Failed to run training" });
   }
 });

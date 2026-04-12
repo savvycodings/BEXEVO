@@ -2,13 +2,21 @@ import type { Request, Response } from "express";
 import fetch from "node-fetch";
 
 function falKey(): string {
+<<<<<<< HEAD
   return String(process.env.FAL_API_KEY || process.env.FAL_KEY || "").trim();
+=======
+  return String(process.env.FAL_API_KEY || "").trim();
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
 }
 
 function requireFalKey(res: Response): string | null {
   const key = falKey();
   if (!key) {
+<<<<<<< HEAD
     res.status(500).json({ error: "FAL_KEY or FAL_API_KEY is not set" });
+=======
+    res.status(500).json({ error: "FAL_API_KEY is not set" });
+>>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
     return null;
   }
   return key;
