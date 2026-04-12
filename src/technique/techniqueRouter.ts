@@ -397,19 +397,45 @@ router.get('/activities', async (req, res) => {
       }
     }
 
-    const items = analyses.map((a) => ({
-      analysisId: a.id,
-      techniqueVideoId: a.techniqueVideoId,
-      status: a.status,
-      createdAt: a.createdAt.toISOString(),
-      feedbackSnippet:
-        a.feedbackText && a.feedbackText.length > 0
-          ? a.feedbackText.length > 200
-            ? `${a.feedbackText.slice(0, 200)}…`
-            : a.feedbackText
-          : null,
-      videoPath: `/technique/video/${a.techniqueVideoId}`,
-    }))
+    const items = analyses.map((a) => {
+      const metrics = a.metrics as Record<string, unknown> | null | undefined
+      const ai = metrics?.ai_analysis as Record<string, unknown> | undefined
+      const en = ai?.en as Record<string, unknown> | undefined
+      const scoreRaw = typeof ai?.score === 'number' ? Number(ai.score) : null
+      const scorePercent =
+        scoreRaw != null
+          ? Math.round(Math.max(0, Math.min(100, scoreRaw * 10)))
+          : null
+      const rating = typeof ai?.rating === 'string' ? String(ai.rating) : null
+      const retrieval = metrics?.retrieval as Record<string, unknown> | undefined
+      const hyp = retrieval?.shot_hypothesis as Record<string, unknown> | undefined
+      let shotLabel = 'Technique'
+      if (typeof hyp?.stroke_preset === 'string' && hyp.stroke_preset.trim()) {
+        shotLabel = hyp.stroke_preset
+          .replace(/_/g, ' ')
+          .replace(/\b\w/g, (ch) => ch.toUpperCase())
+      } else if (typeof en?.shot_context === 'string' && en.shot_context.trim()) {
+        const first = en.shot_context.split(/[.!?]/)[0]?.trim() ?? ''
+        shotLabel = first.length > 36 ? `${first.slice(0, 34)}…` : first || 'Technique'
+      }
+      return {
+        analysisId: a.id,
+        techniqueVideoId: a.techniqueVideoId,
+        status: a.status,
+        createdAt: a.createdAt.toISOString(),
+        feedbackSnippet:
+          a.feedbackText && a.feedbackText.length > 0
+            ? a.feedbackText.length > 200
+              ? `${a.feedbackText.slice(0, 200)}…`
+              : a.feedbackText
+            : null,
+        videoPath: `/technique/video/${a.techniqueVideoId}`,
+        score: scorePercent,
+        lastScore: null,
+        shotLabel,
+        rating,
+      }
+    })
 
     return res.json({ items })
   } catch (e: any) {

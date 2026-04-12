@@ -21,7 +21,6 @@ import {
   indexTrainSampleEmbeddingIfReady,
 } from "../technique/trainRetrieval";
 import falLoraRouter from "./falLoraRouter";
-<<<<<<< HEAD
 import { fal } from "@fal-ai/client";
 
 function resolveFalKey(): string {
@@ -44,8 +43,6 @@ async function uploadTrainVideoToFalCdn(absPath: string): Promise<string> {
   const blob = new Blob([buf], { type: contentType });
   return fal.storage.upload(blob, { lifecycle: { expiresIn: "1d" } });
 }
-=======
->>>>>>> 1a3378e1c2243036e72c2771b88085e365419b94
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const upload = multer({
