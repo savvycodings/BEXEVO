@@ -6,7 +6,7 @@ import { fromNodeHeaders } from 'better-auth/node'
 import { auth } from '../auth'
 import { db, techniqueVideo, techniqueAnalysis, user } from '../db'
 import { randomUUID, createHash } from 'crypto'
-import { eq } from 'drizzle-orm'
+import { desc, eq, inArray } from 'drizzle-orm'
 import { extractFrame, resolveVideoPath } from './frameExtractor'
 import {
   translateRecommendationsToDeltas,
@@ -367,6 +367,54 @@ router.get('/video/:id', async (req, res) => {
   } catch (e: any) {
     console.error('[Technique] Video stream error:', e)
     return res.status(500).json({ error: 'Failed to stream video' })
+  }
+})
+
+/** List technique analyses for the signed-in user (for Activities calendar). */
+router.get('/activities', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const analyses = await db
+      .select()
+      .from(techniqueAnalysis)
+      .where(eq(techniqueAnalysis.userId, userId))
+      .orderBy(desc(techniqueAnalysis.createdAt))
+      .limit(400)
+
+    const videoIds = [...new Set(analyses.map((a) => a.techniqueVideoId))]
+    const videoMap = new Map<string, (typeof techniqueVideo.$inferSelect)>()
+    if (videoIds.length > 0) {
+      const videos = await db
+        .select()
+        .from(techniqueVideo)
+        .where(inArray(techniqueVideo.id, videoIds))
+      for (const v of videos) {
+        videoMap.set(v.id, v)
+      }
+    }
+
+    const items = analyses.map((a) => ({
+      analysisId: a.id,
+      techniqueVideoId: a.techniqueVideoId,
+      status: a.status,
+      createdAt: a.createdAt.toISOString(),
+      feedbackSnippet:
+        a.feedbackText && a.feedbackText.length > 0
+          ? a.feedbackText.length > 200
+            ? `${a.feedbackText.slice(0, 200)}…`
+            : a.feedbackText
+          : null,
+      videoPath: `/technique/video/${a.techniqueVideoId}`,
+    }))
+
+    return res.json({ items })
+  } catch (e: any) {
+    console.error('[Technique] Activities list error:', e)
+    return res.status(500).json({ error: e.message || 'Failed to load activities' })
   }
 })
 
