@@ -20,6 +20,29 @@ import {
   runTrainEmbeddingBackfill,
   indexTrainSampleEmbeddingIfReady,
 } from "../technique/trainRetrieval";
+import falLoraRouter from "./falLoraRouter";
+import { fal } from "@fal-ai/client";
+
+function resolveFalKey(): string {
+  return String(process.env.FAL_API_KEY || process.env.FAL_KEY || "").trim();
+}
+
+/** Stage local train clip on fal CDN so Modal can GET bytes (ngrok often 404s server-side). */
+async function uploadTrainVideoToFalCdn(absPath: string): Promise<string> {
+  const key = resolveFalKey();
+  if (!key) throw new Error("FAL_KEY or FAL_API_KEY is not set");
+  fal.config({ credentials: key });
+  const buf = await fs.promises.readFile(absPath);
+  const ext = path.extname(absPath).toLowerCase();
+  const contentType =
+    ext === ".mp4"
+      ? "video/mp4"
+      : ext === ".mov"
+        ? "video/quicktime"
+        : "application/octet-stream";
+  const blob = new Blob([buf], { type: contentType });
+  return fal.storage.upload(blob, { lifecycle: { expiresIn: "1d" } });
+}
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const upload = multer({
@@ -42,6 +65,9 @@ const router = express.Router();
 router.use(express.json({ limit: "2mb" }));
 router.use(express.urlencoded({ extended: true }));
 type TrainViewProfile = "front" | "side" | "behind";
+
+// fal.ai LoRA dataset + training routes (admin header required)
+router.use("/fal-lora", falLoraRouter);
 
 const TRAIN_CATEGORIES = [
   "ground_strokes",
@@ -130,6 +156,8 @@ async function triggerTrainExtraction(params: {
   trainVideoId: string;
   strokeName: string;
   videoPublicPath: string;
+  /** Absolute path on disk; used to stage on fal CDN for Modal when FAL_KEY is set. */
+  videoAbsPath: string;
 }): Promise<void> {
   const modalUrl = TRAIN_MODAL_WEBHOOK_URL();
   if (!modalUrl) {
@@ -140,9 +168,41 @@ async function triggerTrainExtraction(params: {
   }
 
   const baseUrl = getPublicVideoBase().replace(/\/+$/, "");
-  const videoUrl = params.videoPublicPath.startsWith("http")
+  let videoUrl = params.videoPublicPath.startsWith("http")
     ? params.videoPublicPath
     : `${baseUrl}${params.videoPublicPath.startsWith("/") ? "" : "/"}${params.videoPublicPath}`;
+
+  const modalRemote = /localhost|127\.0\.0\.1/i.test(modalUrl) === false;
+  const falKey = resolveFalKey();
+  if (
+    modalRemote &&
+    falKey &&
+    params.videoAbsPath &&
+    fs.existsSync(params.videoAbsPath)
+  ) {
+    try {
+      console.log("[Train] Staging train video via fal.storage for Modal", {
+        sampleId: params.sampleId,
+        videoAbsPath: params.videoAbsPath,
+      });
+      videoUrl = await uploadTrainVideoToFalCdn(params.videoAbsPath);
+    } catch (e: any) {
+      console.error("[Train] fal.storage upload failed (train Modal)", e);
+      await db
+        .update(trainSample)
+        .set({
+          status: "failed",
+          errorMessage:
+            "Could not stage train video for Modal (fal upload failed). Check FAL_KEY and logs.",
+        })
+        .where(eq(trainSample.id, params.sampleId));
+      return;
+    }
+  } else if (modalRemote && !falKey) {
+    console.warn(
+      "[Train] Modal is remote but FAL_KEY is unset; using public video URL (ngrok may 404 Modal). Set FAL_KEY to stage on fal CDN."
+    );
+  }
 
   if (
     !/localhost|127\.0\.0\.1/i.test(modalUrl) &&
@@ -192,6 +252,7 @@ async function triggerTrainExtraction(params: {
           })
           .where(eq(trainSample.id, params.sampleId));
       } else if (body?.status === "success") {
+        // Embedding index is best-effort; must not fail the sample if DB read/upsert errors.
         await indexTrainSampleEmbeddingIfReady(params.sampleId);
       }
     })
@@ -382,6 +443,7 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       trainVideoId: id,
       strokeName,
       videoPublicPath: publicPath,
+      videoAbsPath: filePath,
     });
 
     return res.json({

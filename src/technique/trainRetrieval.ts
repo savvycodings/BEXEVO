@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { pool, db } from "../db";
-import type { TechniqueRetrievalResult } from "../db/schema";
+import type { TechniqueRetrievalResult, TrainPoseFrame } from "../db/schema";
 import {
   embedTrainPoseSequence,
   embedPoseForProRetrieval,
@@ -101,32 +101,43 @@ export function buildShotHypothesis(
 /**
  * After train Modal finishes successfully, upsert pgvector row so technique k-NN
  * sees this pro clip without a manual POST /embeddings/backfill.
+ * Never throws: failures are logged only (caller must not treat as Modal failure).
  */
 export async function indexTrainSampleEmbeddingIfReady(trainSampleId: string): Promise<void> {
-  const row = await db.query.trainSample.findFirst({
-    where: (ts, { eq: _eq }) => _eq(ts.id, trainSampleId),
-  });
-  if (!row || row.status !== "completed") {
-    console.log("[TrainRetrieval] auto-index skipped (sample not completed yet)", {
-      trainSampleId,
-      status: row?.status ?? null,
-    });
-    return;
-  }
-  const seq = row.poseSequence as unknown;
-  const vec = embedTrainPoseSequence(Array.isArray(seq) ? seq : null);
-  if (!vec) {
-    console.log("[TrainRetrieval] auto-index skipped (no poseSequence)", { trainSampleId });
-    return;
-  }
   try {
-    await upsertTrainSampleEmbedding(row.id, vec);
-    console.log("[TrainRetrieval] auto-indexed embedding for train_sample", { trainSampleId });
+    const row = await db.query.trainSample.findFirst({
+      where: (ts, { eq: _eq }) => _eq(ts.id, trainSampleId),
+    });
+    if (!row || row.status !== "completed") {
+      console.log("[TrainRetrieval] auto-index skipped (sample not completed yet)", {
+        trainSampleId,
+        status: row?.status ?? null,
+      });
+      return;
+    }
+    const seq = row.poseSequence as unknown;
+    const vec = embedTrainPoseSequence(Array.isArray(seq) ? seq : null);
+    if (!vec) {
+      console.log("[TrainRetrieval] auto-index skipped (no poseSequence)", { trainSampleId });
+      return;
+    }
+    try {
+      await upsertTrainSampleEmbedding(row.id, vec);
+      console.log("[TrainRetrieval] auto-indexed embedding for train_sample", { trainSampleId });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn("[TrainRetrieval] auto-index upsert failed — apply migration 0011 + vector on Neon", {
+        trainSampleId,
+        message: msg,
+      });
+    }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.warn("[TrainRetrieval] auto-index failed — apply migration 0011 + vector on Neon", {
+    const cause = e instanceof Error ? e.cause : undefined;
+    console.warn("[TrainRetrieval] auto-index read failed (DB schema/migration or connectivity)", {
       trainSampleId,
       message: msg,
+      cause: cause instanceof Error ? cause.message : cause,
     });
   }
 }
@@ -292,4 +303,34 @@ export async function retrieveForTechniqueMetrics(
       error: msg.includes("train_sample_embedding") ? "table_or_extension_missing" : "query_failed",
     };
   }
+}
+
+/** Load Modal pose sequence for a train_sample (pro library clip). */
+export async function getTrainSamplePoseSequence(
+  trainSampleId: string
+): Promise<TrainPoseFrame[] | null> {
+  const row = await db.query.trainSample.findFirst({
+    where: (ts, { eq }) => eq(ts.id, trainSampleId),
+    columns: { status: true, poseSequence: true },
+  });
+  if (!row || row.status !== "completed") return null;
+  const seq = row.poseSequence;
+  if (!Array.isArray(seq) || seq.length === 0) return null;
+  return seq as TrainPoseFrame[];
+}
+
+/**
+ * Map user video frame index to a pro-library frame by relative position in the clip.
+ * (Embedding matched the whole sequence; this picks a comparable instant for landmark deltas.)
+ */
+export function pickAlignedProPoseFrame(
+  userVideoFrameIndex: number,
+  videoTotalFrames: number,
+  proSeq: TrainPoseFrame[]
+): TrainPoseFrame | null {
+  if (!proSeq.length) return null;
+  const tf = Math.max(1, videoTotalFrames);
+  const t = Math.max(0, Math.min(1, userVideoFrameIndex / tf));
+  const idx = Math.min(proSeq.length - 1, Math.round(t * (proSeq.length - 1)));
+  return proSeq[idx] ?? null;
 }

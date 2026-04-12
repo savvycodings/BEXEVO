@@ -13,6 +13,8 @@ import {
   classifyShotAndHandedness,
   mergeCorrectionShotAndHandedness,
   generateCorrectedImage,
+  generateCorrectedImageFal,
+  buildProNeighborCorrectionContext,
   type FrameLandmarks,
   type CorrectionResult,
   type ShotAndHandedness,
@@ -29,11 +31,68 @@ import {
 import {
   retrieveForTechniqueMetrics,
   formatRetrievalForPrompt,
+  getTrainSamplePoseSequence,
+  pickAlignedProPoseFrame,
 } from './trainRetrieval'
 import {
   downsamplePoseFramesForPrompt,
   MAX_POSE_FRAMES_IN_GPT_PROMPT,
 } from './poseEmbedding'
+import { fal } from '@fal-ai/client'
+
+function resolveFalKey(): string {
+  return String(process.env.FAL_API_KEY || process.env.FAL_KEY || '').trim()
+}
+
+const TRANSIENT_PG_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT'])
+
+function isTransientPgError(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string } }
+  const code = e?.cause?.code ?? e?.code
+  if (code && TRANSIENT_PG_CODES.has(String(code))) return true
+  const msg = err instanceof Error ? err.message : String(err)
+  return /getaddrinfo ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg)
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+/** Neon/DNS blips often surface as ENOTFOUND on pooler hostnames; retry before failing the whole analyze. */
+async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
+  let last: unknown
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      last = err
+      if (!isTransientPgError(err) || attempt === maxAttempts) throw err
+      const delay = 400 * attempt * attempt
+      console.warn(`[Technique] ${label}: transient DB error; retry ${attempt}/${maxAttempts} in ${delay}ms`, {
+        message: err instanceof Error ? err.message : String(err),
+      })
+      await sleepMs(delay)
+    }
+  }
+  throw last
+}
+
+/** Stage local upload on fal CDN so Modal can GET real bytes (ngrok often 404s server-side). */
+async function uploadLocalVideoToFalCdn(absPath: string): Promise<string> {
+  const key = resolveFalKey()
+  if (!key) throw new Error('FAL_KEY or FAL_API_KEY is not set')
+  fal.config({ credentials: key })
+  const buf = await fs.promises.readFile(absPath)
+  const ext = path.extname(absPath).toLowerCase()
+  const contentType =
+    ext === '.mp4'
+      ? 'video/mp4'
+      : ext === '.mov'
+        ? 'video/quicktime'
+        : 'application/octet-stream'
+  const blob = new Blob([buf], { type: contentType })
+  return fal.storage.upload(blob, { lifecycle: { expiresIn: '1d' } })
+}
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024
 const upload = multer({
@@ -356,10 +415,55 @@ router.post('/analyze', async (req, res) => {
       publicBase ||
       authBase ||
       'http://localhost:3050'
-    const videoUrl =
-      video.secureUrl && video.secureUrl.startsWith('http')
-        ? video.secureUrl
-        : `${baseUrl.replace(/\/$/, '')}${video.secureUrl}`
+    const publicHttpVideo =
+      Boolean(video.secureUrl && video.secureUrl.startsWith('http'))
+    let videoUrl = publicHttpVideo
+      ? video.secureUrl!
+      : `${baseUrl.replace(/\/$/, '')}${video.secureUrl}`
+
+    const modalWebhook = (process.env.MODAL_WEBHOOK_URL || '').trim()
+    const localVideoPath = !publicHttpVideo ? video.cloudinaryPublicId : null
+
+    if (localVideoPath && !fs.existsSync(localVideoPath)) {
+      console.error('[Technique] Video file not on disk', { localVideoPath })
+      await db
+        .update(techniqueAnalysis)
+        .set({
+          status: 'failed',
+          feedbackText: 'Video file is no longer available on the server.',
+        })
+        .where(eq(techniqueAnalysis.id, analysisId))
+      return res.status(500).json({ error: 'Video file missing on server' })
+    }
+
+    if (
+      modalWebhook &&
+      !modalWebhook.includes('localhost') &&
+      !publicHttpVideo &&
+      localVideoPath &&
+      resolveFalKey()
+    ) {
+      try {
+        console.log('[Technique] Staging video via fal.storage for Modal', {
+          localVideoPath,
+        })
+        videoUrl = await uploadLocalVideoToFalCdn(localVideoPath)
+      } catch (e) {
+        console.error('[Technique] fal.storage upload failed', e)
+        await db
+          .update(techniqueAnalysis)
+          .set({
+            status: 'failed',
+            feedbackText:
+              'Could not stage video for analysis. Check FAL_KEY and server logs.',
+          })
+          .where(eq(techniqueAnalysis.id, analysisId))
+        return res.status(500).json({
+          error: 'Could not stage video for Modal analysis',
+          detail: e instanceof Error ? e.message : String(e),
+        })
+      }
+    }
 
     if (
       process.env.MODAL_WEBHOOK_URL &&
@@ -720,14 +824,16 @@ Rules:
       },
     })
 
-    await db
-      .update(techniqueAnalysis)
-      .set({
-        status: aiAnalysis ? 'completed' : 'failed',
-        metrics: combinedMetrics as any,
-        feedbackText,
-      })
-      .where(eq(techniqueAnalysis.id, analysisId))
+    await withPgRetry('analyze-complete', () =>
+      db
+        .update(techniqueAnalysis)
+        .set({
+          status: aiAnalysis ? 'completed' : 'failed',
+          metrics: combinedMetrics as any,
+          feedbackText,
+        })
+        .where(eq(techniqueAnalysis.id, analysisId))
+    )
 
     console.log('[Technique] Analysis row updated, id:', analysisId)
     return res.json({ analysisId })
@@ -863,7 +969,18 @@ function orderCorrectionsByFrames(
 
 router.post('/correction-images', async (req, res) => {
   try {
-    console.log('[Technique] Correction-images request received')
+    const imageProvider =
+      (req.body as { imageProvider?: string })?.imageProvider === 'fal'
+        ? 'fal'
+        : 'gemini'
+    const correctionImagesKey =
+      imageProvider === 'fal' ? 'correction_images_fal' : 'correction_images'
+    const correctionContextKey =
+      imageProvider === 'fal' ? 'correction_context_fal' : 'correction_context'
+
+    console.log('[Technique] Correction-images request received', {
+      imageProvider,
+    })
     const userId = await resolveUserId(req)
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' })
@@ -896,7 +1013,7 @@ router.post('/correction-images', async (req, res) => {
       return res.status(400).json({ error: 'Analysis is not completed yet' })
     }
 
-    const existingCorrections = (analysis.metrics as any)?.correction_images
+    const existingCorrections = (analysis.metrics as any)?.[correctionImagesKey]
     let cachedCorrections: CorrectionResult[] = []
     if (Array.isArray(existingCorrections) && existingCorrections.length > 0) {
       const badCache = looksLikeBadCachedCorrections(existingCorrections)
@@ -915,7 +1032,7 @@ router.post('/correction-images', async (req, res) => {
             analysisId,
             count: limited.length,
           })
-          return res.json({ corrections: limited })
+          return res.json({ provider: imageProvider, corrections: limited })
         }
 
         const cachedRequested = orderCorrectionsByFrames(
@@ -928,7 +1045,10 @@ router.post('/correction-images', async (req, res) => {
             requested: requestedFrameIndices,
             count: cachedRequested.length,
           })
-          return res.json({ corrections: cachedRequested })
+          return res.json({
+            provider: imageProvider,
+            corrections: cachedRequested,
+          })
         }
       }
 
@@ -1020,12 +1140,24 @@ router.post('/correction-images', async (req, res) => {
           ? orderCorrectionsByFrames(cachedByFrame, requestedFrameIndices)
           : cachedCorrections
       return res.json({
+        provider: imageProvider,
         corrections: limitCorrectionsToMaxFrames(raw, MAX_CORRECTION_IMAGE_FRAMES),
       })
     }
 
+    if (imageProvider === 'fal') {
+      const fk = String(process.env.FAL_API_KEY || process.env.FAL_KEY || '').trim()
+      if (!fk) {
+        return res.status(503).json({
+          error:
+            'FAL_KEY or FAL_API_KEY is required for fal.ai pose corrections. Add it to server environment.',
+        })
+      }
+    }
+
     console.log('[Technique] Generating correction images', {
       analysisId,
+      imageProvider,
       frameCount: framesToGenerate.length,
       frames: framesToGenerate.map((f) => f.frame),
     })
@@ -1074,6 +1206,32 @@ router.post('/correction-images', async (req, res) => {
       effective: shotAndHandednessForImages.handedness.dominant_hand,
     })
 
+    const retrievalBlock = metrics?.retrieval as
+      | { neighbors?: Array<{ train_sample_id: string; stroke_name: string; stroke_preset: string; skill_level: string; distance: number }> }
+      | undefined
+    const topNeighbor = retrievalBlock?.neighbors?.[0]
+    let proPoseSequence: Awaited<ReturnType<typeof getTrainSamplePoseSequence>> =
+      null
+    if (topNeighbor?.train_sample_id) {
+      proPoseSequence = await getTrainSamplePoseSequence(
+        topNeighbor.train_sample_id
+      )
+      if (proPoseSequence?.length) {
+        console.log('[Technique] Pro reference poseSequence for corrections', {
+          trainSampleId: topNeighbor.train_sample_id,
+          frames: proPoseSequence.length,
+        })
+      }
+    }
+
+    const maxPoseFrame = poseData.length
+      ? Math.max(...poseData.map((p) => p.frame))
+      : 0
+    const videoTotalFrames =
+      typeof metrics.total_frames === 'number' && metrics.total_frames > 0
+        ? metrics.total_frames
+        : maxPoseFrame + 1
+
     const corrections: CorrectionResult[] = []
 
     for (let i = 0; i < framesToGenerate.length; i += MAX_CONCURRENT_FRAMES) {
@@ -1097,25 +1255,66 @@ router.post('/correction-images', async (req, res) => {
             })
 
             console.log(
-              `[Technique] Generating corrected image for frame ${frameData.frame}`
-            )
-            const correctedImage = await generateCorrectedImage(
-              frameBase64,
-              'image/png',
-              frameData.frame,
-              frameData.landmarks,
-              deltas,
-              enAnalysis.diagnosis ?? '',
-              enAnalysis.recommendations ?? [],
-              shotAndHandednessForImages
+              `[Technique] Generating corrected image for frame ${frameData.frame} (${imageProvider})`
             )
 
+            let proReferenceText: string | undefined
+            if (proPoseSequence?.length && topNeighbor) {
+              const proFrame = pickAlignedProPoseFrame(
+                frameData.frame,
+                videoTotalFrames,
+                proPoseSequence
+              )
+              if (proFrame?.landmarks && typeof proFrame.landmarks === 'object') {
+                proReferenceText = buildProNeighborCorrectionContext({
+                  strokeName: topNeighbor.stroke_name,
+                  strokePreset: topNeighbor.stroke_preset,
+                  skillLevel: topNeighbor.skill_level,
+                  distance: topNeighbor.distance,
+                  userLandmarks: frameData.landmarks,
+                  proLandmarks: proFrame.landmarks as FrameLandmarks,
+                })
+              }
+            }
+
+            const correctedImage =
+              imageProvider === 'fal'
+                ? await generateCorrectedImageFal(
+                    frameBase64,
+                    'image/png',
+                    frameData.frame,
+                    frameData.landmarks,
+                    deltas,
+                    enAnalysis.diagnosis ?? '',
+                    enAnalysis.recommendations ?? [],
+                    shotAndHandednessForImages,
+                    proReferenceText
+                  )
+                : await generateCorrectedImage(
+                    frameBase64,
+                    'image/png',
+                    frameData.frame,
+                    frameData.landmarks,
+                    deltas,
+                    enAnalysis.diagnosis ?? '',
+                    enAnalysis.recommendations ?? [],
+                    shotAndHandednessForImages,
+                    proReferenceText
+                  )
+
             const originalDataUri = `data:image/png;base64,${frameBase64}`
+
+            if (!correctedImage) {
+              console.warn(
+                `[Technique] No corrected image for frame ${frameData.frame} (${imageProvider}); omitting from results`
+              )
+              return null
+            }
 
             return {
               frame: frameData.frame,
               originalImage: originalDataUri,
-              correctedImage: correctedImage ?? originalDataUri,
+              correctedImage,
             } satisfies CorrectionResult
           } catch (err: any) {
             console.error(
@@ -1156,7 +1355,11 @@ router.post('/correction-images', async (req, res) => {
     try {
       const frameIndicesForContext = mergedCorrections.map((c) => c.frame)
       const correctionContext = {
-        version: 'shot-handedness-v1',
+        version:
+          imageProvider === 'fal'
+            ? 'fal-flux-general-img2img-v1'
+            : 'shot-handedness-v1',
+        image_provider: imageProvider,
         generated_at: new Date().toISOString(),
         frame_count: mergedCorrections.length,
         frame_indices: frameIndicesForContext,
@@ -1165,8 +1368,8 @@ router.post('/correction-images', async (req, res) => {
       }
       const updatedMetrics = {
         ...metrics,
-        correction_images: mergedCorrections,
-        correction_context: correctionContext,
+        [correctionImagesKey]: mergedCorrections,
+        [correctionContextKey]: correctionContext,
       }
       await db
         .update(techniqueAnalysis)
@@ -1176,10 +1379,143 @@ router.post('/correction-images', async (req, res) => {
       console.error('[Technique] Failed to cache correction images', cacheErr)
     }
 
-    return res.json({ corrections: responseCorrections })
+    return res.json({
+      provider: imageProvider,
+      corrections: responseCorrections,
+    })
   } catch (e: any) {
     console.error('[Technique] Correction-images error:', e)
     return res.status(500).json({ error: 'Failed to generate correction images' })
+  }
+})
+
+/**
+ * Extract the same up-to-5 pose frames as correction-images (no Gemini/fal).
+ * For client-side test layouts: compare video frames to bundled reference PNGs.
+ */
+router.post('/correction-test-frames', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const { analysisId } = req.body as { analysisId?: string }
+    if (!analysisId) {
+      return res.status(400).json({ error: 'Missing analysisId' })
+    }
+
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) =>
+        and(_eq(ta.id, analysisId), _eq(ta.userId, userId)),
+    })
+
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' })
+    }
+
+    if (analysis.status !== 'completed') {
+      return res.status(400).json({ error: 'Analysis is not completed yet' })
+    }
+
+    const metrics = analysis.metrics as any
+    const poseData: Array<{ frame: number; landmarks: FrameLandmarks }> =
+      metrics?.pose_data ?? []
+
+    if (poseData.length === 0) {
+      return res.status(400).json({ error: 'No pose data available' })
+    }
+
+    const video = await db.query.techniqueVideo.findFirst({
+      where: (tv, { eq: _eq }) => _eq(tv.id, analysis.techniqueVideoId),
+    })
+
+    if (!video?.cloudinaryPublicId) {
+      return res.status(404).json({ error: 'Video file not found' })
+    }
+
+    const videoPath = resolveVideoPath(video.cloudinaryPublicId)
+    if (!fs.existsSync(videoPath)) {
+      return res.status(404).json({ error: 'Video file missing from disk' })
+    }
+
+    const requestedFrames = selectPoseFramesForCorrections(
+      poseData,
+      MAX_CORRECTION_IMAGE_FRAMES
+    )
+
+    if (requestedFrames.length === 0) {
+      return res.status(400).json({ error: 'No matching frames found' })
+    }
+
+    let poseSequence = metrics?.impact_pose_sequence as
+      | LabeledPoseFrame[]
+      | undefined
+    const durationForRebuild = resolveVideoDurationMsForImpact(
+      typeof metrics?.video_duration_ms === 'number'
+        ? metrics.video_duration_ms
+        : undefined,
+      metrics?.total_frames ?? 0,
+      poseData
+    )
+    if (
+      (!poseSequence || poseSequence.length === 0) &&
+      metrics?.user_clips?.length &&
+      durationForRebuild
+    ) {
+      poseSequence =
+        buildImpactPoseSequenceForMetrics(
+          poseData,
+          metrics?.total_frames ?? 0,
+          durationForRebuild,
+          metrics.user_clips
+        ) ?? undefined
+    }
+
+    const framesToExtract = [...requestedFrames]
+    const impactFrameNum = poseSequence?.find((p) => p.phase === 'impact')?.frame
+    if (impactFrameNum != null && framesToExtract.length > 1) {
+      framesToExtract.sort(
+        (a, b) =>
+          Math.abs(a.frame - impactFrameNum) - Math.abs(b.frame - impactFrameNum)
+      )
+    }
+
+    const frames: Array<{ frame: number; originalImage: string }> = []
+
+    for (let i = 0; i < framesToExtract.length; i += MAX_CONCURRENT_FRAMES) {
+      const batch = framesToExtract.slice(i, i + MAX_CONCURRENT_FRAMES)
+      const results = await Promise.all(
+        batch.map(async (frameData) => {
+          try {
+            const frameBuffer = await extractFrame(videoPath, frameData.frame)
+            const originalImage = `data:image/png;base64,${frameBuffer.toString('base64')}`
+            return { frame: frameData.frame, originalImage }
+          } catch (err: any) {
+            console.error(
+              `[Technique] correction-test-frames: failed frame ${frameData.frame}:`,
+              err?.message
+            )
+            return null
+          }
+        })
+      )
+      for (const r of results) {
+        if (r) frames.push(r)
+      }
+    }
+
+    frames.sort((a, b) => a.frame - b.frame)
+
+    console.log('[Technique] correction-test-frames done', {
+      analysisId,
+      count: frames.length,
+    })
+
+    return res.json({ frames })
+  } catch (e: any) {
+    console.error('[Technique] correction-test-frames error:', e)
+    return res.status(500).json({ error: 'Failed to extract test frames' })
   }
 })
 

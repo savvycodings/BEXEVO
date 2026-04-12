@@ -1,4 +1,31 @@
 import type { LabeledPoseFrame } from "./impactPoseContext";
+import { MEDIAPIPE_POSE_LANDMARK_NAMES } from "./poseEmbedding";
+import { fal } from "@fal-ai/client";
+
+/** fal.subscribe hits queue.fal.run; on DNS issues retry with fal.run (sync), same as falLoraRouter. */
+function getNetworkErrorCode(err: unknown): string | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const e = err as { code?: string; cause?: { code?: string } };
+  return e.cause?.code || e.code;
+}
+
+function getErrHostname(err: unknown): string | undefined {
+  const c =
+    err && typeof err === "object"
+      ? (err as { cause?: { hostname?: string } }).cause
+      : undefined;
+  return c?.hostname;
+}
+
+function shouldFallbackSubscribeToRun(err: unknown): boolean {
+  const code = getNetworkErrorCode(err);
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN" || code === "ECONNREFUSED") {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/queue\.fal\.run/i.test(msg)) return true;
+  return false;
+}
 
 const GEMINI_API_BASE =
   "https://generativelanguage.googleapis.com/v1beta/models";
@@ -316,7 +343,7 @@ Rules:
   }
 }
 
-function deltasToInstructions(deltas: LandmarkDelta[]): string {
+export function deltasToInstructions(deltas: LandmarkDelta[]): string {
   if (deltas.length === 0) return "Apply the coach's recommendations to correct the player's body positioning.";
 
   return deltas
@@ -328,6 +355,61 @@ function deltasToInstructions(deltas: LandmarkDelta[]): string {
     .join("\n");
 }
 
+/** Top landmark gaps (user vs pro library frame) in normalized coords — guides img2img toward pro mechanics without changing scene. */
+export function summarizeProUserLandmarkGap(
+  user: FrameLandmarks,
+  pro: FrameLandmarks,
+  topK = 10
+): string {
+  const rows: { dist: number; line: string }[] = [];
+  for (const name of MEDIAPIPE_POSE_LANDMARK_NAMES) {
+    const u = user[name];
+    const p = pro[name];
+    if (
+      !u ||
+      !p ||
+      typeof u.x !== "number" ||
+      typeof u.y !== "number" ||
+      typeof p.x !== "number" ||
+      typeof p.y !== "number"
+    ) {
+      continue;
+    }
+    const dx = u.x - p.x;
+    const dy = u.y - p.y;
+    const dist = dx * dx + dy * dy;
+    rows.push({
+      dist,
+      line: `${name}: user(${u.x.toFixed(3)},${u.y.toFixed(3)}) vs pro(${p.x.toFixed(3)},${p.y.toFixed(3)}) — nudge toward pro Δx=${(-dx).toFixed(3)} Δy=${(-dy).toFixed(3)}`,
+    });
+  }
+  rows.sort((a, b) => b.dist - a.dist);
+  if (rows.length === 0) return "(no overlapping landmarks vs pro reference)";
+  return rows
+    .slice(0, topK)
+    .map((r) => r.line)
+    .join("\n");
+}
+
+export interface ProNeighborCorrectionContextParams {
+  strokeName: string;
+  strokePreset: string;
+  skillLevel: string;
+  distance: number;
+  userLandmarks: FrameLandmarks;
+  proLandmarks: FrameLandmarks;
+}
+
+/** Text block for Gemini/Fal: nearest-pro retrieval + concrete landmark deltas for this frame. */
+export function buildProNeighborCorrectionContext(
+  p: ProNeighborCorrectionContextParams
+): string {
+  const gap = summarizeProUserLandmarkGap(p.userLandmarks, p.proLandmarks);
+  return `Nearest pro library clip (embedding distance ${p.distance.toFixed(4)}): "${p.strokeName}" / ${p.strokePreset} / ${p.skillLevel}.
+Per-joint gap vs this pro instant (normalized 0–1; adjust body toward pro, nothing else):
+${gap}`;
+}
+
 export async function generateCorrectedImage(
   originalImageBase64: string,
   mimeType: string,
@@ -336,16 +418,26 @@ export async function generateCorrectedImage(
   deltas: LandmarkDelta[],
   diagnosis: string,
   recommendations: string[],
-  shotAndHandedness?: ShotAndHandedness | null
+  shotAndHandedness?: ShotAndHandedness | null,
+  proReferenceText?: string | null
 ): Promise<string | null> {
   const instructions = deltasToInstructions(deltas);
   const { shot, handedness } = mergeCorrectionShotAndHandedness(
     shotAndHandedness ?? null
   );
 
+  const proBlock =
+    proReferenceText && proReferenceText.trim().length > 0
+      ? `
+
+PRO LIBRARY POSE TARGET (nearest matching pro clip — prioritize moving joints toward these pro positions; same instant in the swing as aligned to this frame):
+${proReferenceText.trim()}
+`
+      : "";
+
   const textPrompt = `You are a sports visualization engine that creates photorealistic corrected-pose images for athletes.
 
-I am providing you with a single frame (frame ${frameNumber}) from a Padel tennis video.
+I am providing you with a single frame (frame ${frameNumber}) from a PADEL / pádel court video (enclosed glass court, padel racket). This is NOT lawn tennis, NOT a strung tennis racquet.
 
 CURRENT POSE LANDMARKS (normalized 0-1, top-left origin):
 ${JSON.stringify(landmarks, null, 2)}
@@ -364,7 +456,7 @@ ${JSON.stringify(handedness, null, 2)}
 
 SPECIFIC BODY ADJUSTMENTS TO MAKE:
 ${instructions}
-
+${proBlock}
 TASK:
 Regenerate this EXACT image — same person, same clothing, same court, same camera angle, same lighting, same background — but adjust ONLY the player's body position to reflect the corrections above.
 
@@ -382,7 +474,7 @@ COURT FLOOR: Do NOT add, extend, remove, or redraw white lines, service boxes, T
 
 SCALE AND FRAMING: Match the source image's zoom and composition exactly — the player must NOT appear larger, smaller, closer, or farther from the camera. Same apparent size in the frame (height/width footprint) as the reference; no crop change, no digital zoom, no "hero shot" enlargement. This is required for side-by-side before/after alignment.
 
-The result must look like a real photograph of the same individual in the same environment, just with improved body mechanics. Hair is frozen to the source: same length, cut, and volume — never lengthen, restyle, or add flowing hair. Match the reference frame for face, hair, apparent age, body build, and gender presentation — do not gender-swap, de-age, "beautify," or change hair length or hairstyle (e.g. short hair must remain short). Do NOT change clothing, face identity, court, or surroundings. Do NOT add or remove the padel racket or the ball — if there is no ball in the source frame, the output must not show a ball. Do NOT add text, labels, or overlays.`;
+The result must look like a real photograph of the same individual in the same environment, just with improved body mechanics. Hair is frozen to the source: same length, cut, and volume — never lengthen, restyle, or add flowing hair. Match the reference frame for face, hair, apparent age, body build, and gender presentation — do not gender-swap, de-age, "beautify," or change hair length or hairstyle (e.g. short hair must remain short). Do NOT change clothing, face identity, court, or surroundings. Do NOT add or remove the padel racket or the ball — if there is no ball in the source frame, the output must not show a ball. The racket must stay a PADEL racket (short handle, solid perforated face, wrist strap) — never replace with a lawn-tennis strung racquet, squash, or badminton racket. Do NOT add text, labels, or overlays.`;
 
   const invariantBlock = `
 NON-NEGOTIABLE INVARIANTS:
@@ -397,7 +489,7 @@ NON-NEGOTIABLE INVARIANTS:
 9) MOMENT AND SWING-ARC LOCK — Preserve the same phase of play and tactical intent as the source. If the player is in overhead preparation (lean back, racket behind head/shoulders) or mid-swing, keep that full athletic shape — do NOT collapse into a neutral upright stance, hands-and-racket low in front, or passive reception. Preserve body lean and racket load height; do not re-choreograph into a different stroke moment. Head/eye line stay per (7), not reinterpreted by the model.
 10) IMPACT AND CONTACT LOCK — The lesson is better ball striking; the output must show the SAME stroke instant as the source (impact, contact, ball near racket, OR the same preparation/arc if that is what the frame shows). If the source shows a hit or pre-hit loaded arc, keep that — same ball–racket relationship when visible, same swing phase. Do NOT remove the hit or the overhead arc to produce a static waiting pose. Do not "sanitize" motion blur into a stiff catalog pose unless the source was already static.
 11) Preserve dominant hand exactly (${handedness.dominant_hand}); do NOT mirror left/right body mechanics.
-12) PADEL RACKET AND BALL — Do not add or remove equipment. If the source frame has no visible ball, do NOT add a ball. If a ball is visible, keep it (do not erase it). If the padel racket is not in the frame, do NOT add one; if it is visible, do NOT remove it or replace it with a different racket. Only adjust pose; equipment inventory must match the source image.
+12) PADEL RACKET AND BALL — Do not add or remove equipment. If the source frame has no visible ball, do NOT add a ball. If a ball is visible, keep it (do not erase it). If the padel racket is not in the frame, do NOT add one; if it is visible, do NOT remove it or replace it with a different racket type. The racket must remain a padel racket (perforated solid face, short grip, wrist strap) — NEVER a lawn-tennis strung racquet or other sport. Only adjust pose; equipment inventory and equipment class must match the source image.
 13) Interpret forehand/backhand from player orientation (player-centric), not image left/right.
 14) Only modify biomechanical posture needed for corrections (below the neck / without altering head pose per (7)); no cosmetic or stylistic changes.
 15) Do not add text, labels, watermarks, skeleton overlays, or extra objects.`;
@@ -502,4 +594,168 @@ NON-NEGOTIABLE INVARIANTS:
   }
 
   return null;
+}
+
+function resolveFalKeyForCorrections(): string {
+  return String(process.env.FAL_API_KEY || process.env.FAL_KEY || "").trim();
+}
+
+/** Short English prompt for Flux img2img (fal); keeps same coaching intent as Gemini without huge token load. */
+export function buildFalCorrectionPrompt(
+  frameNumber: number,
+  landmarks: FrameLandmarks,
+  deltas: LandmarkDelta[],
+  diagnosis: string,
+  recommendations: string[],
+  shotAndHandedness: ShotAndHandedness | null,
+  proReferenceText?: string | null
+): string {
+  const instructions = deltasToInstructions(deltas);
+  const { shot, handedness } = mergeCorrectionShotAndHandedness(
+    shotAndHandedness ?? null
+  );
+  const rec = recommendations.map((r, i) => `${i + 1}. ${r}`).join(" ");
+  const trigger = String(process.env.FAL_CORRECTION_TRIGGER_WORD || "").trim();
+  const triggerLead = trigger ? `${trigger}. ` : "";
+  const proBit =
+    proReferenceText && proReferenceText.trim().length > 0
+      ? ` Pro library landmark targets (nudge body toward pro, nothing else): ${proReferenceText.trim().replace(/\s+/g, " ")}`
+      : "";
+  return `${triggerLead}Minimal img2img edit of one padel frame (frame ${frameNumber}). PADEL only — perforated solid racket, short handle, wrist strap; NOT a lawn-tennis strung racquet. Keep the input image as unchanged as possible: same pixels for background, court, glass, lines, lighting, skin tone, clothing, hair, and padel racket. Preserve composition and crop.
+
+ONLY nudge limb and torso posture toward better mechanics — very small joint-angle changes. Do NOT restyle, relight, recolor, beautify, or replace the athlete. Do NOT change the background or floor.
+
+Shot: ${shot.shot_name} (${shot.shot_family}). Striker: ${handedness.dominant_hand}.
+Coach diagnosis: ${diagnosis}
+Adjustments: ${instructions}
+Coaching cues: ${rec}${proBit}
+
+Hard constraints: same framing and scale; keep head pose and gaze; no teleporting; no adding/removing racket or ball; racket must stay padel-style; no new objects.`;
+}
+
+const DEFAULT_FAL_CORRECTION_ENDPOINT = "fal-ai/flux-general/image-to-image";
+
+/**
+ * Flux image-to-image via fal (optional LoRA from FAL_CORRECTION_LORA_URL).
+ * Returns an HTTPS image URL (fal CDN) or null on failure.
+ */
+export async function generateCorrectedImageFal(
+  originalImageBase64: string,
+  mimeType: string,
+  frameNumber: number,
+  landmarks: FrameLandmarks,
+  deltas: LandmarkDelta[],
+  diagnosis: string,
+  recommendations: string[],
+  shotAndHandedness?: ShotAndHandedness | null,
+  proReferenceText?: string | null
+): Promise<string | null> {
+  const apiKey = resolveFalKeyForCorrections();
+  if (!apiKey) {
+    console.error("[CorrectionPrompt] FAL_KEY / FAL_API_KEY missing for fal corrections");
+    return null;
+  }
+  fal.config({ credentials: apiKey });
+
+  const prompt = buildFalCorrectionPrompt(
+    frameNumber,
+    landmarks,
+    deltas,
+    diagnosis,
+    recommendations,
+    shotAndHandedness ?? null,
+    proReferenceText ?? null
+  );
+
+  let imageUrl: string;
+  try {
+    const buf = Buffer.from(originalImageBase64, "base64");
+    const blob = new Blob([buf], {
+      type: mimeType?.startsWith("image/") ? mimeType : "image/png",
+    });
+    imageUrl = await fal.storage.upload(blob, { lifecycle: { expiresIn: "1h" } });
+  } catch (e) {
+    console.error("[CorrectionPrompt] fal.storage upload failed", e);
+    return null;
+  }
+
+  const loraUrl = String(process.env.FAL_CORRECTION_LORA_URL || "").trim();
+  const loraScaleRaw = Number(process.env.FAL_CORRECTION_LORA_SCALE ?? "0.85");
+  const loras =
+    loraUrl.length > 0
+      ? [
+          {
+            path: loraUrl,
+            scale: Number.isFinite(loraScaleRaw) ? loraScaleRaw : 0.85,
+          },
+        ]
+      : [];
+
+  /** Lower = stay closer to source (img2img). Defaults tuned for subtle pose nudges, not full scene redraw. */
+  const strengthRaw = Number(process.env.FAL_CORRECTION_STRENGTH ?? "0.38");
+  const stepsRaw = Number(process.env.FAL_CORRECTION_STEPS ?? "22");
+  const guidanceRaw = Number(process.env.FAL_CORRECTION_GUIDANCE_SCALE ?? "2.6");
+  const strength = Number.isFinite(strengthRaw)
+    ? Math.min(1, Math.max(0.05, strengthRaw))
+    : 0.38;
+  const num_inference_steps = Number.isFinite(stepsRaw)
+    ? Math.max(10, Math.min(50, Math.round(stepsRaw)))
+    : 22;
+  const guidance_scale = Number.isFinite(guidanceRaw)
+    ? Math.min(6, Math.max(1, guidanceRaw))
+    : 2.6;
+
+  const endpoint =
+    String(process.env.FAL_CORRECTION_FLUX_ENDPOINT || "").trim() ||
+    DEFAULT_FAL_CORRECTION_ENDPOINT;
+
+  const inputPayload: Record<string, unknown> = {
+    prompt,
+    image_url: imageUrl,
+    strength,
+    num_inference_steps,
+    guidance_scale,
+    output_format: "png",
+    enable_safety_checker: true,
+    ...(loras.length ? { loras } : {}),
+  };
+
+  try {
+    let raw: { images?: Array<{ url?: string }>; data?: { images?: Array<{ url?: string }> } };
+    try {
+      raw = (await fal.subscribe(endpoint, {
+        input: inputPayload,
+        logs: false,
+      })) as typeof raw;
+    } catch (e: unknown) {
+      if (!shouldFallbackSubscribeToRun(e)) throw e;
+      console.warn("[CorrectionPrompt] fal.subscribe failed (network); retrying fal.run sync", {
+        endpoint,
+        message: e instanceof Error ? e.message : String(e),
+        hostname: getErrHostname(e),
+        code: getNetworkErrorCode(e),
+      });
+      raw = (await fal.run(endpoint, {
+        input: inputPayload,
+      })) as typeof raw;
+    }
+
+    const url =
+      raw?.images?.[0]?.url ?? raw?.data?.images?.[0]?.url;
+    if (!url) {
+      console.error("[CorrectionPrompt] fal returned no image url", {
+        endpoint,
+        keys: raw && typeof raw === "object" ? Object.keys(raw as object) : [],
+      });
+      return null;
+    }
+    return url;
+  } catch (e: any) {
+    console.error("[CorrectionPrompt] fal img2img failed", {
+      endpoint,
+      message: e?.message,
+      cause: e?.cause,
+    });
+    return null;
+  }
 }
