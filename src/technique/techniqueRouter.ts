@@ -58,7 +58,7 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-/** Neon/DNS blips often surface as ENOTFOUND on pooler hostnames; retry before failing the whole analyze. */
+/** Neon//DNS blips often surface as ENOTFOUND on pooler hostnames; retry before failing the whole analyze. */
 async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
   let last: unknown
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
