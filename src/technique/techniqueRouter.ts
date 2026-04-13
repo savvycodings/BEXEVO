@@ -874,7 +874,17 @@ Rules:
           'Technique analysis completed.'
       }
     } catch (err) {
-      console.error('[Technique] GPT analysis error:', err)
+      const cause = err instanceof Error && err.cause instanceof Error ? err.cause : null
+      const dnsCode =
+        cause && 'code' in cause ? String((cause as NodeJS.ErrnoException).code) : ''
+      if (dnsCode === 'ENOTFOUND') {
+        console.error(
+          '[Technique] GPT analysis skipped: DNS could not resolve api.openai.com (offline, VPN, firewall, or flaky DNS). Pose/retrieval data still saved.',
+          cause?.message ?? err
+        )
+      } else {
+        console.error('[Technique] GPT analysis error:', err)
+      }
       aiAnalysis = null
       feedbackText = 'AI analysis failed; only pose metrics are available.'
     }
