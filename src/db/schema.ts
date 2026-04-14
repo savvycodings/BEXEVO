@@ -348,6 +348,97 @@ export const techniqueAnalysis = pgTable("technique_analysis", {
   createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
 
+/** Coach review queue for student technique uploads. */
+export const coachVideoReview = pgTable(
+  "coach_video_review",
+  {
+    id: text("id").primaryKey(),
+    coachUserId: text("coachUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    studentUserId: text("studentUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    techniqueVideoId: text("techniqueVideoId")
+      .notNull()
+      .references(() => techniqueVideo.id, { onDelete: "cascade" }),
+    techniqueAnalysisId: text("techniqueAnalysisId").references(
+      () => techniqueAnalysis.id,
+      { onDelete: "set null" }
+    ),
+    status: text("status").notNull().default("pending"),
+    coachFeedbackText: text("coachFeedbackText"),
+    coachMarksJson: jsonb("coachMarksJson"),
+    submittedAt: timestamp("submittedAt"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("coach_video_review_unique_pair_idx").on(
+      table.coachUserId,
+      table.techniqueVideoId
+    ),
+    index("coach_video_review_coach_status_idx").on(
+      table.coachUserId,
+      table.status
+    ),
+    index("coach_video_review_student_status_idx").on(
+      table.studentUserId,
+      table.status
+    ),
+    index("coach_video_review_video_idx").on(table.techniqueVideoId),
+    index("coach_video_review_analysis_idx").on(table.techniqueAnalysisId),
+  ]
+);
+
+/** One row per coach-drawn/commented frame annotation. */
+export const coachReviewAnnotation = pgTable(
+  "coach_review_annotation",
+  {
+    id: text("id").primaryKey(),
+    reviewId: text("reviewId")
+      .notNull()
+      .references(() => coachVideoReview.id, { onDelete: "cascade" }),
+    imageUri: text("imageUri").notNull(),
+    cloudinaryUrl: text("cloudinaryUrl"),
+    comment: text("comment"),
+    timeMs: integer("timeMs").notNull().default(0),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("coach_review_annotation_review_idx").on(table.reviewId),
+    index("coach_review_annotation_review_time_idx").on(
+      table.reviewId,
+      table.timeMs
+    ),
+  ]
+);
+
+/** In-app notifications (coach review ready, etc). */
+export const userNotification = pgTable(
+  "user_notification",
+  {
+    id: text("id").primaryKey(),
+    userId: text("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    title: text("title").notNull(),
+    body: text("body"),
+    refType: text("refType"),
+    refId: text("refId"),
+    readAt: timestamp("readAt"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("user_notification_user_created_idx").on(
+      table.userId,
+      table.createdAt
+    ),
+    index("user_notification_ref_idx").on(table.refType, table.refId),
+  ]
+);
+
 /**
  * fal.ai LoRA dataset uploads (admin/team collaboration).
  *

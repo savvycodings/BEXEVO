@@ -4,9 +4,17 @@ import path from "path";
 import multer from "multer";
 import { randomUUID } from "crypto";
 import { fromNodeHeaders } from "better-auth/node";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, gte, inArray, lt } from "drizzle-orm";
 import { auth } from "../auth";
-import { db, user, userProfile, coachStudent } from "../db";
+import {
+  db,
+  user,
+  userProfile,
+  coachStudent,
+  coachVideoReview,
+  techniqueAnalysis,
+  userNotification,
+} from "../db";
 
 const router = express.Router();
 router.use(express.json());
@@ -397,19 +405,138 @@ router.get("/coach-students", async (req, res) => {
       .leftJoin(userProfile, eq(user.id, userProfile.userId))
       .where(inArray(user.id, studentIds));
 
+    const pendingReviews = await db.query.coachVideoReview.findMany({
+      where: (r, { and: _and, eq: _eq, inArray: _inArray }) =>
+        _and(
+          _eq(r.coachUserId, coachUserId),
+          _eq(r.status, "pending"),
+          _inArray(r.studentUserId, studentIds)
+        ),
+      orderBy: (r, { desc: _desc }) => [_desc(r.createdAt)],
+    });
+    const pendingByStudent = new Map<string, string>();
+    for (const r of pendingReviews) {
+      if (!pendingByStudent.has(r.studentUserId)) {
+        pendingByStudent.set(r.studentUserId, r.id);
+      }
+    }
+
+    const now = new Date();
+    const dayUtc = now.getUTCDay();
+    const diffToMonday = (dayUtc + 6) % 7;
+    const thisWeekStart = new Date(
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate() - diffToMonday,
+        0,
+        0,
+        0,
+        0
+      )
+    );
+    const nextWeekStart = new Date(thisWeekStart);
+    nextWeekStart.setUTCDate(nextWeekStart.getUTCDate() + 7);
+    const prevWeekStart = new Date(thisWeekStart);
+    prevWeekStart.setUTCDate(prevWeekStart.getUTCDate() - 7);
+
+    const scoreRows = await db
+      .select({
+        userId: techniqueAnalysis.userId,
+        createdAt: techniqueAnalysis.createdAt,
+        metrics: techniqueAnalysis.metrics,
+      })
+      .from(techniqueAnalysis)
+      .where(
+        and(
+          inArray(techniqueAnalysis.userId, studentIds),
+          gte(techniqueAnalysis.createdAt, prevWeekStart),
+          lt(techniqueAnalysis.createdAt, nextWeekStart)
+        )
+      );
+
+    const scoreAgg = new Map<
+      string,
+      { thisSum: number; thisCount: number; prevSum: number; prevCount: number }
+    >();
+    for (const row of scoreRows) {
+      const metrics = row.metrics as Record<string, unknown> | null | undefined;
+      const ai = metrics?.ai_analysis as Record<string, unknown> | undefined;
+      const score0to10 = typeof ai?.score === "number" ? Number(ai.score) : null;
+      if (score0to10 == null || !Number.isFinite(score0to10)) continue;
+      const score0to100 = Math.round(Math.max(0, Math.min(100, score0to10 * 10)));
+      const cur = scoreAgg.get(row.userId) ?? {
+        thisSum: 0,
+        thisCount: 0,
+        prevSum: 0,
+        prevCount: 0,
+      };
+      if (row.createdAt >= thisWeekStart && row.createdAt < nextWeekStart) {
+        cur.thisSum += score0to100;
+        cur.thisCount += 1;
+      } else if (row.createdAt >= prevWeekStart && row.createdAt < thisWeekStart) {
+        cur.prevSum += score0to100;
+        cur.prevCount += 1;
+      }
+      scoreAgg.set(row.userId, cur);
+    }
+
     return res.json({
       students: rows.map((r) => ({
+        ...(function () {
+          const agg = scoreAgg.get(r.id);
+          const currentWeekScore =
+            agg && agg.thisCount > 0 ? Math.round(agg.thisSum / agg.thisCount) : 0;
+          const lastWeekScore =
+            agg && agg.prevCount > 0 ? Math.round(agg.prevSum / agg.prevCount) : 0;
+          return { currentWeekScore, lastWeekScore };
+        })(),
         id: r.id,
         name: r.name,
         image: r.image ?? null,
         username: r.username ?? null,
         coachStudentRole: normalizeCoachStudentRole(r.coachStudentRole),
-        pendingCoachReviewId: null,
+        pendingCoachReviewId: pendingByStudent.get(r.id) ?? null,
       })),
     });
   } catch (e: any) {
     console.error("[Profile] coach-students GET error", e);
     return res.status(500).json({ error: "Failed to load coach students" });
+  }
+});
+
+router.get("/student-coaches", async (req, res) => {
+  try {
+    const studentUserId = await resolveUserId(req);
+    if (!studentUserId) return res.status(401).json({ error: "Unauthorized" });
+
+    const links = await db.query.coachStudent.findMany({
+      where: (cs, { eq: _eq }) => _eq(cs.studentUserId, studentUserId),
+    });
+    const coachIds = Array.from(new Set(links.map((l) => l.coachUserId).filter(Boolean)));
+    if (coachIds.length === 0) {
+      return res.json({ coaches: [] });
+    }
+
+    const rows = await db
+      .select({
+        id: user.id,
+        name: user.name,
+        image: user.image,
+      })
+      .from(user)
+      .where(inArray(user.id, coachIds));
+
+    return res.json({
+      coaches: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        image: r.image ?? null,
+      })),
+    });
+  } catch (e: any) {
+    console.error("[Profile] student-coaches GET error", e);
+    return res.status(500).json({ error: "Failed to load coaches" });
   }
 });
 
@@ -507,6 +634,51 @@ router.post("/admin-grant-coach", async (req, res) => {
   } catch (e: any) {
     console.error("[Profile] admin-grant-coach error", e);
     return res.status(500).json({ error: "Failed to set coach role" });
+  }
+});
+
+router.get("/notifications", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const notifications = await db.query.userNotification.findMany({
+      where: (n, { eq: _eq }) => _eq(n.userId, userId),
+      orderBy: (n, { desc: _desc }) => [_desc(n.createdAt)],
+      limit: 200,
+    });
+
+    return res.json({ notifications });
+  } catch (e: any) {
+    console.error("[Profile] notifications GET error", e);
+    return res.status(500).json({ error: "Failed to load notifications" });
+  }
+});
+
+router.post("/notifications/:id/read", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const id = String(req.params?.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing notification id" });
+
+    const row = await db.query.userNotification.findFirst({
+      where: (n, { and: _and, eq: _eq }) =>
+        _and(_eq(n.id, id), _eq(n.userId, userId)),
+    });
+    if (!row) return res.status(404).json({ error: "Notification not found" });
+
+    if (!row.readAt) {
+      await db
+        .update(userNotification)
+        .set({ readAt: new Date() })
+        .where(and(eq(userNotification.id, id), eq(userNotification.userId, userId)));
+    }
+
+    return res.json({ ok: true });
+  } catch (e: any) {
+    console.error("[Profile] notifications read error", e);
+    return res.status(500).json({ error: "Failed to mark notification read" });
   }
 });
 

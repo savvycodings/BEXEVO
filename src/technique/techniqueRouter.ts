@@ -4,9 +4,17 @@ import fs from 'fs'
 import path from 'path'
 import { fromNodeHeaders } from 'better-auth/node'
 import { auth } from '../auth'
-import { db, techniqueVideo, techniqueAnalysis, user } from '../db'
+import {
+  db,
+  techniqueVideo,
+  techniqueAnalysis,
+  user,
+  coachStudent,
+  coachReviewAnnotation,
+  coachVideoReview,
+} from '../db'
 import { randomUUID, createHash } from 'crypto'
-import { desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { extractFrame, resolveVideoPath } from './frameExtractor'
 import {
   translateRecommendationsToDeltas,
@@ -279,6 +287,9 @@ router.post('/upload', upload.single('video'), async (req, res) => {
     const id = randomUUID()
     const ext = path.extname(req.file.originalname || '') || '.mp4'
     const filePath = path.join(UPLOAD_ROOT, `${id}${ext}`)
+    const sendVideoToCoachRaw = String(req.body?.sendVideoToCoach ?? '').trim()
+    const sendVideoToCoach =
+      sendVideoToCoachRaw === '1' || /^true$/i.test(sendVideoToCoachRaw)
 
     console.log('[Technique] Writing video to disk...', { filePath })
     await fs.promises.writeFile(filePath, req.file.buffer)
@@ -296,7 +307,44 @@ router.post('/upload', upload.single('video'), async (req, res) => {
     })
     console.log('[Technique] DB insert done, id:', id)
 
-    const payload = { id, url: publicPath, publicId: filePath }
+    let coachReviewCreated = 0
+    if (sendVideoToCoach) {
+      const links = await db.query.coachStudent.findMany({
+        where: (cs, { eq: _eq }) => _eq(cs.studentUserId, userId),
+      })
+      const coachIds = Array.from(
+        new Set(
+          links
+            .map((l) => l.coachUserId)
+            .filter((coachId): coachId is string => !!coachId && coachId !== userId)
+        )
+      )
+      if (coachIds.length > 0) {
+        const now = new Date()
+        await db
+          .insert(coachVideoReview)
+          .values(
+            coachIds.map((coachUserId) => ({
+              id: randomUUID(),
+              coachUserId,
+              studentUserId: userId,
+              techniqueVideoId: id,
+              status: 'pending',
+              createdAt: now,
+              updatedAt: now,
+            }))
+          )
+          .onConflictDoNothing()
+        coachReviewCreated = coachIds.length
+      }
+    }
+
+    const payload = {
+      id,
+      url: publicPath,
+      publicId: filePath,
+      coachReviewCreated,
+    }
     console.log('[Technique] Sending success response')
     return res.json(payload)
   } catch (e: any) {
@@ -397,6 +445,79 @@ router.get('/activities', async (req, res) => {
       }
     }
 
+    const reviewRows =
+      videoIds.length > 0
+        ? await db.query.coachVideoReview.findMany({
+            where: (r, { and: _and, eq: _eq, inArray: _inArray }) =>
+              _and(
+                _eq(r.studentUserId, userId),
+                _inArray(r.techniqueVideoId, videoIds)
+              ),
+            orderBy: (r, { desc: _desc }) => [_desc(r.createdAt)],
+          })
+        : []
+    const reviewIds = reviewRows.map((r) => r.id)
+    const reviewAnnotationRows =
+      reviewIds.length > 0
+        ? await db.query.coachReviewAnnotation.findMany({
+            where: (a, { inArray: _inArray }) =>
+              _inArray(a.reviewId, reviewIds),
+            orderBy: (a, { asc: _asc }) => [_asc(a.timeMs), _asc(a.createdAt)],
+            limit: 2000,
+          })
+        : []
+    const annByReviewId = new Map<
+      string,
+      Array<{
+        imageUri: string
+        cloudinaryUrl: string | null
+        comment: string
+        timeMs: number
+      }>
+    >()
+    for (const ann of reviewAnnotationRows) {
+      const arr = annByReviewId.get(ann.reviewId) ?? []
+      arr.push({
+        imageUri: ann.imageUri,
+        cloudinaryUrl: ann.cloudinaryUrl ?? null,
+        comment: ann.comment ?? '',
+        timeMs: ann.timeMs,
+      })
+      annByReviewId.set(ann.reviewId, arr)
+    }
+    const reviewByVideoId = new Map<
+      string,
+      {
+        id: string
+        status: string
+        coachFeedbackText: string | null
+        coachMarksJson: unknown | null
+        submittedAt: Date | null
+      }
+    >()
+    for (const row of reviewRows) {
+      const existing = reviewByVideoId.get(row.techniqueVideoId)
+      if (!existing) {
+        reviewByVideoId.set(row.techniqueVideoId, {
+          id: row.id,
+          status: row.status,
+          coachFeedbackText: row.coachFeedbackText ?? null,
+          coachMarksJson: annByReviewId.get(row.id) ?? row.coachMarksJson ?? null,
+          submittedAt: row.submittedAt ?? null,
+        })
+        continue
+      }
+      if (existing.status !== 'completed' && row.status === 'completed') {
+        reviewByVideoId.set(row.techniqueVideoId, {
+          id: row.id,
+          status: row.status,
+          coachFeedbackText: row.coachFeedbackText ?? null,
+          coachMarksJson: annByReviewId.get(row.id) ?? row.coachMarksJson ?? null,
+          submittedAt: row.submittedAt ?? null,
+        })
+      }
+    }
+
     const items = analyses.map((a) => {
       const metrics = a.metrics as Record<string, unknown> | null | undefined
       const ai = metrics?.ai_analysis as Record<string, unknown> | undefined
@@ -418,6 +539,7 @@ router.get('/activities', async (req, res) => {
         const first = en.shot_context.split(/[.!?]/)[0]?.trim() ?? ''
         shotLabel = first.length > 36 ? `${first.slice(0, 34)}…` : first || 'Technique'
       }
+      const review = reviewByVideoId.get(a.techniqueVideoId)
       return {
         analysisId: a.id,
         techniqueVideoId: a.techniqueVideoId,
@@ -434,6 +556,11 @@ router.get('/activities', async (req, res) => {
         lastScore: null,
         shotLabel,
         rating,
+        coachReviewId: review?.id ?? null,
+        coachReviewStatus: review?.status ?? null,
+        coachFeedbackText: review?.coachFeedbackText ?? null,
+        coachMarksJson: review?.coachMarksJson ?? null,
+        coachReviewedAt: review?.submittedAt?.toISOString() ?? null,
       }
     })
 
@@ -480,6 +607,20 @@ router.post('/analyze', async (req, res) => {
       metrics: null,
       feedbackText: null,
     })
+
+    await db
+      .update(coachVideoReview)
+      .set({
+        techniqueAnalysisId: analysisId,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(coachVideoReview.techniqueVideoId, techniqueVideoId),
+          eq(coachVideoReview.studentUserId, userId),
+          isNull(coachVideoReview.techniqueAnalysisId)
+        )
+      )
 
     const publicVideoBase = (process.env.PUBLIC_VIDEO_BASE_URL || '').trim()
     const publicBase = (process.env.PUBLIC_BASE_URL || '').trim()
@@ -950,12 +1091,48 @@ router.get('/analysis/:id', async (req, res) => {
       return res.status(404).json({ error: 'Analysis not found' })
     }
 
+    const reviewRows = await db.query.coachVideoReview.findMany({
+      where: (r, { and: _and, eq: _eq }) =>
+        _and(
+          _eq(r.studentUserId, userId),
+          _eq(r.techniqueVideoId, analysis.techniqueVideoId)
+        ),
+      orderBy: (r, { desc: _desc }) => [_desc(r.createdAt)],
+      limit: 5,
+    })
+    const coachReview =
+      reviewRows.find((r) => r.status === 'completed') ?? reviewRows[0] ?? null
+    const coachReviewAnnotations = coachReview
+      ? await db.query.coachReviewAnnotation.findMany({
+          where: (a, { eq: _eq }) => _eq(a.reviewId, coachReview.id),
+          orderBy: (a, { asc: _asc }) => [_asc(a.timeMs), _asc(a.createdAt)],
+          limit: 200,
+        })
+      : []
+
     return res.json({
       id: analysis.id,
       status: analysis.status,
       metrics: analysis.metrics,
       feedbackText: analysis.feedbackText,
       createdAt: analysis.createdAt,
+      coachReview: coachReview
+        ? {
+            id: coachReview.id,
+            status: coachReview.status,
+            coachFeedbackText: coachReview.coachFeedbackText ?? null,
+            coachMarksJson:
+              coachReviewAnnotations.length > 0
+                ? coachReviewAnnotations.map((a) => ({
+                    imageUri: a.imageUri,
+                    cloudinaryUrl: a.cloudinaryUrl ?? null,
+                    comment: a.comment ?? '',
+                    timeMs: a.timeMs,
+                  }))
+                : coachReview.coachMarksJson ?? null,
+            submittedAt: coachReview.submittedAt ?? null,
+          }
+        : null,
     })
   } catch (e: any) {
     console.error('[Technique] Analysis fetch error:', e)
