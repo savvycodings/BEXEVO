@@ -58,7 +58,7 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-/** Neon//DNS blips oftten surface as ENOTFOUND on pooler hostnames; retry before failing the whole analyze. */
+/** Neon//DNS blips ofttten surface as ENOTFOUND on pooler hostnames; retry before failing the whole analyze. */
 async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
   let last: unknown
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -77,7 +77,7 @@ async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts =
   throw last
 }
 
-/** Stage local upload on fal CDN so Modal can GET real bytes (ngrok often 404s server-side). */
+/** Stage local upload on fal CsDN so Modal can GET real bytes (ngrok often 404s server-side). */
 async function uploadLocalVideoToFalCdn(absPath: string): Promise<string> {
   const key = resolveFalKey()
   if (!key) throw new Error('FAL_KEY or FAL_API_KEY is not set')

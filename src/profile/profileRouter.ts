@@ -4,9 +4,9 @@ import path from "path";
 import multer from "multer";
 import { randomUUID } from "crypto";
 import { fromNodeHeaders } from "better-auth/node";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { auth } from "../auth";
-import { db, user, userProfile } from "../db";
+import { db, user, userProfile, coachStudent } from "../db";
 
 const router = express.Router();
 router.use(express.json());
@@ -17,6 +17,40 @@ const upload = multer({
 });
 
 const PROFILE_UPLOAD_ROOT = path.join(process.cwd(), "uploads", "profile");
+const ADMIN_HUB_GATE_PASSWORD = process.env.ADMIN_HUB_GATE_PASSWORD || "xevodev";
+
+type CoachStudentRole = "coach" | "student" | "none";
+
+function normalizeCoachStudentRole(value: unknown): CoachStudentRole {
+  if (value === "coach" || value === "student") return value;
+  return "none";
+}
+
+async function getCoachStudentRole(userId: string): Promise<CoachStudentRole> {
+  const profile = await db.query.userProfile.findFirst({
+    where: (p, { eq: _eq }) => _eq(p.userId, userId),
+  });
+  return normalizeCoachStudentRole(profile?.coachStudentRole);
+}
+
+async function setCoachStudentRole(userId: string, role: CoachStudentRole): Promise<void> {
+  const now = new Date();
+  await db
+    .insert(userProfile)
+    .values({
+      userId,
+      coachStudentRole: role,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: userProfile.userId,
+      set: {
+        coachStudentRole: role,
+        updatedAt: now,
+      },
+    });
+}
 
 async function resolveUserId(req: express.Request): Promise<string | null> {
   const authSession = await auth.api
@@ -297,6 +331,178 @@ router.post("/game", async (req, res) => {
   } catch (e: any) {
     console.error("[Profile] game update error", e);
     return res.status(500).json({ error: "Failed to update game settings" });
+  }
+});
+
+router.get("/directory", async (req, res) => {
+  try {
+    const requesterId = await resolveUserId(req);
+    if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
+
+    const users = await db.query.user.findMany();
+    const profiles = await db.query.userProfile.findMany();
+    const profileByUserId = new Map(profiles.map((p) => [p.userId, p]));
+
+    return res.json({
+      users: users
+        .filter((u) => u.id !== requesterId)
+        .map((u) => {
+          const p = profileByUserId.get(u.id);
+          return {
+            id: u.id,
+            name: u.name,
+            image: u.image ?? null,
+            username: p?.username ?? null,
+            coachStudentRole: normalizeCoachStudentRole(p?.coachStudentRole),
+          };
+        }),
+    });
+  } catch (e: any) {
+    console.error("[Profile] directory error", e);
+    return res.status(500).json({ error: "Failed to load directory" });
+  }
+});
+
+router.get("/coach-students", async (req, res) => {
+  try {
+    const coachUserId = await resolveUserId(req);
+    if (!coachUserId) return res.status(401).json({ error: "Unauthorized" });
+
+    const role = await getCoachStudentRole(coachUserId);
+    if (role !== "coach") {
+      return res.json({ students: [] });
+    }
+
+    const links = await db.query.coachStudent.findMany({
+      where: (cs, { eq: _eq }) => _eq(cs.coachUserId, coachUserId),
+    });
+    const studentIds = Array.from(new Set(links.map((l) => l.studentUserId).filter(Boolean)));
+    if (studentIds.length === 0) {
+      return res.json({ students: [] });
+    }
+
+    const rows = await db
+      .select({
+        id: user.id,
+        name: user.name,
+        image: user.image,
+        username: userProfile.username,
+        coachStudentRole: userProfile.coachStudentRole,
+      })
+      .from(user)
+      .leftJoin(userProfile, eq(user.id, userProfile.userId))
+      .where(inArray(user.id, studentIds));
+
+    return res.json({
+      students: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        image: r.image ?? null,
+        username: r.username ?? null,
+        coachStudentRole: normalizeCoachStudentRole(r.coachStudentRole),
+        pendingCoachReviewId: null,
+      })),
+    });
+  } catch (e: any) {
+    console.error("[Profile] coach-students GET error", e);
+    return res.status(500).json({ error: "Failed to load coach students" });
+  }
+});
+
+router.post("/coach-students", async (req, res) => {
+  try {
+    const coachUserId = await resolveUserId(req);
+    if (!coachUserId) return res.status(401).json({ error: "Unauthorized" });
+
+    const role = await getCoachStudentRole(coachUserId);
+    if (role !== "coach") {
+      return res.status(403).json({ error: "Only coaches can add students" });
+    }
+
+    const studentUserId = String(req.body?.studentUserId || "").trim();
+    if (!studentUserId) return res.status(400).json({ error: "studentUserId is required" });
+    if (studentUserId === coachUserId) {
+      return res.status(400).json({ error: "Cannot add yourself as a student" });
+    }
+
+    const student = await db.query.user.findFirst({
+      where: (u, { eq: _eq }) => _eq(u.id, studentUserId),
+    });
+    if (!student) return res.status(404).json({ error: "Student not found" });
+
+    await db
+      .insert(coachStudent)
+      .values({
+        id: randomUUID(),
+        coachUserId,
+        studentUserId,
+      })
+      .onConflictDoNothing();
+
+    const studentRole = await getCoachStudentRole(studentUserId);
+    if (studentRole !== "coach") {
+      await setCoachStudentRole(studentUserId, "student");
+    }
+
+    return res.json({ ok: true });
+  } catch (e: any) {
+    console.error("[Profile] coach-students POST error", e);
+    return res.status(500).json({ error: "Failed to add student" });
+  }
+});
+
+router.post("/promote-student-to-coach", async (req, res) => {
+  try {
+    const coachUserId = await resolveUserId(req);
+    if (!coachUserId) return res.status(401).json({ error: "Unauthorized" });
+
+    const role = await getCoachStudentRole(coachUserId);
+    if (role !== "coach") {
+      return res.status(403).json({ error: "Only coaches can promote students" });
+    }
+
+    const targetUserId = String(req.body?.targetUserId || "").trim();
+    if (!targetUserId) return res.status(400).json({ error: "targetUserId is required" });
+
+    const relation = await db.query.coachStudent.findFirst({
+      where: (cs, { eq: _eq, and: _and }) =>
+        _and(_eq(cs.coachUserId, coachUserId), _eq(cs.studentUserId, targetUserId)),
+    });
+    if (!relation) {
+      return res.status(404).json({ error: "This user is not in your student list" });
+    }
+
+    await setCoachStudentRole(targetUserId, "coach");
+    return res.json({ ok: true });
+  } catch (e: any) {
+    console.error("[Profile] promote-student-to-coach error", e);
+    return res.status(500).json({ error: "Failed to promote student" });
+  }
+});
+
+router.post("/admin-grant-coach", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const providedPassword = String(req.headers["x-xevo-admin-hub-password"] || "").trim();
+    if (!providedPassword || providedPassword !== ADMIN_HUB_GATE_PASSWORD) {
+      return res.status(403).json({ error: "Invalid admin password" });
+    }
+
+    const targetUserId = String(req.body?.targetUserId || "").trim();
+    if (!targetUserId) return res.status(400).json({ error: "targetUserId is required" });
+
+    const target = await db.query.user.findFirst({
+      where: (u, { eq: _eq }) => _eq(u.id, targetUserId),
+    });
+    if (!target) return res.status(404).json({ error: "User not found" });
+
+    await setCoachStudentRole(targetUserId, "coach");
+    return res.json({ ok: true });
+  } catch (e: any) {
+    console.error("[Profile] admin-grant-coach error", e);
+    return res.status(500).json({ error: "Failed to set coach role" });
   }
 });
 

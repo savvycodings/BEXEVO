@@ -8,6 +8,7 @@ import {
   pgEnum,
   vector,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 export type TechniqueCorrectionImage = {
@@ -158,6 +159,7 @@ export const userProfile = pgTable("user_profile", {
     .primaryKey()
     .references(() => user.id, { onDelete: "cascade" }),
   username: text("username"),
+  coachStudentRole: text("coachStudentRole").default("none"),
   gender: text("gender"),
   dominantHand: text("dominantHand"),
   courtSide: text("courtSide"),
@@ -168,6 +170,29 @@ export const userProfile = pgTable("user_profile", {
   createdAt: timestamp("createdAt").notNull().defaultNow(),
   updatedAt: timestamp("updatedAt").notNull().defaultNow(),
 });
+
+/** Coach's roster of students shown in My Coach + coach tools. */
+export const coachStudent = pgTable(
+  "coach_student",
+  {
+    id: text("id").primaryKey(),
+    coachUserId: text("coachUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    studentUserId: text("studentUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("coach_student_unique_pair_idx").on(
+      table.coachUserId,
+      table.studentUserId
+    ),
+    index("coach_student_coach_idx").on(table.coachUserId),
+    index("coach_student_student_idx").on(table.studentUserId),
+  ]
+);
 
 export const techniqueVideo = pgTable("technique_video", {
   id: text("id").primaryKey(),
