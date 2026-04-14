@@ -345,7 +345,11 @@ router.get("/directory", async (req, res) => {
 
     return res.json({
       users: users
-        .filter((u) => u.id !== requesterId)
+        .sort((a, b) => {
+          if (a.id === requesterId) return -1;
+          if (b.id === requesterId) return 1;
+          return a.name.localeCompare(b.name);
+        })
         .map((u) => {
           const p = profileByUserId.get(u.id);
           return {

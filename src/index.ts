@@ -30,6 +30,7 @@ app.use(cors({
     'Accept',
     'X-Requested-With',
     'X-Admin-Train-Secret',
+    'X-Xevo-Admin-Hub-Password',
   ],
 }))
 
@@ -45,7 +46,7 @@ app.use('/api/auth', (req, _res, next) => {
     _res.header('Access-Control-Allow-Credentials', 'true')
     _res.header(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, Cache-Control, Accept, X-Requested-With, X-Admin-Train-Secret',
+      'Content-Type, Authorization, Cache-Control, Accept, X-Requested-With, X-Admin-Train-Secret, X-Xevo-Admin-Hub-Password',
     )
     _res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,PATCH,OPTIONS')
     _res.header('Vary', 'Origin')
