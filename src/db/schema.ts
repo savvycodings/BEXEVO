@@ -159,6 +159,8 @@ export const userProfile = pgTable("user_profile", {
     .primaryKey()
     .references(() => user.id, { onDelete: "cascade" }),
   username: text("username"),
+  /** City or region line; shown to linked coaches only (coach-students API), not on public directory. */
+  areaLocation: text("areaLocation"),
   coachStudentRole: text("coachStudentRole").default("none"),
   gender: text("gender"),
   dominantHand: text("dominantHand"),
@@ -191,6 +193,54 @@ export const coachStudent = pgTable(
     ),
     index("coach_student_coach_idx").on(table.coachUserId),
     index("coach_student_student_idx").on(table.studentUserId),
+  ]
+);
+
+/**
+ * Private 1:1 chat thread for a single coach–student roster row (not broadcast).
+ * Create a row when the pair is linked or on first message. Weekly score rings in the UI
+ * can stay derived from `technique_analysis` (see `/profile/coach-students`) until you add snapshots.
+ */
+export const coachStudentChat = pgTable(
+  "coach_student_chat",
+  {
+    id: text("id").primaryKey(),
+    coachStudentId: text("coachStudentId")
+      .notNull()
+      .unique()
+      .references(() => coachStudent.id, { onDelete: "cascade" }),
+    lastMessageAt: timestamp("lastMessageAt"),
+    coachLastReadAt: timestamp("coachLastReadAt"),
+    studentLastReadAt: timestamp("studentLastReadAt"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [index("coach_student_chat_last_message_idx").on(table.lastMessageAt)]
+);
+
+export const coachStudentChatMessage = pgTable(
+  "coach_student_chat_message",
+  {
+    id: text("id").primaryKey(),
+    chatId: text("chatId")
+      .notNull()
+      .references(() => coachStudentChat.id, { onDelete: "cascade" }),
+    senderUserId: text("senderUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** `text` | future: `system`, etc. */
+    kind: text("kind").notNull().default("text"),
+    body: text("body").notNull(),
+    /** Optional refs: clip id, review id, structured payload for “new video” tiles, etc. */
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("coach_student_chat_message_chat_created_idx").on(
+      table.chatId,
+      table.createdAt
+    ),
+    index("coach_student_chat_message_sender_idx").on(table.senderUserId),
   ]
 );
 

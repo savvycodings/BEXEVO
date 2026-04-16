@@ -843,6 +843,7 @@ Respond ONLY with a single JSON object matching this exact schema:
   "invalid_reason": "",
   "score": <integer 0-10>,
   "rating": "<excellent|good|needs_improvement|poor>",
+  "primary_train_category": "<save_return|ground_strokes|net_play|defence_glass|overhead|tactical_specials>",
   "en": {
     "diagnosis": "2-4 sentence summary in English, directly addressing the user as 'you'...",
     "shot_context": "One sentence about shot type and context.",
@@ -924,6 +925,7 @@ Rules:
   - score to 0 and rating to "poor"
 - score: integer 0-10 reflecting overall technique quality (10=perfect, 0=very poor)
 - rating: one of "excellent" (8-10), "good" (6-7), "needs_improvement" (3-5), "poor" (0-2)
+- primary_train_category: exactly one of save_return | ground_strokes | net_play | defence_glass | overhead | tactical_specials — pick the single train pillar this clip best represents (use save_return for serves/returns, ground_strokes for drives from the back, net_play for volleys and net work, defence_glass for defence off the glass, overhead for smashes/víboras/bandejas overhead, tactical_specials only for clearly tactical specialty shots). Must match the clip content, not a guess when uncertain use the closest pillar.
 - Do NOT default to 7. Use the full 0-10 scale when evidence supports it.
 - Be strict and discriminative: major mechanical faults should score <=5; strong, consistent form should score >=8.
 - Only respond with valid JSON, no markdown, no other text.`

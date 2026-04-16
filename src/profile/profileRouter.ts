@@ -4,7 +4,7 @@ import path from "path";
 import multer from "multer";
 import { randomUUID } from "crypto";
 import { fromNodeHeaders } from "better-auth/node";
-import { and, eq, gte, inArray, lt } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt } from "drizzle-orm";
 import { auth } from "../auth";
 import {
   db,
@@ -14,6 +14,8 @@ import {
   coachVideoReview,
   techniqueAnalysis,
   userNotification,
+  coachStudentChat,
+  coachStudentChatMessage,
 } from "../db";
 
 const router = express.Router();
@@ -92,6 +94,163 @@ async function resolveUserId(req: express.Request): Promise<string | null> {
   }
   return resolvedUserId;
 }
+
+const VALID_TRAIN_CATEGORY = new Set([
+  "ground_strokes",
+  "net_play",
+  "defence_glass",
+  "save_return",
+  "overhead",
+  "tactical_specials",
+]);
+
+/** Stable API order (matches Progress / profile rings). */
+const TRAIN_CATEGORY_ORDER = [
+  "save_return",
+  "ground_strokes",
+  "net_play",
+  "defence_glass",
+  "overhead",
+  "tactical_specials",
+] as const;
+
+function utcMondayWeekBounds() {
+  const now = new Date();
+  const dayUtc = now.getUTCDay();
+  const diffToMonday = (dayUtc + 6) % 7;
+  const thisWeekStart = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() - diffToMonday,
+      0,
+      0,
+      0,
+      0
+    )
+  );
+  const nextWeekStart = new Date(thisWeekStart);
+  nextWeekStart.setUTCDate(nextWeekStart.getUTCDate() + 7);
+  const prevWeekStart = new Date(thisWeekStart);
+  prevWeekStart.setUTCDate(prevWeekStart.getUTCDate() - 7);
+  return { thisWeekStart, nextWeekStart, prevWeekStart };
+}
+
+function trainCategoryFromTechniqueMetrics(metrics: unknown): string | null {
+  if (!metrics || typeof metrics !== "object") return null;
+  const m = metrics as Record<string, unknown>;
+  const ai = m.ai_analysis as Record<string, unknown> | undefined;
+  const primary =
+    typeof ai?.primary_train_category === "string" ? ai.primary_train_category.trim() : null;
+  if (primary && VALID_TRAIN_CATEGORY.has(primary)) return primary;
+
+  const retrieval = m.retrieval as Record<string, unknown> | undefined;
+  const sh = retrieval?.shot_hypothesis as Record<string, unknown> | undefined;
+  const c = typeof sh?.category === "string" ? sh.category.trim() : null;
+  if (c && VALID_TRAIN_CATEGORY.has(c)) return c;
+  return null;
+}
+
+function score10FromTechniqueMetrics(metrics: unknown): number | null {
+  if (!metrics || typeof metrics !== "object") return null;
+  const m = metrics as Record<string, unknown>;
+  const ai = m.ai_analysis as Record<string, unknown> | undefined;
+  const s = typeof ai?.score === "number" ? Number(ai.score) : null;
+  if (s == null || !Number.isFinite(s)) return null;
+  return Math.max(0, Math.min(10, s));
+}
+
+/** Profile + coach roster: per-train-category averages from technique_analysis (retrieval shot category). */
+router.get("/rating-by-category", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const { thisWeekStart, nextWeekStart, prevWeekStart } = utcMondayWeekBounds();
+
+    const rows = await db
+      .select({
+        createdAt: techniqueAnalysis.createdAt,
+        metrics: techniqueAnalysis.metrics,
+        status: techniqueAnalysis.status,
+      })
+      .from(techniqueAnalysis)
+      .where(
+        and(
+          eq(techniqueAnalysis.userId, userId),
+          eq(techniqueAnalysis.status, "completed"),
+          gte(techniqueAnalysis.createdAt, prevWeekStart),
+          lt(techniqueAnalysis.createdAt, nextWeekStart)
+        )
+      );
+
+    type Bucket = { twSum: number; twN: number; lwSum: number; lwN: number };
+    const emptyBucket = (): Bucket => ({ twSum: 0, twN: 0, lwSum: 0, lwN: 0 });
+    const byCat = new Map<string, Bucket>();
+    for (const id of TRAIN_CATEGORY_ORDER) {
+      byCat.set(id, emptyBucket());
+    }
+
+    let overallTw = 0,
+      overallTwN = 0,
+      overallLw = 0,
+      overallLwN = 0;
+
+    for (const row of rows) {
+      const score = score10FromTechniqueMetrics(row.metrics);
+      if (score == null) continue;
+      const cat = trainCategoryFromTechniqueMetrics(row.metrics);
+      const created = row.createdAt;
+      const inThis = created >= thisWeekStart && created < nextWeekStart;
+      const inLast = created >= prevWeekStart && created < thisWeekStart;
+
+      if (inThis) {
+        overallTw += score;
+        overallTwN += 1;
+      } else if (inLast) {
+        overallLw += score;
+        overallLwN += 1;
+      }
+
+      if (!cat) continue;
+      const b = byCat.get(cat);
+      if (!b) continue;
+      if (inThis) {
+        b.twSum += score;
+        b.twN += 1;
+      } else if (inLast) {
+        b.lwSum += score;
+        b.lwN += 1;
+      }
+    }
+
+    const round1 = (v: number) => Math.round(v * 10) / 10;
+
+    const categories = TRAIN_CATEGORY_ORDER.map((id) => {
+      const b = byCat.get(id)!;
+      return {
+        id,
+        thisWeek: b.twN > 0 ? round1(b.twSum / b.twN) : 0,
+        lastWeek: b.lwN > 0 ? round1(b.lwSum / b.lwN) : 0,
+        thisWeekCount: b.twN,
+        lastWeekCount: b.lwN,
+      };
+    });
+
+    return res.json({
+      categories,
+      overall: {
+        thisWeek: overallTwN > 0 ? round1(overallTw / overallTwN) : null,
+        lastWeek: overallLwN > 0 ? round1(overallLw / overallLwN) : null,
+        thisWeekCount: overallTwN,
+        lastWeekCount: overallLwN,
+      },
+    });
+  } catch (e: any) {
+    console.error("[Profile] rating-by-category GET error", e);
+    return res.status(500).json({ error: "Failed to load rating by category" });
+  }
+});
 
 router.get("/me", async (req, res) => {
   try {
@@ -251,6 +410,20 @@ router.post("/basic", async (req, res) => {
     const username = (req.body?.username || "").trim() || null;
     const gender = (req.body?.gender || "").trim() || null;
 
+    const existingProfile = await db.query.userProfile.findFirst({
+      where: (p, { eq: _eq }) => _eq(p.userId, userId),
+    });
+    const body = req.body as Record<string, unknown>;
+    const includeAreaLocation = Object.prototype.hasOwnProperty.call(body, "areaLocation");
+    let areaLocation: string | null;
+    if (includeAreaLocation) {
+      const raw = body.areaLocation;
+      areaLocation =
+        typeof raw === "string" && raw.trim().length > 0 ? raw.trim().slice(0, 200) : null;
+    } else {
+      areaLocation = existingProfile?.areaLocation ?? null;
+    }
+
     const now = new Date();
 
     await db
@@ -259,6 +432,7 @@ router.post("/basic", async (req, res) => {
         userId,
         username,
         gender,
+        areaLocation,
         createdAt: now,
         updatedAt: now,
       })
@@ -267,6 +441,7 @@ router.post("/basic", async (req, res) => {
         set: {
           username,
           gender,
+          areaLocation,
           updatedAt: now,
         },
       });
@@ -399,6 +574,7 @@ router.get("/coach-students", async (req, res) => {
         name: user.name,
         image: user.image,
         username: userProfile.username,
+        areaLocation: userProfile.areaLocation,
         coachStudentRole: userProfile.coachStudentRole,
       })
       .from(user)
@@ -495,6 +671,7 @@ router.get("/coach-students", async (req, res) => {
         name: r.name,
         image: r.image ?? null,
         username: r.username ?? null,
+        areaLocation: r.areaLocation?.trim() || null,
         coachStudentRole: normalizeCoachStudentRole(r.coachStudentRole),
         pendingCoachReviewId: pendingByStudent.get(r.id) ?? null,
       })),
@@ -634,6 +811,113 @@ router.post("/admin-grant-coach", async (req, res) => {
   } catch (e: any) {
     console.error("[Profile] admin-grant-coach error", e);
     return res.status(500).json({ error: "Failed to set coach role" });
+  }
+});
+
+async function coachStudentLinkForPeer(requesterId: string, peerUserId: string) {
+  return db.query.coachStudent.findFirst({
+    where: (cs, { or, and, eq: _eq }) =>
+      or(
+        and(_eq(cs.coachUserId, requesterId), _eq(cs.studentUserId, peerUserId)),
+        and(_eq(cs.studentUserId, requesterId), _eq(cs.coachUserId, peerUserId))
+      ),
+  });
+}
+
+async function ensureCoachStudentChatRow(coachStudentId: string): Promise<string> {
+  const existing = await db
+    .select({ id: coachStudentChat.id })
+    .from(coachStudentChat)
+    .where(eq(coachStudentChat.coachStudentId, coachStudentId))
+    .limit(1);
+  if (existing[0]?.id) return existing[0].id;
+  const id = randomUUID();
+  const now = new Date();
+  await db.insert(coachStudentChat).values({
+    id,
+    coachStudentId,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return id;
+}
+
+/** Private coach ↔ student messages (one chat per `coach_student` row). */
+router.get("/coach-student-chat/:peerUserId/messages", async (req, res) => {
+  try {
+    const requesterId = await resolveUserId(req);
+    if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
+
+    const peerUserId = String(req.params?.peerUserId || "").trim();
+    if (!peerUserId) return res.status(400).json({ error: "Missing peer user id" });
+
+    const link = await coachStudentLinkForPeer(requesterId, peerUserId);
+    if (!link) {
+      return res.status(403).json({ error: "No coach-student link with this user" });
+    }
+
+    const chatId = await ensureCoachStudentChatRow(link.id);
+    const rows = await db
+      .select()
+      .from(coachStudentChatMessage)
+      .where(eq(coachStudentChatMessage.chatId, chatId))
+      .orderBy(desc(coachStudentChatMessage.createdAt))
+      .limit(200);
+
+    const chronological = [...rows].reverse();
+    return res.json({ chatId, messages: chronological });
+  } catch (e: any) {
+    console.error("[Profile] coach-student-chat GET error", e);
+    return res.status(500).json({ error: "Failed to load messages" });
+  }
+});
+
+router.post("/coach-student-chat/:peerUserId/messages", async (req, res) => {
+  try {
+    const requesterId = await resolveUserId(req);
+    if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
+
+    const peerUserId = String(req.params?.peerUserId || "").trim();
+    if (!peerUserId) return res.status(400).json({ error: "Missing peer user id" });
+
+    const bodyText = String((req.body as { body?: unknown })?.body ?? "").trim();
+    if (!bodyText) return res.status(400).json({ error: "body is required" });
+    if (bodyText.length > 8000) return res.status(400).json({ error: "Message too long" });
+
+    const link = await coachStudentLinkForPeer(requesterId, peerUserId);
+    if (!link) {
+      return res.status(403).json({ error: "No coach-student link with this user" });
+    }
+
+    const chatId = await ensureCoachStudentChatRow(link.id);
+    const msgId = randomUUID();
+    const now = new Date();
+    await db.insert(coachStudentChatMessage).values({
+      id: msgId,
+      chatId,
+      senderUserId: requesterId,
+      kind: "text",
+      body: bodyText,
+      createdAt: now,
+    });
+    await db
+      .update(coachStudentChat)
+      .set({ lastMessageAt: now, updatedAt: now })
+      .where(eq(coachStudentChat.id, chatId));
+
+    return res.json({
+      message: {
+        id: msgId,
+        chatId,
+        senderUserId: requesterId,
+        kind: "text",
+        body: bodyText,
+        createdAt: now.toISOString(),
+      },
+    });
+  } catch (e: any) {
+    console.error("[Profile] coach-student-chat POST error", e);
+    return res.status(500).json({ error: "Failed to send message" });
   }
 });
 
