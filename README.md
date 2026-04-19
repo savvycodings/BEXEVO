@@ -36,3 +36,13 @@ If Postgres returns `column "areaLocation" does not exist` (or similar) after pu
 ## Environment
 
 Copy and edit `.env` (not committed). Required variables depend on which routes you exercise; see `src/auth.ts`, `src/technique/techniqueRouter.ts`, and `src/index.ts` for reads of `process.env`.
+
+YOLO rollout flags used by technique analysis:
+
+- `YOLO_DETECTION_ENABLED` (server-side prompt/API surface gate)
+- `YOLO_DETECTION_WRITE_ENABLED` (persist detections into `technique_detection_frame`)
+- `YOLO_DETECTION_CONFIDENCE` (default `0.25`, filters low-confidence detections)
+- `YOLO_DETECTION_LOGS` (verbose logs for detection ingest/debug)
+
+License/rollout checklist: `docs/YOLO_ROLLOUT_CHECKLIST.md`.
+Smoke test matrix: `docs/YOLO_SMOKE_TESTS.md`.

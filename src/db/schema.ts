@@ -76,6 +76,24 @@ export type TechniqueRetrievalResult = {
   error?: string;
 };
 
+export type TechniqueDetectionLabel = "sports_ball" | "racket";
+
+export type TechniqueDetectionSummary = {
+  enabled: boolean;
+  model: string;
+  sampled_frames: number;
+  detected_frames: number;
+  sports_ball_count: number;
+  racket_count: number;
+  avg_confidence: number;
+  contact_window_frames?: number[];
+  confidence_threshold?: number;
+  confidence_threshold_racket?: number;
+  confidence_threshold_ball?: number;
+  iou_threshold?: number;
+  imgsz?: number;
+};
+
 export type TechniqueAnalysisMetrics = {
   total_frames?: number;
   analyzed_frames?: number;
@@ -95,6 +113,8 @@ export type TechniqueAnalysisMetrics = {
   }>;
   /** Pro-library similarity (train_sample_embedding); optional */
   retrieval?: TechniqueRetrievalResult;
+  /** YOLO object detection summary (full frame rows are stored in technique_detection_frame). */
+  detection_summary?: TechniqueDetectionSummary;
   ai_analysis?: unknown;
   correction_images?: TechniqueCorrectionImage[];
   correction_context?: TechniqueCorrectionContext;
@@ -320,6 +340,7 @@ export type TrainSampleExtractionMeta = {
     name?: string;
     model_complexity?: number;
   };
+  yolo_summary?: TechniqueDetectionSummary;
   normalized_label?: {
     canonical_stroke?: string;
     stroke_family?: string;
@@ -397,6 +418,41 @@ export const techniqueAnalysis = pgTable("technique_analysis", {
   feedbackText: text("feedbackText"),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
+
+/** Per-frame YOLO detections for a technique analysis (ball/racket tracking). */
+export const techniqueDetectionFrame = pgTable(
+  "technique_detection_frame",
+  {
+    id: text("id").primaryKey(),
+    analysisId: text("analysisId")
+      .notNull()
+      .references(() => techniqueAnalysis.id, { onDelete: "cascade" }),
+    frame: integer("frame").notNull(),
+    timeMs: integer("timeMs").notNull().default(0),
+    label: text("label").$type<TechniqueDetectionLabel>().notNull(),
+    confidence: integer("confidence").notNull().default(0),
+    boxX: integer("boxX").notNull().default(0),
+    boxY: integer("boxY").notNull().default(0),
+    boxW: integer("boxW").notNull().default(0),
+    boxH: integer("boxH").notNull().default(0),
+    trackId: text("trackId"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("technique_detection_frame_analysis_frame_idx").on(
+      table.analysisId,
+      table.frame
+    ),
+    index("technique_detection_frame_analysis_label_idx").on(
+      table.analysisId,
+      table.label
+    ),
+    index("technique_detection_frame_analysis_time_idx").on(
+      table.analysisId,
+      table.timeMs
+    ),
+  ]
+);
 
 /** Coach review queue for student technique uploads. */
 export const coachVideoReview = pgTable(

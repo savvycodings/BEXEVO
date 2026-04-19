@@ -8,10 +8,12 @@ import {
   db,
   techniqueVideo,
   techniqueAnalysis,
+  techniqueDetectionFrame,
   user,
   coachStudent,
   coachReviewAnnotation,
   coachVideoReview,
+  type TechniqueDetectionSummary,
 } from '../db'
 import { randomUUID, createHash } from 'crypto'
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
@@ -117,10 +119,310 @@ const UPLOAD_ROOT = path.join(process.cwd(), 'uploads', 'technique')
 const ALLOW_GUEST_TECHNIQUE = process.env.ALLOW_GUEST_TECHNIQUE === 'true'
 const GUEST_USER_ID = 'guest-technique-user'
 const GUEST_USER_EMAIL = 'guest-technique@xevo.local'
+const YOLO_DETECTION_ENABLED = process.env.YOLO_DETECTION_ENABLED === 'true'
+const YOLO_DETECTION_WRITE_ENABLED =
+  process.env.YOLO_DETECTION_WRITE_ENABLED === 'true'
+const YOLO_DETECTION_LOGS = process.env.YOLO_DETECTION_LOGS === 'true'
+const YOLO_DETECTION_CONFIDENCE = (() => {
+  const n = Number(process.env.YOLO_DETECTION_CONFIDENCE ?? 0.25)
+  if (!Number.isFinite(n)) return 0.25
+  return Math.max(0, Math.min(1, n))
+})()
+const YOLO_RACKET_CONFIDENCE = (() => {
+  const n = Number(process.env.YOLO_RACKET_CONFIDENCE ?? YOLO_DETECTION_CONFIDENCE)
+  if (!Number.isFinite(n)) return YOLO_DETECTION_CONFIDENCE
+  return Math.max(0, Math.min(1, n))
+})()
+const YOLO_BALL_CONFIDENCE = (() => {
+  const n = Number(process.env.YOLO_BALL_CONFIDENCE ?? YOLO_DETECTION_CONFIDENCE)
+  if (!Number.isFinite(n)) return YOLO_DETECTION_CONFIDENCE
+  return Math.max(0, Math.min(1, n))
+})()
 
 const router = express.Router()
 router.use(express.json({ limit: '50mb' }))
 router.use(express.urlencoded({ extended: true }))
+
+type YoloLabel = 'sports_ball' | 'racket'
+type DetectionRow = {
+  frame: number
+  timeMs: number
+  label: YoloLabel
+  confidence: number
+  boxX: number
+  boxY: number
+  boxW: number
+  boxH: number
+  trackId: string | null
+}
+
+type PoseFrameWithOptionalRacket = {
+  frame: number
+  landmarks: FrameLandmarks
+  racket_bbox?: [number, number, number, number] | null
+  racket_conf?: number | null
+  racket_hand?: 'left' | 'right' | null
+  ball_bbox?: [number, number, number, number] | null
+  ball_conf?: number | null
+}
+
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0
+  return Math.max(0, Math.min(1, n))
+}
+
+function normalizeYoloLabel(raw: unknown): YoloLabel | null {
+  const v = String(raw ?? '').trim().toLowerCase()
+  if (v === 'sports_ball' || v === 'sports ball' || v === 'ball') {
+    return 'sports_ball'
+  }
+  if (v === 'racket' || v === 'tennis_racket' || v === 'tennis racket') {
+    return 'racket'
+  }
+  return null
+}
+
+function normalizeYoloDetections(
+  rawRows: unknown,
+  totalFrames: unknown,
+  videoDurationMs: number | undefined,
+  minConfidence: number,
+  racketConfidence: number,
+  ballConfidence: number
+): DetectionRow[] {
+  if (!Array.isArray(rawRows)) return []
+  const tf =
+    typeof totalFrames === 'number' && Number.isFinite(totalFrames) && totalFrames > 1
+      ? totalFrames
+      : null
+  const safeDurationMs =
+    typeof videoDurationMs === 'number' && Number.isFinite(videoDurationMs) && videoDurationMs > 0
+      ? videoDurationMs
+      : null
+  const out: DetectionRow[] = []
+  for (const row of rawRows) {
+    const r = row as Record<string, unknown>
+    const frameRaw = Number(r.frame)
+    if (!Number.isFinite(frameRaw) || frameRaw < 0) continue
+    const label = normalizeYoloLabel(r.label)
+    if (!label) continue
+    const confidence = clamp01(Number(r.confidence))
+    const classFloor =
+      label === 'racket'
+        ? Math.min(minConfidence, racketConfidence)
+        : Math.min(minConfidence, ballConfidence)
+    if (confidence < classFloor) continue
+    const bbox = (r.bbox ?? {}) as Record<string, unknown>
+    const x = clamp01(Number(bbox.x))
+    const y = clamp01(Number(bbox.y))
+    const w = clamp01(Number(bbox.w))
+    const h = clamp01(Number(bbox.h))
+    if (w <= 0 || h <= 0) continue
+    const frame = Math.max(0, Math.round(frameRaw))
+    const timeMs =
+      tf && safeDurationMs
+        ? Math.max(0, Math.round((frame / Math.max(1, tf - 1)) * safeDurationMs))
+        : 0
+    out.push({
+      frame,
+      timeMs,
+      label,
+      confidence,
+      boxX: Math.round(x * 10000),
+      boxY: Math.round(y * 10000),
+      boxW: Math.round(w * 10000),
+      boxH: Math.round(h * 10000),
+      trackId:
+        typeof r.track_id === 'string' && r.track_id.trim().length > 0
+          ? r.track_id.trim().slice(0, 64)
+          : null,
+    })
+  }
+  return out.slice(0, 5000)
+}
+
+function summarizeDetections(
+  rows: DetectionRow[],
+  sampledFrames: unknown,
+  enabled: boolean,
+  confidenceThreshold: number,
+  racketConfidence: number,
+  ballConfidence: number
+): TechniqueDetectionSummary {
+  const sampled =
+    typeof sampledFrames === 'number' && Number.isFinite(sampledFrames) && sampledFrames >= 0
+      ? Math.round(sampledFrames)
+      : 0
+  const frameSet = new Set<number>()
+  let ballCount = 0
+  let racketCount = 0
+  let confSum = 0
+  for (const row of rows) {
+    frameSet.add(row.frame)
+    confSum += row.confidence
+    if (row.label === 'sports_ball') ballCount += 1
+    if (row.label === 'racket') racketCount += 1
+  }
+  const contactFrames = new Set<number>()
+  const byFrame = new Map<number, Set<YoloLabel>>()
+  for (const row of rows) {
+    const set = byFrame.get(row.frame) ?? new Set<YoloLabel>()
+    set.add(row.label)
+    byFrame.set(row.frame, set)
+  }
+  for (const [frame, labels] of byFrame) {
+    if (labels.has('sports_ball') && labels.has('racket')) {
+      contactFrames.add(frame)
+    }
+  }
+  return {
+    enabled,
+    model: 'yolov8n',
+    sampled_frames: sampled,
+    detected_frames: frameSet.size,
+    sports_ball_count: ballCount,
+    racket_count: racketCount,
+    avg_confidence: rows.length ? Number((confSum / rows.length).toFixed(6)) : 0,
+    contact_window_frames: [...contactFrames].sort((a, b) => a - b).slice(0, 24),
+    confidence_threshold: confidenceThreshold,
+    confidence_threshold_racket: racketConfidence,
+    confidence_threshold_ball: ballConfidence,
+  }
+}
+
+async function persistTechniqueDetections(
+  analysisId: string,
+  rows: DetectionRow[]
+): Promise<void> {
+  if (!YOLO_DETECTION_WRITE_ENABLED) return
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(techniqueDetectionFrame)
+      .where(eq(techniqueDetectionFrame.analysisId, analysisId))
+    if (rows.length === 0) return
+    await tx.insert(techniqueDetectionFrame).values(
+      rows.map((row) => ({
+        id: randomUUID(),
+        analysisId,
+        frame: row.frame,
+        timeMs: row.timeMs,
+        label: row.label,
+        confidence: Math.round(row.confidence * 10000),
+        boxX: row.boxX,
+        boxY: row.boxY,
+        boxW: row.boxW,
+        boxH: row.boxH,
+        trackId: row.trackId,
+      }))
+    )
+  })
+}
+
+function buildDetectionPromptBlock(summary: TechniqueDetectionSummary | null): string {
+  if (!summary || !summary.enabled || summary.detected_frames <= 0) {
+    return 'YOLO object detections: unavailable or disabled. Infer ball/racket context from pose only when needed.'
+  }
+  const contact =
+    Array.isArray(summary.contact_window_frames) && summary.contact_window_frames.length > 0
+      ? summary.contact_window_frames.join(', ')
+      : 'none'
+  return `YOLO object detections (model ${summary.model}):
+- sampled frames: ${summary.sampled_frames}
+- detected frames: ${summary.detected_frames}
+- sports_ball detections: ${summary.sports_ball_count}
+- racket detections: ${summary.racket_count}
+- average confidence: ${summary.avg_confidence}
+- likely contact window frames (ball+racket same frame): ${contact}`
+}
+
+function buildCorrectionDetectionHint(summary: TechniqueDetectionSummary | null): string {
+  if (!summary || !summary.enabled || summary.detected_frames <= 0) return ''
+  const contact =
+    Array.isArray(summary.contact_window_frames) && summary.contact_window_frames.length > 0
+      ? summary.contact_window_frames.slice(0, 10).join(', ')
+      : 'none'
+  return `\nObject tracking context (YOLO): sports_ball=${summary.sports_ball_count}, racket=${summary.racket_count}, likely contact frames=${contact}. Preserve visible ball and padel racket relation for the same swing instant.`
+}
+
+function inferRacketHand(
+  landmarks: FrameLandmarks | undefined,
+  bbox: [number, number, number, number]
+): 'left' | 'right' | null {
+  if (!landmarks) return null
+  const lw = landmarks.LEFT_WRIST
+  const rw = landmarks.RIGHT_WRIST
+  if (!lw || !rw) return null
+  const cx = (bbox[0] + bbox[2]) / 2
+  const cy = (bbox[1] + bbox[3]) / 2
+  const dLeft = Math.hypot(Number(lw.x) - cx, Number(lw.y) - cy)
+  const dRight = Math.hypot(Number(rw.x) - cx, Number(rw.y) - cy)
+  if (!Number.isFinite(dLeft) || !Number.isFinite(dRight)) return null
+  return dLeft <= dRight ? 'left' : 'right'
+}
+
+function enrichPoseDataWithRacket(
+  poseDataRaw: unknown,
+  detections: DetectionRow[]
+): PoseFrameWithOptionalRacket[] | undefined {
+  if (!Array.isArray(poseDataRaw)) return undefined
+  const racketByFrame = new Map<number, DetectionRow>()
+  const ballByFrame = new Map<number, DetectionRow>()
+  for (const d of detections) {
+    if (d.label === 'racket') {
+      const prev = racketByFrame.get(d.frame)
+      if (!prev || d.confidence > prev.confidence) racketByFrame.set(d.frame, d)
+    } else if (d.label === 'sports_ball') {
+      const prev = ballByFrame.get(d.frame)
+      if (!prev || d.confidence > prev.confidence) ballByFrame.set(d.frame, d)
+    }
+  }
+  const out: PoseFrameWithOptionalRacket[] = []
+  for (const row of poseDataRaw) {
+    const r = row as Record<string, unknown>
+    const frame = typeof r.frame === 'number' ? Math.max(0, Math.round(r.frame)) : NaN
+    const landmarks =
+      r.landmarks && typeof r.landmarks === 'object'
+        ? (r.landmarks as FrameLandmarks)
+        : undefined
+    if (!Number.isFinite(frame) || !landmarks) continue
+    const topRacket = racketByFrame.get(frame)
+    const topBall = ballByFrame.get(frame)
+    let racket_bbox: [number, number, number, number] | null = null
+    let ball_bbox: [number, number, number, number] | null = null
+    if (topRacket) {
+      const x1 = clamp01(topRacket.boxX / 10000)
+      const y1 = clamp01(topRacket.boxY / 10000)
+      const x2 = clamp01((topRacket.boxX + topRacket.boxW) / 10000)
+      const y2 = clamp01((topRacket.boxY + topRacket.boxH) / 10000)
+      racket_bbox = [x1, y1, x2, y2]
+    }
+    if (topBall) {
+      const x1 = clamp01(topBall.boxX / 10000)
+      const y1 = clamp01(topBall.boxY / 10000)
+      const x2 = clamp01((topBall.boxX + topBall.boxW) / 10000)
+      const y2 = clamp01((topBall.boxY + topBall.boxH) / 10000)
+      ball_bbox = [x1, y1, x2, y2]
+    }
+    out.push({
+      frame,
+      landmarks,
+      ...(racket_bbox
+        ? {
+            racket_bbox,
+            racket_conf: Number((topRacket?.confidence ?? 0).toFixed(4)),
+            racket_hand: inferRacketHand(landmarks, racket_bbox),
+          }
+        : {}),
+      ...(ball_bbox
+        ? {
+            ball_bbox,
+            ball_conf: Number((topBall?.confidence ?? 0).toFixed(4)),
+          }
+        : {}),
+    })
+  }
+  return out
+}
 
 async function ensureGuestUser(): Promise<string | null> {
   const existing = await db.query.user.findFirst({
@@ -529,6 +831,9 @@ router.get('/activities', async (req, res) => {
           : null
       const rating = typeof ai?.rating === 'string' ? String(ai.rating) : null
       const retrieval = metrics?.retrieval as Record<string, unknown> | undefined
+      const detectionSummary = metrics?.detection_summary as
+        | TechniqueDetectionSummary
+        | undefined
       const hyp = retrieval?.shot_hypothesis as Record<string, unknown> | undefined
       let shotLabel = 'Technique'
       if (typeof hyp?.stroke_preset === 'string' && hyp.stroke_preset.trim()) {
@@ -561,6 +866,7 @@ router.get('/activities', async (req, res) => {
         coachFeedbackText: review?.coachFeedbackText ?? null,
         coachMarksJson: review?.coachMarksJson ?? null,
         coachReviewedAt: review?.submittedAt?.toISOString() ?? null,
+        detectionSummary: detectionSummary ?? null,
       }
     })
 
@@ -762,6 +1068,49 @@ router.post('/analyze', async (req, res) => {
       }
     }
 
+    const normalizedDetections = YOLO_DETECTION_ENABLED
+      ? normalizeYoloDetections(
+          metrics?.yolo_detections,
+          metrics?.total_frames,
+          vdur ?? undefined,
+          YOLO_DETECTION_CONFIDENCE,
+          YOLO_RACKET_CONFIDENCE,
+          YOLO_BALL_CONFIDENCE
+        )
+      : []
+    const detectionSummary = summarizeDetections(
+      normalizedDetections,
+      metrics?.yolo_summary?.sampled_frames,
+      YOLO_DETECTION_ENABLED,
+      YOLO_DETECTION_CONFIDENCE,
+      YOLO_RACKET_CONFIDENCE,
+      YOLO_BALL_CONFIDENCE
+    )
+    const poseDataWithRacket = enrichPoseDataWithRacket(
+      metrics?.pose_data,
+      normalizedDetections
+    )
+    metrics = {
+      ...metrics,
+      ...(poseDataWithRacket ? { pose_data: poseDataWithRacket } : {}),
+      detection_summary: detectionSummary,
+    }
+    delete metrics.yolo_detections
+    delete metrics.yolo_summary
+
+    await withPgRetry('analyze-persist-detections', () =>
+      persistTechniqueDetections(analysisId, normalizedDetections)
+    )
+    if (YOLO_DETECTION_LOGS) {
+      console.log('[Technique] YOLO detection ingest', {
+        analysisId,
+        enabled: YOLO_DETECTION_ENABLED,
+        writeEnabled: YOLO_DETECTION_WRITE_ENABLED,
+        rowCount: normalizedDetections.length,
+        summary: detectionSummary,
+      })
+    }
+
     console.log('[Technique] Modal metrics received', {
       analysisId,
       summary: {
@@ -769,6 +1118,7 @@ router.post('/analyze', async (req, res) => {
         analyzed_frames: metrics?.analyzed_frames,
         pose_samples: Array.isArray(metrics?.pose_data) ? metrics.pose_data.length : 0,
         impact_sequence_phases: metrics?.impact_pose_sequence?.length ?? 0,
+        detection_frames: metrics?.detection_summary?.detected_frames ?? 0,
       },
     })
 
@@ -794,6 +1144,8 @@ router.post('/analyze', async (req, res) => {
 Analyze the video strictly from a padel coaching perspective, not general biomechanics.
 
 ${formatRetrievalForPrompt(metrics.retrieval)}
+
+${buildDetectionPromptBlock(metrics?.detection_summary ?? null)}
 
 Here is the pose data from several frames of the video (x,y coordinates are normalized 0-1, where 0,0 is top-left):
 
@@ -1112,10 +1464,14 @@ router.get('/analysis/:id', async (req, res) => {
         })
       : []
 
+    const metricsObj = analysis.metrics as Record<string, unknown> | null
+    const detectionSummary =
+      (metricsObj?.detection_summary as TechniqueDetectionSummary | undefined) ?? null
     return res.json({
       id: analysis.id,
       status: analysis.status,
       metrics: analysis.metrics,
+      detectionSummary,
       feedbackText: analysis.feedbackText,
       createdAt: analysis.createdAt,
       coachReview: coachReview
@@ -1326,6 +1682,9 @@ router.post('/correction-images', async (req, res) => {
       metrics?.pose_data ?? []
     const aiAnalysis = metrics?.ai_analysis
     const enAnalysis = aiAnalysis?.en
+    const detectionHint = buildCorrectionDetectionHint(
+      (metrics?.detection_summary ?? null) as TechniqueDetectionSummary | null
+    )
 
     if (!enAnalysis || poseData.length === 0) {
       return res
@@ -1431,7 +1790,7 @@ router.post('/correction-images', async (req, res) => {
 
     const deltas = await translateRecommendationsToDeltas(
       enAnalysis.recommendations ?? [],
-      enAnalysis.diagnosis ?? '',
+      `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
       landmarksForGpt,
       poseSequence ?? null
     )
@@ -1446,7 +1805,7 @@ router.post('/correction-images', async (req, res) => {
     try {
       shotAndHandedness = await classifyShotAndHandedness(
         enAnalysis.recommendations ?? [],
-        enAnalysis.diagnosis ?? '',
+        `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
         landmarksForGpt,
         poseSequence ?? null
       )
@@ -1548,7 +1907,7 @@ router.post('/correction-images', async (req, res) => {
                     frameData.frame,
                     frameData.landmarks,
                     deltas,
-                    enAnalysis.diagnosis ?? '',
+                    `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
                     enAnalysis.recommendations ?? [],
                     shotAndHandednessForImages,
                     proReferenceText
@@ -1559,7 +1918,7 @@ router.post('/correction-images', async (req, res) => {
                     frameData.frame,
                     frameData.landmarks,
                     deltas,
-                    enAnalysis.diagnosis ?? '',
+                    `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
                     enAnalysis.recommendations ?? [],
                     shotAndHandednessForImages,
                     proReferenceText

@@ -155,6 +155,20 @@
       "when": 1776297978029,
       "tag": "0021_whole_kingpin",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1776326400000,
+      "tag": "0022_yolo_detection_frames",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1776624323346,
+      "tag": "0023_ordinary_junta",
+      "breakpoints": true
     }
   ]
 }
