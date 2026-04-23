@@ -12,6 +12,7 @@
     "ngrokfixed": "ngrok http --domain=f82f850f17ee-443370837071186036.ngrok-free.app 3050",
     "db:generate": "pnpm exec drizzle-kit generate",
     "db:migrate": "pnpm exec drizzle-kit migrate",
+    "db:baseline": "node scripts/drizzle-baseline-migrations.cjs",
     "db:push": "pnpm exec drizzle-kit push",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

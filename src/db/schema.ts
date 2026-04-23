@@ -298,6 +298,19 @@ export const trainStrokePresetEnum = pgEnum("train_stroke_preset", [
   "backhand_drive",
   "forehand_lob",
   "backhand_lob",
+  "backhand_volley",
+  "forehand_volley",
+  "backhand_return",
+  "backhand_return_with_lob",
+  "forehand_return_with_lob",
+  "backhand_drive_with_wall",
+  "forehand_chiquita",
+  "half_volley",
+  "back_wall_backhand",
+  "back_wall_forehand",
+  "contrapared_boast",
+  "side_wall_backhand",
+  "side_wall_forehand",
 ]);
 
 export const trainSkillLevelEnum = pgEnum("train_skill_level", [

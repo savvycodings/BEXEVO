@@ -169,6 +169,13 @@
       "when": 1776624323346,
       "tag": "0023_ordinary_junta",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1776700000000,
+      "tag": "0024_train_stroke_presets_expand",
+      "breakpoints": true
     }
   ]
 }

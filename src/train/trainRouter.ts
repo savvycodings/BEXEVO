@@ -84,6 +84,19 @@ const TRAIN_STROKE_PRESETS = [
   "backhand_drive",
   "forehand_lob",
   "backhand_lob",
+  "backhand_volley",
+  "forehand_volley",
+  "backhand_return",
+  "backhand_return_with_lob",
+  "forehand_return_with_lob",
+  "backhand_drive_with_wall",
+  "forehand_chiquita",
+  "half_volley",
+  "back_wall_backhand",
+  "back_wall_forehand",
+  "contrapared_boast",
+  "side_wall_backhand",
+  "side_wall_forehand",
 ] as const;
 type TrainStrokePreset = (typeof TRAIN_STROKE_PRESETS)[number];
 
@@ -104,6 +117,19 @@ const PRESET_LABEL: Record<TrainStrokePreset, string> = {
   backhand_drive: "Backhand drive",
   forehand_lob: "Forehand lob",
   backhand_lob: "Backhand lob",
+  forehand_chiquita: "Forehand chiquita",
+  backhand_drive_with_wall: "Backhand drive (wall)",
+  forehand_volley: "Forehand volley",
+  backhand_volley: "Backhand volley",
+  half_volley: "Half volley",
+  backhand_return: "Backhand return",
+  backhand_return_with_lob: "Backhand return with lob",
+  forehand_return_with_lob: "Forehand return with lob",
+  back_wall_backhand: "Back wall backhand",
+  back_wall_forehand: "Back wall forehand",
+  side_wall_backhand: "Side wall backhand",
+  side_wall_forehand: "Side wall forehand",
+  contrapared_boast: "Contrapared boast",
 };
 
 const LEVEL_LABEL: Record<TrainSkillLevel, string> = {
@@ -343,8 +369,7 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
     const strokePreset = parseStrokePreset(req.body?.strokePreset);
     if (!strokePreset) {
       return res.status(400).json({
-        error:
-          "strokePreset must be one of: forehand_drive, backhand_drive, forehand_lob, backhand_lob",
+        error: `strokePreset must be one of: ${TRAIN_STROKE_PRESETS.join(", ")}`,
       });
     }
     const skillLevel = parseSkillLevel(req.body?.skillLevel);
