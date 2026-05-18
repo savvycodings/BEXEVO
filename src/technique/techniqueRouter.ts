@@ -43,6 +43,8 @@ import { createAnalyzeTimer, slimMetricsForFailedPersist } from '../lib/analyzeT
 import {
   calibrateTechniqueScore,
   calibrateTechniqueScoreV61,
+  averagePillarOverall,
+  penaltyAdjustedOverallLegacy,
   applyProLibraryTierScoreConstraint,
 } from './scoreCalibration'
 import {
@@ -64,6 +66,7 @@ import {
 import {
   downsamplePoseFramesForPrompt,
   MAX_POSE_FRAMES_IN_GPT_PROMPT,
+  maxCorrectionImageFrames,
   maxPoseFramesForAnalyzePrompt,
 } from './poseEmbedding'
 import { fal } from '@fal-ai/client'
@@ -1358,7 +1361,7 @@ Rules:
 - Do NOT default to 70. Use the full 0-100 scale when evidence supports it (avoid clustering everyone around the same tens digit).
 - Scoring anchors (guides, not quotas): multiple clear faults across pillars → overall often ~35–55; solid intermediate execution → ~55–72; strong form with minor issues → ~72–86; excellent pro-like execution → ~86–95.
 - technique_score, outcome_score, and tactics_score must differ when evidence differs; do not copy the same integer into all three pillars unless the clip truly looks equally strong or weak on each.
-- Keep overall score within about 12 points of (0.5*technique_score + 0.3*outcome_score + 0.2*tactics_score) — downstream calibration assumes this pillar blend.
+- Set score close to the average of technique_score, outcome_score, and tactics_score (equal weights) — the app displays overall as that average.
 - Pro-library reference metadata in this prompt (if any) describes a retrieval neighbor only; do NOT raise scores because that neighbor is tagged advanced — judge only this user's clip.
 - Be strict and discriminative: major mechanical faults should score <=50; strong, consistent form should score >=85.
 - Only respond with valid JSON, no markdown, no other text.
@@ -1472,7 +1475,7 @@ Rules:
         aiAnalysis.score_calibrated_before_pro_tier = legacyCalibrated
         aiAnalysis.score = s
         aiAnalysis.score_scale = 'percent'
-        aiAnalysis.scoring_version = 'v6.1.1'
+        aiAnalysis.scoring_version = 'v6.1.2'
         aiAnalysis.technique_score = clampPercent(v61.breakdown.technique)
         aiAnalysis.outcome_score = clampPercent(v61.breakdown.outcome)
         aiAnalysis.tactics_score = clampPercent(v61.breakdown.tactics)
@@ -1491,14 +1494,17 @@ Rules:
           uncertainty_plus_minus: v61.confidence.uncertainty_plus_minus,
         }
         aiAnalysis.calibration_trace = {
-          raw_overall_v61: v61.rawOverall,
-          calibrated_overall_before_output: v61.overall,
+          pillar_blend: v61.rawOverall,
+          overall_displayed: v61.overall,
           weighted_formula:
-            'pillar blend 0.5/0.3/0.2 then calibrateTechniqueScore(text penalties) on that blend',
-          confidence_formula:
-            'final = round(clamp(penalty_adjusted_overall * (0.7 + 0.3 * confidenceNorm)))',
+            'overall = round((technique + outcome + tactics) / 3)',
+          legacy_penalty_adjusted_audit: penaltyAdjustedOverallLegacy(
+            aiAnalysis,
+            averagePillarOverall(v61.breakdown)
+          ),
+          model_score_raw: Math.round(modelRawScore),
           pro_library_neighbor_skill: topProSkill ?? null,
-          pro_tier_score_constraint: 'disabled_v6.1.1 (no advanced-neighbor floor)',
+          pro_tier_score_constraint: 'disabled_v6.1.2 (no advanced-neighbor floor)',
         }
         aiAnalysis.rating = techniqueRatingForScore(s)
       }
@@ -1685,9 +1691,6 @@ router.get('/analysis/:id', async (req, res) => {
 
 /** Gemini image generation is heavy; parallel calls often fail with "fetch failed" / 429 — run sequentially. */
 const MAX_CONCURRENT_FRAMES = 1
-/** Cap generated / returned correction images to control image-model cost. */
-const MAX_CORRECTION_IMAGE_FRAMES = 5
-
 type PoseFrameRow = { frame: number; landmarks: FrameLandmarks }
 
 /** Evenly sample pose frames across the clip (spread of the motion). */
@@ -1698,6 +1701,7 @@ function selectPoseFramesForCorrections(
   const sorted = [...poseData].sort((a, b) => a.frame - b.frame)
   const n = sorted.length
   if (n <= maxFrames) return sorted
+  if (maxFrames <= 1) return [sorted[Math.min(n - 1, Math.floor(n / 2))]]
   const picked: PoseFrameRow[] = []
   const seen = new Set<number>()
   for (let k = 0; k < maxFrames; k++) {
@@ -1727,6 +1731,7 @@ function limitCorrectionsToMaxFrames<T extends { frame: number }>(
   if (corrections.length <= maxFrames) return corrections
   const sorted = [...corrections].sort((a, b) => a.frame - b.frame)
   const n = sorted.length
+  if (maxFrames <= 1) return [sorted[Math.min(n - 1, Math.floor(n / 2))]]
   const picked: T[] = []
   const seen = new Set<number>()
   for (let k = 0; k < maxFrames; k++) {
@@ -1842,7 +1847,7 @@ router.post('/correction-images', async (req, res) => {
     const requestedFrameIndices = Array.isArray(frameIndices)
       ? Array.from(
           new Set(frameIndices.filter((f) => Number.isFinite(f)))
-        ).slice(0, MAX_CORRECTION_IMAGE_FRAMES)
+        ).slice(0, maxCorrectionImageFrames())
       : null
 
     if (!analysisId) {
@@ -1875,7 +1880,7 @@ router.post('/correction-images', async (req, res) => {
         if (!requestedFrameIndices || requestedFrameIndices.length === 0) {
           const limited = limitCorrectionsToMaxFrames(
             cachedCorrections,
-            MAX_CORRECTION_IMAGE_FRAMES
+            maxCorrectionImageFrames()
           )
           console.log('[Technique] Returning cached correction images', {
             analysisId,
@@ -1964,7 +1969,7 @@ router.post('/correction-images', async (req, res) => {
         ? requestedFrameIndices
             .map((fi) => poseData.find((p) => p.frame === fi))
             .filter((p): p is PoseFrameRow => !!p)
-        : selectPoseFramesForCorrections(poseData, MAX_CORRECTION_IMAGE_FRAMES)
+        : selectPoseFramesForCorrections(poseData, maxCorrectionImageFrames())
 
     if (requestedFrames.length === 0) {
       return res.status(400).json({ error: 'No matching frames found' })
@@ -1993,7 +1998,7 @@ router.post('/correction-images', async (req, res) => {
           : cachedCorrections
       return res.json({
         provider: imageProvider,
-        corrections: limitCorrectionsToMaxFrames(raw, MAX_CORRECTION_IMAGE_FRAMES),
+        corrections: limitCorrectionsToMaxFrames(raw, maxCorrectionImageFrames()),
       })
     }
 
@@ -2267,7 +2272,7 @@ router.post('/correction-images', async (req, res) => {
     for (const c of corrections) mergedByFrame.set(c.frame, c)
     const mergedCorrections = limitCorrectionsToMaxFrames(
       Array.from(mergedByFrame.values()).sort((a, b) => a.frame - b.frame),
-      MAX_CORRECTION_IMAGE_FRAMES
+      maxCorrectionImageFrames()
     )
     const responseCorrections =
       requestedFrameIndices && requestedFrameIndices.length > 0
@@ -2368,7 +2373,7 @@ router.post('/correction-test-frames', async (req, res) => {
 
     const requestedFrames = selectPoseFramesForCorrections(
       poseData,
-      MAX_CORRECTION_IMAGE_FRAMES
+      maxCorrectionImageFrames()
     )
 
     if (requestedFrames.length === 0) {

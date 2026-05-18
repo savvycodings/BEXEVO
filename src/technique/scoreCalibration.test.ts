@@ -36,11 +36,11 @@ test('calibrateTechniqueScoreV61 is monotonic in pillar blend (same feedback tex
     en: {},
   })
   assert.ok(high.overall > low.overall)
-  assert.equal(low.overall, 58)
-  assert.equal(high.overall, 77)
+  assert.equal(low.overall, 70)
+  assert.equal(high.overall, 90)
 })
 
-test('calibrateTechniqueScoreV61 exposes weighted raw and breakdown', () => {
+test('calibrateTechniqueScoreV61 overall matches average of pillars', () => {
   const v = calibrateTechniqueScoreV61({
     score: 80,
     technique_score: 60,
@@ -48,7 +48,7 @@ test('calibrateTechniqueScoreV61 exposes weighted raw and breakdown', () => {
     tactics_score: 100,
     en: {},
   })
-  assert.equal(v.rawOverall, 74)
+  assert.equal(v.rawOverall, 80)
   assert.deepEqual(v.breakdown, { technique: 60, outcome: 80, tactics: 100 })
-  assert.equal(v.overall, 62)
+  assert.equal(v.overall, 80)
 })

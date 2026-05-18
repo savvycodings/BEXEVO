@@ -137,6 +137,14 @@ export function maxPoseFramesForAnalyzePrompt(): number {
   return MAX_POSE_FRAMES_IN_GPT_PROMPT;
 }
 
+/** Cap Comfy/Gemini correction images per `/correction-images` request (Railway: `XEVO_CORRECTION_MAX_FRAMES`). */
+export function maxCorrectionImageFrames(): number {
+  const raw = String(process.env.XEVO_CORRECTION_MAX_FRAMES ?? "").trim();
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return Math.min(Math.floor(n), 20);
+  return 5;
+}
+
 export function downsamplePoseFramesForPrompt<T extends { frame: number }>(
   poseData: T[] | null | undefined,
   maxFrames: number

@@ -71,7 +71,7 @@ async function run(): Promise<void> {
 
     ai.score = finalScore
     ai.score_scale = 'percent'
-    ai.scoring_version = 'v6.1.1'
+    ai.scoring_version = 'v6.1.2'
     ai.technique_score = clampPercent(v61.breakdown.technique)
     ai.outcome_score = clampPercent(v61.breakdown.outcome)
     ai.tactics_score = clampPercent(v61.breakdown.tactics)
@@ -96,12 +96,9 @@ async function run(): Promise<void> {
         : {}),
       migration: force ? 'backfill_v6_1_1_force' : 'backfill_v6_1_1',
       migrated_at: new Date().toISOString(),
-      weighted_formula:
-        'pillar blend 0.5/0.3/0.2 then calibrateTechniqueScore(text penalties) on that blend',
-      confidence_formula:
-        'final = round(clamp(penalty_adjusted_overall * (0.7 + 0.3 * confidenceNorm)))',
+      weighted_formula: 'overall = round((technique + outcome + tactics) / 3)',
       pro_library_neighbor_skill: topProSkill ?? null,
-      pro_tier_score_constraint: 'disabled_v6.1.1 (no advanced-neighbor floor)',
+      pro_tier_score_constraint: 'disabled_v6.1.2 (no advanced-neighbor floor)',
     }
 
     if (!dryRun) {

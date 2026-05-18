@@ -50,12 +50,6 @@ const SCORE_CALIBRATION = {
   maxScore: 100,
 }
 
-const V61_WEIGHTS = {
-  technique: 0.5,
-  outcome: 0.3,
-  tactics: 0.2,
-} as const
-
 type V61Breakdown = {
   technique: number
   outcome: number
@@ -211,33 +205,36 @@ export function calibrateTechniqueScore(analysis: AnalysisLike): number {
   return Math.round(clampScore(adjusted))
 }
 
-/** V6.1 score structure with 0-100 overall + sub-scores + confidence metadata. */
+/** Arithmetic mean of the three pillar scores (matches UI: overall = combo of pillars). */
+export function averagePillarOverall(breakdown: V61Breakdown): number {
+  return Math.round(
+    clampScore((breakdown.technique + breakdown.outcome + breakdown.tactics) / 3)
+  )
+}
+
+/** @deprecated Use `averagePillarOverall` — equal pillar weights only. */
+export const weightedPillarOverall = averagePillarOverall
+
+/**
+ * V6.1 score structure: overall = average of technique, outcome, tactics (shown in app).
+ * Legacy text penalties are not subtracted from overall (see `calibration_trace` audit fields).
+ */
 export function calibrateTechniqueScoreV61(analysis: AnalysisLike): V61CalibratedScores {
   const breakdown = parseBreakdown(analysis)
   const confidence = parseConfidence(analysis)
-  const fallbackPenaltyAdjustedOverall = calibrateTechniqueScore({
-    ...analysis,
-    score:
-      breakdown.technique * V61_WEIGHTS.technique +
-      breakdown.outcome * V61_WEIGHTS.outcome +
-      breakdown.tactics * V61_WEIGHTS.tactics,
-  })
-  const weightedRaw = Math.round(
-    breakdown.technique * V61_WEIGHTS.technique +
-      breakdown.outcome * V61_WEIGHTS.outcome +
-      breakdown.tactics * V61_WEIGHTS.tactics
-  )
-  // Confidence influences final score smoothly: Raw * (0.7 + 0.3 * confidenceNorm).
-  const confidenceAdjusted = Math.round(
-    fallbackPenaltyAdjustedOverall * (0.7 + 0.3 * clamp01(confidence.score / 100))
-  )
-  const overall = Math.round(clampScore(confidenceAdjusted))
+  const pillarAverage = averagePillarOverall(breakdown)
+  const overall = pillarAverage
   return {
     overall,
-    rawOverall: Math.round(clampScore(weightedRaw)),
+    rawOverall: pillarAverage,
     breakdown,
     confidence,
   }
+}
+
+/** Pre-v6.1.2 penalty stack on a 0–100 score (kept for calibration_trace audit only). */
+export function penaltyAdjustedOverallLegacy(analysis: AnalysisLike, baseScore: number): number {
+  return calibrateTechniqueScore({ ...analysis, score: baseScore })
 }
 
 /**
