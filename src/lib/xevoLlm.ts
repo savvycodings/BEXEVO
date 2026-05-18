@@ -14,6 +14,7 @@
  */
 import { Agent, fetch as undiciFetch } from "undici";
 import { isStudioGenerationErrorContent } from "./llmResponse";
+import { withNgrokHeaders } from "./ngrokFetch";
 
 export type ChatRole = "system" | "user" | "assistant";
 
@@ -144,11 +145,11 @@ export async function xevoChatCompletion(
   const label = options?.logLabel ?? "chat";
   const msgSummary = summarizeMessagesForLog(req.messages);
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
   const key = xevoApiKey();
-  if (key) headers["Authorization"] = `Bearer ${key}`;
+  const headers = withNgrokHeaders(url, {
+    "Content-Type": "application/json",
+    ...(key ? { Authorization: `Bearer ${key}` } : {}),
+  });
 
   const enableThinkingEnv = String(
     process.env.XEVO_LLM_ENABLE_THINKING ?? ""

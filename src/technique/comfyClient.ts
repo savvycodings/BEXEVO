@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { withNgrokHeaders } from "../lib/ngrokFetch";
 
 export type ComfyUploadedImage = {
   name: string;
@@ -25,7 +26,12 @@ export async function comfyUploadImage(
   );
   form.append("type", "input");
   form.append("overwrite", "true");
-  const res = await fetch(`${base}/upload/image`, { method: "POST", body: form });
+  const uploadUrl = `${base}/upload/image`;
+  const res = await fetch(uploadUrl, {
+    method: "POST",
+    headers: withNgrokHeaders(uploadUrl),
+    body: form,
+  });
   const text = await res.text();
   let data: Record<string, unknown> = {};
   try {
@@ -55,9 +61,10 @@ export async function comfyQueuePrompt(
   clientId?: string
 ): Promise<ComfyQueueResult> {
   const base = trimBaseUrl(baseUrl);
-  const res = await fetch(`${base}/prompt`, {
+  const promptUrl = `${base}/prompt`;
+  const res = await fetch(promptUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: withNgrokHeaders(promptUrl, { "Content-Type": "application/json" }),
     body: JSON.stringify({
       prompt,
       client_id: clientId || randomUUID(),
