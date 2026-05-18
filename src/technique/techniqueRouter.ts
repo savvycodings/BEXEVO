@@ -29,9 +29,17 @@ import {
   generateCorrectedImageFal,
   buildProNeighborCorrectionContext,
   type FrameLandmarks,
+  type LandmarkDelta,
   type CorrectionResult,
   type ShotAndHandedness,
 } from './correctionPrompt'
+import { generateCorrectedImageComfy, isComfyCorrectionConfigured } from './comfyCorrection'
+import { runChat, chatContent } from '../lib/chatProvider'
+import {
+  llmContentHasJsonObject,
+  parseJsonFromLlmContent,
+} from '../lib/llmResponse'
+import { createAnalyzeTimer, slimMetricsForFailedPersist } from '../lib/analyzeTimings'
 import {
   calibrateTechniqueScore,
   calibrateTechniqueScoreV61,
@@ -56,6 +64,7 @@ import {
 import {
   downsamplePoseFramesForPrompt,
   MAX_POSE_FRAMES_IN_GPT_PROMPT,
+  maxPoseFramesForAnalyzePrompt,
 } from './poseEmbedding'
 import { fal } from '@fal-ai/client'
 
@@ -64,6 +73,21 @@ function resolveFalKey(): string {
 }
 
 const TRANSIENT_PG_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT'])
+
+function buildCompactAnalyzeRetryPrompt(
+  metrics: Record<string, unknown>,
+  poseFrames: Array<Record<string, unknown>>
+): string {
+  const frames = poseFrames.slice(0, 4)
+  const retrieval = metrics.retrieval as Record<string, unknown> | undefined
+  return [
+    'Output ONLY one JSON object for padel technique analysis. The first character must be {.',
+    'Required keys include: is_padel, score, rating, technique_score, outcome_score, tactics_score, confidence_score, en, es, shot_context, primary_train_category.',
+    `retrieval: ${JSON.stringify(retrieval?.shot_hypothesis ?? null)}`,
+    `detection_summary: ${JSON.stringify(metrics.detection_summary ?? null)}`,
+    `pose_frames (${frames.length} samples): ${JSON.stringify(frames)}`,
+  ].join('\n')
+}
 
 function isTransientPgError(err: unknown): boolean {
   const e = err as { code?: string; cause?: { code?: string } }
@@ -929,6 +953,7 @@ router.post('/analyze', async (req, res) => {
     }
 
     const analysisId = randomUUID()
+    const timer = createAnalyzeTimer(analysisId)
 
     await db.insert(techniqueAnalysis).values({
       id: analysisId,
@@ -993,7 +1018,9 @@ router.post('/analyze', async (req, res) => {
         console.log('[Technique] Staging video via fal.storage for Modal', {
           localVideoPath,
         })
+        const falT0 = Date.now()
         videoUrl = await uploadLocalVideoToFalCdn(localVideoPath)
+        timer.mark('fal_staging', { durationMs: Date.now() - falT0 })
       } catch (e) {
         console.error('[Technique] fal.storage upload failed', e)
         await db
@@ -1039,6 +1066,7 @@ router.post('/analyze', async (req, res) => {
       analysisId,
     })
 
+    const modalT0 = Date.now()
     const modalRes = await fetch(process.env.MODAL_WEBHOOK_URL as string, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1048,6 +1076,7 @@ router.post('/analyze', async (req, res) => {
         model: 'mediapipe',
       }),
     }).then(r => r.json() as any)
+    timer.mark('modal', { durationMs: Date.now() - modalT0 })
 
     if (modalRes?.status !== 'success' || !modalRes.metrics) {
       console.error('[Technique] Modal error', modalRes)
@@ -1123,9 +1152,14 @@ router.post('/analyze', async (req, res) => {
     delete metrics.yolo_detections
     delete metrics.yolo_summary
 
+    const yoloT0 = Date.now()
     await withPgRetry('analyze-persist-detections', () =>
       persistTechniqueDetections(analysisId, normalizedDetections)
     )
+    timer.mark('yolo_persist', {
+      durationMs: Date.now() - yoloT0,
+      rowCount: normalizedDetections.length,
+    })
     if (YOLO_DETECTION_LOGS) {
       console.log('[Technique] YOLO detection ingest', {
         analysisId,
@@ -1147,16 +1181,19 @@ router.post('/analyze', async (req, res) => {
       },
     })
 
+    const retrievalT0 = Date.now()
     const retrieval = await retrieveForTechniqueMetrics(metrics)
     metrics = { ...metrics, retrieval }
+    timer.mark('retrieval', { durationMs: Date.now() - retrievalT0 })
 
     let aiAnalysis: any = null
     let feedbackText: string | null = null
 
     try {
+      const poseFrameCap = maxPoseFramesForAnalyzePrompt()
       const poseDataForPrompt = downsamplePoseFramesForPrompt(
         metrics.pose_data,
-        MAX_POSE_FRAMES_IN_GPT_PROMPT
+        poseFrameCap
       )
       const poseSummary = metrics.impact_pose_sequence?.length
         ? JSON.stringify({
@@ -1324,38 +1361,85 @@ Rules:
 - Keep overall score within about 12 points of (0.5*technique_score + 0.3*outcome_score + 0.2*tactics_score) — downstream calibration assumes this pillar blend.
 - Pro-library reference metadata in this prompt (if any) describes a retrieval neighbor only; do NOT raise scores because that neighbor is tagged advanced — judge only this user's clip.
 - Be strict and discriminative: major mechanical faults should score <=50; strong, consistent form should score >=85.
-- Only respond with valid JSON, no markdown, no other text.`
+- Only respond with valid JSON, no markdown, no other text.
+- Your reply must begin with the character { as the first non-whitespace character. Do not write planning, reasoning, or "The user wants" prose.`
 
-      const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      // Technique analyze always uses local Unsloth (never OpenAI fallback).
+      const analyzeLlmMessages: Array<{ role: 'system' | 'user'; content: string }> = [
+        {
+          role: 'system',
+          content:
+            'You are a padel coaching API. Output exactly one JSON object and nothing else. ' +
+            'No planning, no reasoning, no markdown fences, no text before { or after }. ' +
+            'The first character of your reply must be {.',
         },
-        body: JSON.stringify({
-          model: 'gpt-5-mini-2025-08-07',
-          // gpt-5-mini only allows the default temperature (1); omit explicit temperature.
-          response_format: { type: 'json_object' },
-          messages: [
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-        }),
-      }).then(r => r.json() as any)
+        { role: 'user', content: prompt },
+      ]
 
-      console.log('[Technique] OpenAI raw response', {
-        analysisId,
-        usage: openaiRes?.usage,
-        error: openaiRes?.error,
+      timer.mark('llm_prompt', {
+        promptChars: prompt.length,
+        poseFramesInPrompt: poseDataForPrompt.length,
+        maxPoseFramesCap: poseFrameCap,
+        provider: 'xevo',
+        note: 'Unsloth UI feels faster because it streams tokens; analyze waits for full JSON (stream:false).',
       })
 
-      const content = openaiRes?.choices?.[0]?.message?.content
+      const llmT0 = Date.now()
+      const llmLabel = `technique-analyze:${analysisId}`
+      const llmReqBase = {
+        model: 'gpt-5-mini-2025-08-07',
+        response_format: { type: 'json_object' as const },
+        messages: analyzeLlmMessages,
+        max_tokens: 8192,
+        temperature: 0.2,
+      }
+
+      let openaiRes = await runChat(llmReqBase, {
+        provider: 'xevo',
+        logLabel: llmLabel,
+      })
+      let content = chatContent(openaiRes)
+
+      if (typeof content === 'string' && !llmContentHasJsonObject(content)) {
+        console.warn('[Technique] Local LLM returned no JSON; compact retry (no 18k assistant turn)', {
+          analysisId,
+          contentChars: content.length,
+          preview: content.slice(0, 200),
+        })
+        openaiRes = await runChat(
+          {
+            ...llmReqBase,
+            messages: [
+              analyzeLlmMessages[0]!,
+              {
+                role: 'user',
+                content: buildCompactAnalyzeRetryPrompt(
+                  metrics as Record<string, unknown>,
+                  poseDataForPrompt as Array<Record<string, unknown>>
+                ),
+              },
+            ],
+          },
+          { provider: 'xevo', logLabel: `${llmLabel}:json-retry` }
+        )
+        content = chatContent(openaiRes)
+      }
+
+      timer.mark('llm_call', { durationMs: Date.now() - llmT0, ok: true })
+
+      console.log('[Technique] LLM raw response', {
+        analysisId,
+        provider: 'xevo',
+        usage: openaiRes?.usage,
+        error: openaiRes?.error,
+        contentChars: typeof content === 'string' ? content.length : 0,
+        hasJsonObject: typeof content === 'string' ? llmContentHasJsonObject(content) : false,
+      })
+
       if (typeof content === 'string') {
-        aiAnalysis = JSON.parse(content)
-      } else if (content?.[0]?.type === 'text' && content[0].text?.value) {
-        aiAnalysis = JSON.parse(content[0].text.value)
+        aiAnalysis = parseJsonFromLlmContent(content, {
+          label: llmLabel,
+        })
       }
 
       if (aiAnalysis && Array.isArray(metrics?.pose_data)) {
@@ -1445,6 +1529,10 @@ Rules:
           'Technique analysis completed.'
       }
     } catch (err) {
+      timer.mark('llm_call', {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      })
       const cause = err instanceof Error && err.cause instanceof Error ? err.cause : null
       const dnsCode =
         cause && 'code' in cause ? String((cause as NodeJS.ErrnoException).code) : ''
@@ -1462,6 +1550,10 @@ Rules:
 
     const combinedMetrics =
       aiAnalysis != null ? { ...metrics, ai_analysis: aiAnalysis } : metrics
+    const metricsForDb =
+      aiAnalysis != null
+        ? combinedMetrics
+        : slimMetricsForFailedPersist(combinedMetrics as Record<string, unknown>)
 
     console.log('[Technique] Combined metrics before DB update', {
       analysisId,
@@ -1479,18 +1571,25 @@ Rules:
       },
     })
 
+    const dbT0 = Date.now()
     await withPgRetry('analyze-complete', () =>
       db
         .update(techniqueAnalysis)
         .set({
           status: aiAnalysis ? 'completed' : 'failed',
-          metrics: combinedMetrics as any,
+          metrics: metricsForDb as any,
           feedbackText,
         })
         .where(eq(techniqueAnalysis.id, analysisId))
     )
+    timer.mark('db_update', {
+      durationMs: Date.now() - dbT0,
+      status: aiAnalysis ? 'completed' : 'failed',
+      metricsPayloadSlim: !aiAnalysis,
+    })
 
     console.log('[Technique] Analysis row updated, id:', analysisId)
+    timer.summary()
     return res.json({ analysisId })
   } catch (e: any) {
     console.error('[Technique] Analyze error:', e)
@@ -1674,14 +1773,59 @@ function orderCorrectionsByFrames(
 
 router.post('/correction-images', async (req, res) => {
   try {
-    const imageProvider =
-      (req.body as { imageProvider?: string })?.imageProvider === 'fal'
-        ? 'fal'
-        : 'gemini'
+    const rawProvider = String(
+      (req.body as { imageProvider?: string })?.imageProvider ?? ''
+    ).toLowerCase()
+    // `XEVO_DISABLE_IMAGE_FALLBACK=true` opts into strict "no fallback" mode for
+    // production-stack testing: legacy providers (gemini/fal) cannot be invoked
+    // explicitly or implicitly, and a missing/unconfigured Comfy returns 503
+    // instead of silently routing to Gemini. Default behaviour is unchanged.
+    const disableImageFallback =
+      String(process.env.XEVO_DISABLE_IMAGE_FALLBACK ?? '').trim().toLowerCase() === 'true'
+
+    if (disableImageFallback && (rawProvider === 'gemini' || rawProvider === 'fal')) {
+      console.warn('[Technique] Legacy image provider blocked by XEVO_DISABLE_IMAGE_FALLBACK', {
+        rawProvider,
+      })
+      return res.status(503).json({
+        error:
+          `Image provider '${rawProvider}' is disabled by XEVO_DISABLE_IMAGE_FALLBACK=true. ` +
+          `Send imageProvider="comfy" or unset the flag.`,
+      })
+    }
+
+    // Production default: Comfy/Qwen when configured, with Gemini as legacy fallback.
+    // Explicit `imageProvider` from the app (gemini/fal/comfy) is always honored
+    // (unless blocked above by the disable-fallback flag).
+    let imageProvider: 'gemini' | 'fal' | 'comfy'
+    if (rawProvider === 'fal') imageProvider = 'fal'
+    else if (rawProvider === 'comfy') imageProvider = 'comfy'
+    else if (rawProvider === 'gemini') imageProvider = 'gemini'
+    else if (isComfyCorrectionConfigured()) imageProvider = 'comfy'
+    else if (disableImageFallback) {
+      console.warn(
+        '[Technique] Comfy not configured and XEVO_DISABLE_IMAGE_FALLBACK=true — refusing to fall back to Gemini'
+      )
+      return res.status(503).json({
+        error:
+          'ComfyUI is not configured and image fallback is disabled ' +
+          '(XEVO_DISABLE_IMAGE_FALLBACK=true). Configure COMFYUI_* env vars or unset the flag.',
+      })
+    } else {
+      imageProvider = 'gemini'
+    }
     const correctionImagesKey =
-      imageProvider === 'fal' ? 'correction_images_fal' : 'correction_images'
+      imageProvider === 'fal'
+        ? 'correction_images_fal'
+        : imageProvider === 'comfy'
+          ? 'correction_images_comfy'
+          : 'correction_images'
     const correctionContextKey =
-      imageProvider === 'fal' ? 'correction_context_fal' : 'correction_context'
+      imageProvider === 'fal'
+        ? 'correction_context_fal'
+        : imageProvider === 'comfy'
+          ? 'correction_context_comfy'
+          : 'correction_context'
 
     console.log('[Technique] Correction-images request received', {
       imageProvider,
@@ -1863,6 +2007,13 @@ router.post('/correction-images', async (req, res) => {
       }
     }
 
+    if (imageProvider === 'comfy' && !isComfyCorrectionConfigured()) {
+      return res.status(503).json({
+        error:
+          'ComfyUI is not configured. Set COMFYUI_BASE_URL and COMFYUI_WORKFLOW_PATH (and node id env vars) on the server.',
+      })
+    }
+
     console.log('[Technique] Generating correction images', {
       analysisId,
       imageProvider,
@@ -1874,18 +2025,22 @@ router.post('/correction-images', async (req, res) => {
       poseSequence?.find((p) => p.phase === 'impact')?.landmarks ??
       framesToGenerate[0].landmarks
 
-    const deltas = await translateRecommendationsToDeltas(
+    // Impact-frame deltas are used as a fallback when a per-frame delta call fails.
+    const impactDeltas = await translateRecommendationsToDeltas(
       enAnalysis.recommendations ?? [],
       `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
       landmarksForGpt,
       poseSequence ?? null
     )
 
-    console.log('[Technique] GPT landmark deltas', {
-      deltaCount: deltas.length,
-      deltas: deltas.map((d) => `${d.landmark} ${d.axis} ${d.direction}`),
+    console.log('[Technique] Impact-frame landmark deltas (fallback)', {
+      deltaCount: impactDeltas.length,
+      deltas: impactDeltas.map((d) => `${d.landmark} ${d.axis} ${d.direction}`),
       usedImpactSequence: !!poseSequence?.length,
     })
+
+    // Per-frame delta cache so concurrent batches do not duplicate calls for the same frame.
+    const frameDeltasCache = new Map<number, LandmarkDelta[]>()
 
     let shotAndHandedness: ShotAndHandedness | null = null
     try {
@@ -1999,6 +2154,42 @@ router.post('/correction-images', async (req, res) => {
               }
             }
 
+            // Per-frame deltas: this frame's landmarks may reflect a different swing
+            // phase than the impact frame, so generate frame-specific adjustments.
+            // Cache by frame to avoid duplicate LLM calls across retries / batches,
+            // and fall back to impact-frame deltas if the per-frame call fails.
+            let frameDeltas: LandmarkDelta[] = impactDeltas
+            const cached = frameDeltasCache.get(frameData.frame)
+            if (cached) {
+              frameDeltas = cached
+            } else {
+              try {
+                const perFrame = await translateRecommendationsToDeltas(
+                  enAnalysis.recommendations ?? [],
+                  `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
+                  frameData.landmarks,
+                  poseSequence ?? null
+                )
+                if (perFrame.length > 0) {
+                  frameDeltas = perFrame
+                  frameDeltasCache.set(frameData.frame, perFrame)
+                  console.log('[Technique] Per-frame deltas', {
+                    frame: frameData.frame,
+                    deltaCount: perFrame.length,
+                  })
+                } else {
+                  console.warn(
+                    `[Technique] Per-frame deltas empty for frame ${frameData.frame}; using impact fallback`
+                  )
+                }
+              } catch (perFrameErr) {
+                console.warn(
+                  `[Technique] Per-frame deltas failed for frame ${frameData.frame}; using impact fallback`,
+                  perFrameErr
+                )
+              }
+            }
+
             const correctedImage =
               imageProvider === 'fal'
                 ? await generateCorrectedImageFal(
@@ -2006,23 +2197,35 @@ router.post('/correction-images', async (req, res) => {
                     'image/png',
                     frameData.frame,
                     frameData.landmarks,
-                    deltas,
+                    frameDeltas,
                     `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
                     enAnalysis.recommendations ?? [],
                     shotAndHandednessForImages,
                     proReferenceText
                   )
-                : await generateCorrectedImage(
-                    frameBase64,
-                    'image/png',
-                    frameData.frame,
-                    frameData.landmarks,
-                    deltas,
-                    `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
-                    enAnalysis.recommendations ?? [],
-                    shotAndHandednessForImages,
-                    proReferenceText
-                  )
+                : imageProvider === 'comfy'
+                  ? await generateCorrectedImageComfy(
+                      frameBase64,
+                      'image/png',
+                      frameData.frame,
+                      frameData.landmarks,
+                      frameDeltas,
+                      `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
+                      enAnalysis.recommendations ?? [],
+                      shotAndHandednessForImages,
+                      proReferenceText
+                    )
+                  : await generateCorrectedImage(
+                      frameBase64,
+                      'image/png',
+                      frameData.frame,
+                      frameData.landmarks,
+                      frameDeltas,
+                      `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
+                      enAnalysis.recommendations ?? [],
+                      shotAndHandednessForImages,
+                      proReferenceText
+                    )
 
             const originalDataUri = `data:image/png;base64,${frameBase64}`
 
@@ -2080,7 +2283,9 @@ router.post('/correction-images', async (req, res) => {
         version:
           imageProvider === 'fal'
             ? 'fal-flux-general-img2img-v1'
-            : 'shot-handedness-v1',
+            : imageProvider === 'comfy'
+              ? 'comfyui-workflow-v1'
+              : 'shot-handedness-v1',
         image_provider: imageProvider,
         generated_at: new Date().toISOString(),
         frame_count: mergedCorrections.length,

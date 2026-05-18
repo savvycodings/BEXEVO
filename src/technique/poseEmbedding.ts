@@ -122,6 +122,21 @@ export function embedPoseForProRetrieval(metrics: {
 /** Cap pose frames sent to GPT (full `metrics.pose_data` stays for embeddings / impact math). */
 export const MAX_POSE_FRAMES_IN_GPT_PROMPT = 72;
 
+/**
+ * Pose frame cap for technique analyze LLM prompt.
+ * Local Unsloth (transformers) struggles with ~140k-char prompts; default 12 frames when provider=xevo.
+ */
+export function maxPoseFramesForAnalyzePrompt(): number {
+  const raw = String(process.env.XEVO_ANALYZE_MAX_POSE_FRAMES ?? "").trim();
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  const provider = String(process.env.XEVO_TEXT_PROVIDER ?? "")
+    .trim()
+    .toLowerCase();
+  if (provider === "xevo") return 12;
+  return MAX_POSE_FRAMES_IN_GPT_PROMPT;
+}
+
 export function downsamplePoseFramesForPrompt<T extends { frame: number }>(
   poseData: T[] | null | undefined,
   maxFrames: number

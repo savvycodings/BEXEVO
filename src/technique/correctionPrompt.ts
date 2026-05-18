@@ -1,6 +1,11 @@
 import type { LabeledPoseFrame } from "./impactPoseContext";
 import { MEDIAPIPE_POSE_LANDMARK_NAMES } from "./poseEmbedding";
 import { fal } from "@fal-ai/client";
+import { runChat, chatContent } from "../lib/chatProvider";
+import {
+  parseFlexibleJsonFromLlmContent,
+  parseJsonArrayFromLlmContent,
+} from "../lib/llmResponse";
 
 /** fal.subscribe hits queue.fal.run; on DNS issues retry with fal.run (sync), same as falLoraRouter. */
 function getNetworkErrorCode(err: unknown): string | undefined {
@@ -300,34 +305,35 @@ Rules:
 - If uncertain, return "unknown" with lower confidence.
 - Return JSON only.`;
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "You classify padel movement and handedness from biomechanics. Respond only with strict JSON.",
-        },
-        { role: "user", content: prompt },
-      ],
-    }),
-  }).then((r) => r.json() as any);
-
-  const content = res?.choices?.[0]?.message?.content;
-  if (!content) {
-    console.error("[CorrectionPrompt] Shot classification returned no content", res);
+  let content: string | null = null;
+  try {
+    const res = await runChat(
+      {
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You classify padel movement and handedness from biomechanics. Respond only with strict JSON. No markdown fences.",
+          },
+          { role: "user", content: prompt },
+        ],
+      },
+      { provider: "xevo" }
+    );
+    content = chatContent(res);
+    if (!content) {
+      console.error("[CorrectionPrompt] Shot classification returned no content", res);
+      return DEFAULT_SHOT_AND_HANDEDNESS;
+    }
+  } catch (err) {
+    console.error("[CorrectionPrompt] Shot classification chat call failed", err);
     return DEFAULT_SHOT_AND_HANDEDNESS;
   }
 
   try {
-    const parsed = JSON.parse(content) as Partial<ShotAndHandedness>;
+    const parsed = parseFlexibleJsonFromLlmContent(content) as Partial<ShotAndHandedness>;
     const shot = parsed?.shot ?? {};
     const handedness = parsed?.handedness ?? {};
 
@@ -379,8 +385,8 @@ ${recommendations.map((r, i) => `${i + 1}. ${r}`).join("\n")}
 
 ${formatLandmarksForPrompt(landmarks, poseSequence)}
 
-Respond ONLY with a valid JSON array matching this schema:
-[
+Respond ONLY with valid JSON in this shape (no markdown fences):
+{ "deltas": [
   {
     "landmark": "LEFT_ANKLE",
     "axis": "x",
@@ -388,7 +394,7 @@ Respond ONLY with a valid JSON array matching this schema:
     "magnitude": "moderate",
     "reason": "wider stance for stability"
   }
-]
+] }
 
 Rules:
 - Only use landmark names that exist in the input (e.g. LEFT_SHOULDER, RIGHT_KNEE, LEFT_ANKLE, etc.)
@@ -404,35 +410,35 @@ Rules:
 - Output only skeletal/pose adjustments for biomechanics — never recommendations about hair, face, clothing, or identity.
 - Only respond with valid JSON, no markdown, no explanation`;
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a biomechanics assistant. Always respond with a JSON object containing a 'deltas' array.",
-        },
-        { role: "user", content: prompt },
-      ],
-    }),
-  }).then((r) => r.json() as any);
-
-  const content = res?.choices?.[0]?.message?.content;
-  if (!content) {
-    console.error("[CorrectionPrompt] GPT returned no content", res);
+  let content: string | null = null;
+  try {
+    const res = await runChat(
+      {
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a biomechanics assistant. Respond with JSON only: { \"deltas\": [ ... ] }. No markdown fences.",
+          },
+          { role: "user", content: prompt },
+        ],
+      },
+      { provider: "xevo" }
+    );
+    content = chatContent(res);
+    if (!content) {
+      console.error("[CorrectionPrompt] GPT returned no content", res);
+      return [];
+    }
+  } catch (err) {
+    console.error("[CorrectionPrompt] Delta translation chat call failed", err);
     return [];
   }
 
   try {
-    const parsed = JSON.parse(content);
-    return Array.isArray(parsed) ? parsed : parsed.deltas ?? [];
+    return parseJsonArrayFromLlmContent(content) as LandmarkDelta[];
   } catch {
     console.error("[CorrectionPrompt] Failed to parse GPT deltas", content);
     return [];
@@ -723,6 +729,88 @@ Adjustments: ${instructions}
 Coaching cues: ${rec}${proBit}
 
 Hard constraints: same framing and scale; keep head pose and gaze; no teleporting; no adding/removing racket or ball; racket must stay padel-style; no new objects.`;
+}
+
+/**
+ * Rich correction prompt for **ComfyUI + Qwen Image Edit 2511 GGUF**.
+ *
+ * Qwen 2.5-VL (the text encoder behind the edit model) tolerates a much larger
+ * context than Flux. We send the full coach payload — diagnosis, recommendations,
+ * shot/handedness JSON, raw landmarks, deltas, pro-library landmark gap, plus the
+ * non-negotiable invariants block (head/eye freeze, scale lock, padel-vs-tennis,
+ * impact lock, hair freeze, equipment inventory, etc.) — same content as the
+ * Gemini path.
+ */
+export function buildQwenCorrectionPrompt(
+  frameNumber: number,
+  landmarks: FrameLandmarks,
+  deltas: LandmarkDelta[],
+  diagnosis: string,
+  recommendations: string[],
+  shotAndHandedness: ShotAndHandedness | null,
+  proReferenceText?: string | null
+): string {
+  const instructions = deltasToInstructions(deltas);
+  const { shot, handedness } = shotAndHandednessForImagePrompt(shotAndHandedness);
+
+  const proBlock =
+    proReferenceText && proReferenceText.trim().length > 0
+      ? `
+
+PRO LIBRARY POSE TARGET (nearest matching pro clip — prioritize moving joints toward these pro positions; same instant in the swing as aligned to this frame):
+${proReferenceText.trim()}
+`
+      : "";
+
+  // Diffusion models follow POSITIVE descriptions much more reliably than negation.
+  // We lead with a strong scene description so the model anchors the background
+  // (court, glass, net, floor lines, lighting) BEFORE it processes the corrections.
+  // The invariants block is kept short and at the end as reinforcement only.
+
+  const sceneBlock = `PHOTOREALISTIC PADEL COURT — preserve scene exactly.
+
+Single frame from a padel match. Scene description (this is what the image SHOWS — preserve all of it):
+- Enclosed padel court with glass back walls and side walls; the glass shows minor reflections.
+- Blue acrylic floor with crisp white service-box and center lines; floor texture and paint match the source frame.
+- White net at the center of the court spanning the full width, with its post and tape exactly where they appear in the source frame.
+- Same camera angle, same focal length, same daylight/court lighting, same shadows, same background spectators or equipment (if any).
+- Same player: identical face, skin tone, hair length/style/color, facial hair, glasses/hat/headband, clothing colors and cut, shoes, and any visible jewelry.
+- Same padel racket (perforated solid face, short grip, wrist strap) — NOT a tennis racquet.
+- If a ball is visible in the source, it stays in the same location with the same motion blur; if no ball is visible, do not add one.`;
+
+  const taskBlock = `TASK — small biomechanical pose correction only.
+
+Adjust ONLY the player's body joints to reflect the coach corrections below. The court, walls, net, floor lines, camera, lighting, clothing, equipment, face, and head pose must come from the source frame unchanged.
+
+COACH DIAGNOSIS:
+${diagnosis}
+
+COACH RECOMMENDATIONS:
+${recommendations.map((r, i) => `${i + 1}. ${r}`).join("\n")}
+
+SHOT CLASSIFICATION (for context — do not change shot type or handedness):
+- family: ${shot.shot_family}
+- name: ${shot.shot_name}
+- variant: ${shot.variant}
+- handedness: ${handedness.dominant_hand}
+
+CURRENT POSE LANDMARKS (normalized 0-1, top-left origin — for spatial reference):
+${JSON.stringify(landmarks, null, 2)}
+
+SPECIFIC PER-JOINT ADJUSTMENTS:
+${instructions}
+${proBlock}`;
+
+  // Short reinforcement block. Long lists of "do not" get diluted by attention;
+  // five high-signal lines at the end are more effective than the previous 15.
+  const invariantBlock = `REINFORCEMENT (anchor on the source frame):
+- IDENTITY: same player (face, skin, hair, clothing, equipment, dominant hand = ${handedness.dominant_hand}).
+- SCENE: same court (glass walls, blue floor, white net + lines), same camera framing and scale, same lighting.
+- HEAD & EYE LINE: copy the head pose and gaze direction from the source pixel-for-pixel.
+- MOMENT: same stroke instant and same ball-racket relationship as the source — preparation, impact, or follow-through stays the same phase.
+- OUTPUT: photorealistic, no overlays, no text, no skeleton lines.`;
+
+  return `${sceneBlock}\n\n${taskBlock}\n\n${invariantBlock}`;
 }
 
 const DEFAULT_FAL_CORRECTION_ENDPOINT = "fal-ai/flux-general/image-to-image";

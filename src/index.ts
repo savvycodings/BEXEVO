@@ -17,6 +17,7 @@ import {
 } from './webhooks/metaFacebookWebhook'
 import { getPrivacyPolicyHtml } from './privacyPolicyHtml'
 import { getDataDeletionHtml } from './dataDeletionHtml'
+import { warnIfXevoModelMismatch } from './lib/xevoLlm'
 
 const app = express()
 
@@ -130,4 +131,7 @@ app.use('/coach', coachRouter)
 
 app.listen(3050, () => {
   console.log('Server started on port 3050')
+  if (String(process.env.XEVO_TEXT_PROVIDER ?? '').trim().toLowerCase() === 'xevo') {
+    void warnIfXevoModelMismatch()
+  }
 })

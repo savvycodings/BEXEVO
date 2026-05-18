@@ -156,6 +156,9 @@ export type TechniqueAnalysisMetrics = {
   /** Optional A/B: Flux img2img via fal.ai */
   correction_images_fal?: TechniqueCorrectionImage[];
   correction_context_fal?: TechniqueCorrectionContext;
+  /** Local / self-hosted ComfyUI workflow (server posts frame + prompt, reads output image). */
+  correction_images_comfy?: TechniqueCorrectionImage[];
+  correction_context_comfy?: TechniqueCorrectionContext;
   [key: string]: unknown;
 };
 
