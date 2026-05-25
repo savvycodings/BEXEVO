@@ -63,8 +63,27 @@ const upload = multer({
 const UPLOAD_ROOT = path.join(process.cwd(), "uploads", "train");
 const ADMIN_SECRET = (): string =>
   (process.env.ADMIN_TRAIN_SECRET || "xevodev").trim();
-const TRAIN_MODAL_WEBHOOK_URL = (): string =>
-  (process.env.TRAIN_MODAL_WEBHOOK_URL || "").trim();
+/** Strip surrounding quotes from .env values (e.g. `"https://....modal.run/"`). */
+function TRAIN_MODAL_WEBHOOK_URL(): string {
+  let url = (process.env.TRAIN_MODAL_WEBHOOK_URL || "").trim();
+  if (
+    (url.startsWith('"') && url.endsWith('"')) ||
+    (url.startsWith("'") && url.endsWith("'"))
+  ) {
+    url = url.slice(1, -1).trim();
+  }
+  return url;
+}
+
+async function markTrainSampleFailed(
+  sampleId: string,
+  errorMessage: string
+): Promise<void> {
+  await db
+    .update(trainSample)
+    .set({ status: "failed", errorMessage })
+    .where(eq(trainSample.id, sampleId));
+}
 
 const router = express.Router();
 router.use(express.json({ limit: "2mb" }));
@@ -159,20 +178,23 @@ function getPublicVideoBase(): string {
   return publicVideoBase || publicBase || authBase || "http://localhost:3050";
 }
 
+/**
+ * POST train clip to Modal `process_video` (padel-trainset). Awaits full extraction like AI Coach analyze.
+ * Throws on misconfiguration or Modal error so upload can return 500.
+ */
 async function triggerTrainExtraction(params: {
   sampleId: string;
   trainVideoId: string;
   strokeName: string;
   videoPublicPath: string;
-  /** Absolute path on disk; used to stage on fal CDN for Modal when FAL_KEY is set. */
+  /** Absolute path on disk; staged on fal CDN for remote Modal when FAL_KEY is set. */
   videoAbsPath: string;
 }): Promise<void> {
   const modalUrl = TRAIN_MODAL_WEBHOOK_URL();
   if (!modalUrl) {
-    console.warn("[Train] TRAIN_MODAL_WEBHOOK_URL missing; sample left queued", {
-      sampleId: params.sampleId,
-    });
-    return;
+    const msg = "TRAIN_MODAL_WEBHOOK_URL is not configured on the server.";
+    await markTrainSampleFailed(params.sampleId, msg);
+    throw new Error(msg);
   }
 
   const baseUrl = getPublicVideoBase().replace(/\/+$/, "");
@@ -180,103 +202,104 @@ async function triggerTrainExtraction(params: {
     ? params.videoPublicPath
     : `${baseUrl}${params.videoPublicPath.startsWith("/") ? "" : "/"}${params.videoPublicPath}`;
 
-  const modalRemote = /localhost|127\.0\.0\.1/i.test(modalUrl) === false;
+  const modalRemote =
+    !modalUrl.includes("localhost") && !/127\.0\.0\.1/i.test(modalUrl);
+  const hasLocalFile =
+    Boolean(params.videoAbsPath) && fs.existsSync(params.videoAbsPath);
   const falKey = resolveFalKey();
-  if (
-    modalRemote &&
-    falKey &&
-    params.videoAbsPath &&
-    fs.existsSync(params.videoAbsPath)
-  ) {
+
+  if (modalRemote && hasLocalFile && falKey) {
     try {
       console.log("[Train] Staging train video via fal.storage for Modal", {
         sampleId: params.sampleId,
         videoAbsPath: params.videoAbsPath,
       });
       videoUrl = await uploadTrainVideoToFalCdn(params.videoAbsPath);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("[Train] fal.storage upload failed (train Modal)", e);
-      await db
-        .update(trainSample)
-        .set({
-          status: "failed",
-          errorMessage:
-            "Could not stage train video for Modal (fal upload failed). Check FAL_KEY and logs.",
-        })
-        .where(eq(trainSample.id, params.sampleId));
-      return;
+      const msg =
+        "Could not stage train video for Modal (fal upload failed). Check FAL_KEY and logs.";
+      await markTrainSampleFailed(params.sampleId, msg);
+      throw new Error(msg);
     }
-  } else if (modalRemote && !falKey) {
+  } else if (modalRemote && hasLocalFile && !falKey) {
     console.warn(
-      "[Train] Modal is remote but FAL_KEY is unset; using public video URL (ngrok may 404 Modal). Set FAL_KEY to stage on fal CDN."
+      "[Train] Modal is remote but FAL_KEY is unset; using public video URL (ngrok may block Modal). Set FAL_KEY to stage on fal CDN."
     );
   }
 
-  if (
-    !/localhost|127\.0\.0\.1/i.test(modalUrl) &&
-    /localhost|127\.0\.0\.1/i.test(videoUrl)
-  ) {
-    console.error("[Train] Modal cannot reach local video URL; marking sample failed", {
+  if (modalRemote && /localhost|127\.0\.0\.1/i.test(videoUrl)) {
+    const msg =
+      "Video URL is not publicly reachable for Modal. Set PUBLIC_VIDEO_BASE_URL (or FAL_KEY for fal CDN staging).";
+    console.error("[Train] Modal cannot reach local video URL", {
       sampleId: params.sampleId,
       videoUrl,
     });
-    await db
-      .update(trainSample)
-      .set({
-        status: "failed",
-        errorMessage:
-          "Server misconfiguration: set PUBLIC_VIDEO_BASE_URL (or PUBLIC_BASE_URL) to a public URL reachable by Modal.",
-      })
-      .where(eq(trainSample.id, params.sampleId));
+    await markTrainSampleFailed(params.sampleId, msg);
+    throw new Error(msg);
+  }
+
+  console.log("[Train] Calling Modal webhook...", {
+    modalUrl,
+    baseUrl,
+    videoUrl,
+    sampleId: params.sampleId,
+    trainVideoId: params.trainVideoId,
+  });
+
+  const modalT0 = Date.now();
+  let statusCode = 0;
+  let body: { status?: string; message?: string } | null = null;
+  try {
+    const r = await fetch(modalUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        video_url: videoUrl,
+        sample_id: params.sampleId,
+        movement_label: params.strokeName,
+        train_video_id: params.trainVideoId,
+      }),
+    });
+    statusCode = r.status;
+    body = (await r.json().catch(() => null)) as {
+      status?: string;
+      message?: string;
+    } | null;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Modal request failed";
+    console.error("[Train] Modal trigger exception", {
+      sampleId: params.sampleId,
+      message: msg,
+    });
+    await markTrainSampleFailed(params.sampleId, msg);
+    throw new Error(msg);
+  }
+
+  console.log("[Train] Modal response", {
+    sampleId: params.sampleId,
+    statusCode,
+    bodyStatus: body?.status,
+    bodyMessage: body?.message ?? null,
+    durationMs: Date.now() - modalT0,
+  });
+
+  if (!statusCode || statusCode < 200 || statusCode >= 300 || body?.status === "error") {
+    const msg =
+      body?.message?.trim() ||
+      `Modal pose extraction failed (HTTP ${statusCode || "unknown"}).`;
+    await markTrainSampleFailed(params.sampleId, msg);
+    throw new Error(msg);
+  }
+
+  if (body?.status === "success") {
+    await indexTrainSampleEmbeddingIfReady(params.sampleId);
     return;
   }
 
-  void fetch(modalUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      video_url: videoUrl,
-      sample_id: params.sampleId,
-      movement_label: params.strokeName,
-      train_video_id: params.trainVideoId,
-    }),
-  })
-    .then(async (r) => {
-      const body = (await r.json().catch(() => null)) as any;
-      console.log("[Train] Modal trigger response", {
-        sampleId: params.sampleId,
-        statusCode: r.status,
-        bodyStatus: body?.status,
-        bodyMessage: body?.message ?? null,
-      });
-      if (!r.ok || body?.status === "error") {
-        await db
-          .update(trainSample)
-          .set({
-            status: "failed",
-            errorMessage:
-              body?.message ||
-              `Modal trigger failed with HTTP ${r.status}`,
-          })
-          .where(eq(trainSample.id, params.sampleId));
-      } else if (body?.status === "success") {
-        // Embedding index is best-effort; must not fail the sample if DB read/upsert errors.
-        await indexTrainSampleEmbeddingIfReady(params.sampleId);
-      }
-    })
-    .catch(async (err: any) => {
-      console.error("[Train] Modal trigger exception", {
-        sampleId: params.sampleId,
-        message: err?.message ?? String(err),
-      });
-      await db
-        .update(trainSample)
-        .set({
-          status: "failed",
-          errorMessage: err?.message || "Modal request failed",
-        })
-        .where(eq(trainSample.id, params.sampleId));
-    });
+  const msg = body?.message?.trim() || "Modal returned an unexpected response.";
+  await markTrainSampleFailed(params.sampleId, msg);
+  throw new Error(msg);
 }
 
 function assertAdminTrain(req: express.Request, res: express.Response): boolean {
@@ -445,13 +468,28 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       bytes: req.file.size,
     });
 
-    await triggerTrainExtraction({
-      sampleId,
-      trainVideoId: id,
-      strokeName,
-      videoPublicPath: publicPath,
-      videoAbsPath: filePath,
-    });
+    try {
+      await triggerTrainExtraction({
+        sampleId,
+        trainVideoId: id,
+        strokeName,
+        videoPublicPath: publicPath,
+        videoAbsPath: filePath,
+      });
+    } catch (modalErr: unknown) {
+      const modalMessage =
+        modalErr instanceof Error ? modalErr.message : "Modal pose extraction failed";
+      console.error("[Train] Upload saved but Modal extraction failed", {
+        sampleId,
+        modalMessage,
+      });
+      return res.status(500).json({
+        error: modalMessage,
+        id,
+        sampleId,
+        url: publicPath,
+      });
+    }
 
     return res.json({
       id,
@@ -463,7 +501,7 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       skillLevel,
       viewProfile,
       message:
-        "Stored for training and queued for extraction. DELETE /train/video/:id with admin header to remove.",
+        "Stored and pose extraction completed. DELETE /train/video/:id with admin header to remove.",
     });
   } catch (e: any) {
     console.error("[Train] Upload error (exception):", e?.message ?? e, e?.stack);
