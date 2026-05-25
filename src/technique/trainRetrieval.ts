@@ -321,7 +321,8 @@ export async function getTrainSamplePoseSequence(
 
 /**
  * Map user video frame index to a pro-library frame by relative position in the clip.
- * (Embedding matched the whole sequence; this picks a comparable instant for landmark deltas.)
+ * Embedding matched the whole pro sequence; this picks a comparable instant for landmark targets.
+ * Uses frame_idx when present (train_modal_app) so array order matches video timeline.
  */
 export function pickAlignedProPoseFrame(
   userVideoFrameIndex: number,
@@ -329,8 +330,59 @@ export function pickAlignedProPoseFrame(
   proSeq: TrainPoseFrame[]
 ): TrainPoseFrame | null {
   if (!proSeq.length) return null;
+  const sorted = [...proSeq].sort((a, b) => a.frame_idx - b.frame_idx);
   const tf = Math.max(1, videoTotalFrames);
-  const t = Math.max(0, Math.min(1, userVideoFrameIndex / tf));
-  const idx = Math.min(proSeq.length - 1, Math.round(t * (proSeq.length - 1)));
-  return proSeq[idx] ?? null;
+  const t = Math.max(0, Math.min(1, userVideoFrameIndex / Math.max(1, tf - 1)));
+  const proMaxIdx = sorted[sorted.length - 1]?.frame_idx ?? sorted.length - 1;
+  const targetProIdx = Math.round(t * Math.max(0, proMaxIdx));
+
+  let best = sorted[0]!;
+  let bestD = Math.abs(best.frame_idx - targetProIdx);
+  for (const row of sorted) {
+    const d = Math.abs(row.frame_idx - targetProIdx);
+    if (d < bestD) {
+      bestD = d;
+      best = row;
+    }
+  }
+  return best;
+}
+
+/** Frame indices to try when extracting a pro-library still (pose frame_idx may exceed video length). */
+export function proReferenceFrameCandidates(
+  userVideoFrameIndex: number,
+  videoTotalFrames: number,
+  proSeq: TrainPoseFrame[]
+): number[] {
+  if (!proSeq.length) return [];
+  const sorted = [...proSeq].sort((a, b) => a.frame_idx - b.frame_idx);
+  const tf = Math.max(1, videoTotalFrames);
+  const t = Math.max(0, Math.min(1, userVideoFrameIndex / Math.max(1, tf - 1)));
+  const ordinal = Math.round(t * Math.max(0, sorted.length - 1));
+  const rows = [
+    sorted[ordinal],
+    sorted[Math.max(0, ordinal - 1)],
+    sorted[Math.min(sorted.length - 1, ordinal + 1)],
+    sorted[sorted.length - 1],
+    sorted[0],
+  ].filter((r): r is TrainPoseFrame => !!r);
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const row of rows) {
+    const idx = row.frame_idx;
+    if (typeof idx === "number" && idx >= 0 && !seen.has(idx)) {
+      seen.add(idx);
+      out.push(idx);
+    }
+  }
+  return out;
+}
+
+/** Relative position in user clip (0–1) for pro still extraction ratio fallback. */
+export function proTimelineRatioForUserFrame(
+  userVideoFrameIndex: number,
+  videoTotalFrames: number
+): number {
+  const tf = Math.max(1, videoTotalFrames);
+  return Math.max(0, Math.min(1, userVideoFrameIndex / Math.max(1, tf - 1)));
 }

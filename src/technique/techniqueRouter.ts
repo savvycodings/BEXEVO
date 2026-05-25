@@ -9,6 +9,8 @@ import {
   techniqueVideo,
   techniqueAnalysis,
   techniqueDetectionFrame,
+  trainVideo,
+  trainSample,
   user,
   userProfile,
   coachStudent,
@@ -18,7 +20,12 @@ import {
 } from '../db'
 import { randomUUID, createHash } from 'crypto'
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
-import { extractFrame, resolveVideoPath } from './frameExtractor'
+import {
+  extractFrame,
+  extractProReferenceFrame,
+  probeVideoFrameCount,
+  resolveVideoPath,
+} from './frameExtractor'
 import {
   translateRecommendationsToDeltas,
   classifyShotAndHandedness,
@@ -28,6 +35,8 @@ import {
   generateCorrectedImage,
   generateCorrectedImageFal,
   buildProNeighborCorrectionContext,
+  mergeLandmarkDeltas,
+  proGapToLandmarkDeltas,
   type FrameLandmarks,
   type LandmarkDelta,
   type CorrectionResult,
@@ -44,6 +53,8 @@ import {
   calibrateTechniqueScore,
   calibrateTechniqueScoreV61,
   averagePillarOverall,
+  finalizeDisplayedScores,
+  parseScoreDisplayBoost,
   penaltyAdjustedOverallLegacy,
   applyProLibraryTierScoreConstraint,
 } from './scoreCalibration'
@@ -62,6 +73,8 @@ import {
   formatRetrievalForPrompt,
   getTrainSamplePoseSequence,
   pickAlignedProPoseFrame,
+  proReferenceFrameCandidates,
+  proTimelineRatioForUserFrame,
 } from './trainRetrieval'
 import {
   downsamplePoseFramesForPrompt,
@@ -952,6 +965,12 @@ router.post('/analyze', async (req, res) => {
     })
 
     if (!video || video.userId !== userId) {
+      console.warn('[Technique] Analyze 404: video not found or user mismatch', {
+        techniqueVideoId,
+        userId,
+        videoUserId: video?.userId ?? null,
+        videoExists: !!video,
+      })
       return res.status(404).json({ error: 'Video not found' })
     }
 
@@ -1359,11 +1378,11 @@ Rules:
 - rating: one of "excellent" (80-100), "good" (60-79), "needs_improvement" (30-59), "poor" (0-29)
 - primary_train_category: exactly one of save_return | ground_strokes | net_play | defence_glass | overhead | tactical_specials — pick the single train pillar this clip best represents (use save_return for serves/returns, ground_strokes for drives from the back, net_play for volleys and net work, defence_glass for defence off the glass, overhead for smashes/víboras/bandejas overhead, tactical_specials only for clearly tactical specialty shots). Must match the clip content, not a guess when uncertain use the closest pillar.
 - Do NOT default to 70. Use the full 0-100 scale when evidence supports it (avoid clustering everyone around the same tens digit).
-- Scoring anchors (guides, not quotas): multiple clear faults across pillars → overall often ~35–55; solid intermediate execution → ~55–72; strong form with minor issues → ~72–86; excellent pro-like execution → ~86–95.
+- Scoring anchors (guides, not quotas): multiple major faults across pillars → often ~45–58; solid intermediate club execution with fixable issues → ~62–78; strong form with minor issues → ~78–88; excellent pro-like execution → ~88–96.
 - technique_score, outcome_score, and tactics_score must differ when evidence differs; do not copy the same integer into all three pillars unless the clip truly looks equally strong or weak on each.
-- Set score close to the average of technique_score, outcome_score, and tactics_score (equal weights) — the app displays overall as that average.
+- Set score close to the average of technique_score, outcome_score, and tactics_score (equal weights) — the app displays overall as that average (server may apply a small display boost after analyze).
 - Pro-library reference metadata in this prompt (if any) describes a retrieval neighbor only; do NOT raise scores because that neighbor is tagged advanced — judge only this user's clip.
-- Be strict and discriminative: major mechanical faults should score <=50; strong, consistent form should score >=85.
+- Be fair and coaching-oriented: reserve <=50 for clips with multiple major mechanical faults; recreational intermediates doing recognizable padel mechanics with clear fixes often land in the low 60s–high 70s.
 - Only respond with valid JSON, no markdown, no other text.
 - Your reply must begin with the character { as the first non-whitespace character. Do not write planning, reasoning, or "The user wants" prose.`
 
@@ -1467,40 +1486,43 @@ Rules:
           ...aiAnalysis,
           score: modelRawScore,
         })
+        const scoreDisplayBoost = parseScoreDisplayBoost()
+        const displayed = finalizeDisplayedScores(v61, scoreDisplayBoost)
         const topProSkill =
           metrics?.retrieval?.neighbors?.[0]?.skill_level ??
           metrics?.retrieval?.shot_hypothesis?.skill_level
-        const s = applyProLibraryTierScoreConstraint(v61.overall, topProSkill)
+        const s = applyProLibraryTierScoreConstraint(displayed.overall, topProSkill)
         aiAnalysis.score_model_raw = Math.round(modelRawScore)
         aiAnalysis.score_calibrated_before_pro_tier = legacyCalibrated
         aiAnalysis.score = s
         aiAnalysis.score_scale = 'percent'
         aiAnalysis.scoring_version = 'v6.1.2'
-        aiAnalysis.technique_score = clampPercent(v61.breakdown.technique)
-        aiAnalysis.outcome_score = clampPercent(v61.breakdown.outcome)
-        aiAnalysis.tactics_score = clampPercent(v61.breakdown.tactics)
-        aiAnalysis.confidence_score = clampPercent(v61.confidence.score)
+        aiAnalysis.technique_score = clampPercent(displayed.breakdown.technique)
+        aiAnalysis.outcome_score = clampPercent(displayed.breakdown.outcome)
+        aiAnalysis.tactics_score = clampPercent(displayed.breakdown.tactics)
+        aiAnalysis.confidence_score = clampPercent(displayed.confidence.score)
         aiAnalysis.breakdown = {
-          technique: clampPercent(v61.breakdown.technique),
-          outcome: clampPercent(v61.breakdown.outcome),
-          tactics: clampPercent(v61.breakdown.tactics),
+          technique: clampPercent(displayed.breakdown.technique),
+          outcome: clampPercent(displayed.breakdown.outcome),
+          tactics: clampPercent(displayed.breakdown.tactics),
         }
         aiAnalysis.confidence = {
-          score: clampPercent(v61.confidence.score),
-          pose_confidence: clampPercent(v61.confidence.pose_confidence),
-          tracking_stability: clampPercent(v61.confidence.tracking_stability),
-          visibility_quality: clampPercent(v61.confidence.visibility_quality),
-          band: v61.confidence.band,
-          uncertainty_plus_minus: v61.confidence.uncertainty_plus_minus,
+          score: clampPercent(displayed.confidence.score),
+          pose_confidence: clampPercent(displayed.confidence.pose_confidence),
+          tracking_stability: clampPercent(displayed.confidence.tracking_stability),
+          visibility_quality: clampPercent(displayed.confidence.visibility_quality),
+          band: displayed.confidence.band,
+          uncertainty_plus_minus: displayed.confidence.uncertainty_plus_minus,
         }
         aiAnalysis.calibration_trace = {
-          pillar_blend: v61.rawOverall,
-          overall_displayed: v61.overall,
+          pillar_blend: displayed.pillarBlendPreBoost,
+          score_display_boost: displayed.scoreDisplayBoost,
+          overall_displayed: s,
           weighted_formula:
-            'overall = round((technique + outcome + tactics) / 3)',
+            'overall = round((technique + outcome + tactics) / 3) + score_display_boost per pillar',
           legacy_penalty_adjusted_audit: penaltyAdjustedOverallLegacy(
             aiAnalysis,
-            averagePillarOverall(v61.breakdown)
+            displayed.pillarBlendPreBoost
           ),
           model_score_raw: Math.round(modelRawScore),
           pro_library_neighbor_skill: topProSkill ?? null,
@@ -1840,10 +1862,12 @@ router.post('/correction-images', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { analysisId, frameIndices } = req.body as {
+    const { analysisId, frameIndices, forceRegenerate } = req.body as {
       analysisId?: string
       frameIndices?: number[]
+      forceRegenerate?: boolean
     }
+    const skipCache = forceRegenerate === true
     const requestedFrameIndices = Array.isArray(frameIndices)
       ? Array.from(
           new Set(frameIndices.filter((f) => Number.isFinite(f)))
@@ -1869,7 +1893,11 @@ router.post('/correction-images', async (req, res) => {
 
     const existingCorrections = (analysis.metrics as any)?.[correctionImagesKey]
     let cachedCorrections: CorrectionResult[] = []
-    if (Array.isArray(existingCorrections) && existingCorrections.length > 0) {
+    if (
+      !skipCache &&
+      Array.isArray(existingCorrections) &&
+      existingCorrections.length > 0
+    ) {
       const badCache = looksLikeBadCachedCorrections(existingCorrections)
       if (!badCache) {
         cachedCorrections = existingCorrections
@@ -1909,6 +1937,10 @@ router.post('/correction-images', async (req, res) => {
       console.warn('[Technique] Ignoring suspicious cached correction images; regenerating', {
         analysisId,
         count: existingCorrections.length,
+      })
+    } else if (skipCache) {
+      console.log('[Technique] forceRegenerate=true — skipping cached correction images', {
+        analysisId,
       })
     }
 
@@ -2094,6 +2126,8 @@ router.post('/correction-images', async (req, res) => {
     const topNeighbor = retrievalBlock?.neighbors?.[0]
     let proPoseSequence: Awaited<ReturnType<typeof getTrainSamplePoseSequence>> =
       null
+    let proTrainVideoPath: string | null = null
+    let proTrainTotalFrames: number | null = null
     if (topNeighbor?.train_sample_id) {
       proPoseSequence = await getTrainSamplePoseSequence(
         topNeighbor.train_sample_id
@@ -2103,6 +2137,25 @@ router.post('/correction-images', async (req, res) => {
           trainSampleId: topNeighbor.train_sample_id,
           frames: proPoseSequence.length,
         })
+      }
+      const proSampleRow = await db.query.trainSample.findFirst({
+        where: (ts, { eq: _eq }) => _eq(ts.id, topNeighbor.train_sample_id),
+        columns: { trainVideoId: true, totalFrames: true },
+      })
+      if (
+        typeof proSampleRow?.totalFrames === 'number' &&
+        proSampleRow.totalFrames > 0
+      ) {
+        proTrainTotalFrames = proSampleRow.totalFrames
+      }
+      if (proSampleRow?.trainVideoId) {
+        const proVideoRow = await db.query.trainVideo.findFirst({
+          where: (tv, { eq: _eq }) => _eq(tv.id, proSampleRow.trainVideoId),
+          columns: { cloudinaryPublicId: true },
+        })
+        if (proVideoRow?.cloudinaryPublicId) {
+          proTrainVideoPath = resolveVideoPath(proVideoRow.cloudinaryPublicId)
+        }
       }
     }
 
@@ -2141,6 +2194,8 @@ router.post('/correction-images', async (req, res) => {
             )
 
             let proReferenceText: string | undefined
+            let proReferenceImageBase64: string | undefined
+            let proLandmarksForFrame: FrameLandmarks | undefined
             if (proPoseSequence?.length && topNeighbor) {
               const proFrame = pickAlignedProPoseFrame(
                 frameData.frame,
@@ -2148,13 +2203,85 @@ router.post('/correction-images', async (req, res) => {
                 proPoseSequence
               )
               if (proFrame?.landmarks && typeof proFrame.landmarks === 'object') {
+                proLandmarksForFrame = proFrame.landmarks as FrameLandmarks
+                if (proTrainVideoPath) {
+                  const proVideoExists = fs.existsSync(proTrainVideoPath)
+                  const proVideoStat = proVideoExists
+                    ? fs.statSync(proTrainVideoPath)
+                    : null
+                  try {
+                    if (!proVideoExists) {
+                      throw new Error(
+                        `pro train video missing on disk: ${proTrainVideoPath}`
+                      )
+                    }
+                    const proVideoFrames =
+                      proTrainTotalFrames ??
+                      (await probeVideoFrameCount(proTrainVideoPath))
+                    const candidates = proReferenceFrameCandidates(
+                      frameData.frame,
+                      videoTotalFrames,
+                      proPoseSequence
+                    )
+                    const timelineRatio = proTimelineRatioForUserFrame(
+                      frameData.frame,
+                      videoTotalFrames
+                    )
+                    const proExtract = await extractProReferenceFrame(
+                      proTrainVideoPath,
+                      {
+                        frameCandidates:
+                          candidates.length > 0
+                            ? candidates
+                            : [proFrame.frame_idx],
+                        maxFrame: proVideoFrames,
+                        timelineRatio,
+                      }
+                    )
+                    proReferenceImageBase64 = proExtract.buffer.toString('base64')
+                    console.log('[Technique] Pro-library ref frame for Comfy image2', {
+                      frame: frameData.frame,
+                      proFrameIdx: proFrame.frame_idx,
+                      candidates,
+                      proVideoFrames,
+                      proTrainTotalFrames,
+                      timelineRatio,
+                      method: proExtract.method,
+                      detail: proExtract.detail,
+                      bytes: proExtract.buffer.length,
+                      proTrainVideoPath,
+                    })
+                  } catch (proImgErr) {
+                    console.error(
+                      '[Technique] Pro ref frame extract failed — Comfy image2 falls back to player frame (no pro CN/image2)',
+                      {
+                        trainSampleId: topNeighbor.train_sample_id,
+                        proTrainVideoPath,
+                        proVideoExists,
+                        proVideoBytes: proVideoStat?.size ?? null,
+                        frame: frameData.frame,
+                        err:
+                          proImgErr instanceof Error
+                            ? proImgErr.message
+                            : proImgErr,
+                      }
+                    )
+                  }
+                }
                 proReferenceText = buildProNeighborCorrectionContext({
                   strokeName: topNeighbor.stroke_name,
                   strokePreset: topNeighbor.stroke_preset,
                   skillLevel: topNeighbor.skill_level,
                   distance: topNeighbor.distance,
                   userLandmarks: frameData.landmarks,
-                  proLandmarks: proFrame.landmarks as FrameLandmarks,
+                  proLandmarks: proLandmarksForFrame,
+                })
+                console.log('[Technique] Pro-library pose target for frame', {
+                  frame: frameData.frame,
+                  trainSampleId: topNeighbor.train_sample_id,
+                  proFrameIdx: proFrame.frame_idx,
+                  stroke: topNeighbor.stroke_name,
+                  distance: topNeighbor.distance,
                 })
               }
             }
@@ -2195,6 +2322,43 @@ router.post('/correction-images', async (req, res) => {
               }
             }
 
+            if (proLandmarksForFrame) {
+              const proDeltas = proGapToLandmarkDeltas(
+                frameData.landmarks,
+                proLandmarksForFrame
+              )
+              if (proDeltas.length > 0) {
+                frameDeltas = mergeLandmarkDeltas(proDeltas, frameDeltas)
+                console.log('[Technique] Merged pro-library landmark deltas into Comfy prompt', {
+                  frame: frameData.frame,
+                  proDeltaCount: proDeltas.length,
+                  mergedCount: frameDeltas.length,
+                  joints: proDeltas.map((d) => d.landmark),
+                })
+              } else {
+                console.warn(
+                  '[Technique] Pro landmarks aligned but no pro-gap deltas (user≈pro at joints) — Comfy uses coach deltas + pro image only',
+                  { frame: frameData.frame }
+                )
+              }
+            } else if (topNeighbor && !proLandmarksForFrame) {
+              console.warn(
+                '[Technique] Pro neighbor matched but poseSequence/frame missing — no numeric pro targets for Comfy',
+                {
+                  frame: frameData.frame,
+                  trainSampleId: topNeighbor.train_sample_id,
+                  distance: topNeighbor.distance,
+                }
+              )
+            }
+
+            if (frameDeltas.length === 0) {
+              console.warn(
+                '[Technique] Empty landmark deltas for correction frame — check Unsloth delta translation',
+                { frame: frameData.frame }
+              )
+            }
+
             const correctedImage =
               imageProvider === 'fal'
                 ? await generateCorrectedImageFal(
@@ -2218,7 +2382,10 @@ router.post('/correction-images', async (req, res) => {
                       `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
                       enAnalysis.recommendations ?? [],
                       shotAndHandednessForImages,
-                      proReferenceText
+                      proReferenceText,
+                      proReferenceImageBase64 ?? null,
+                      'image/png',
+                      proLandmarksForFrame ?? null
                     )
                   : await generateCorrectedImage(
                       frameBase64,

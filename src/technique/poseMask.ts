@@ -16,6 +16,26 @@ import type { FrameLandmarks } from "./correctionPrompt";
  * black = "preserve from source"). Downstream the Comfy graph extracts this as
  * a MASK and feeds `SetLatentNoiseMask`.
  */
+/**
+ * Match Comfy `ImageScaleToTotalPixels`: preserve aspect, total pixels ≈ megapixels × 1e6.
+ * Use the same megapixels as workflow node 90 so the inpaint mask aligns with the VAE latent.
+ */
+export function dimensionsForMegapixels(
+  width: number,
+  height: number,
+  megapixels: number
+): { width: number; height: number } {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+  const mp = Math.max(0.01, megapixels);
+  const targetPixels = Math.max(64 * 64, mp * 1_000_000);
+  const scale = Math.sqrt(targetPixels / (w * h));
+  return {
+    width: Math.max(64, Math.round(w * scale)),
+    height: Math.max(64, Math.round(h * scale)),
+  };
+}
+
 export interface BuildPoseMaskOptions {
   /** Target mask PNG dimensions. Should match the upscaled player frame's pixel size. */
   width: number;
@@ -98,6 +118,28 @@ function dilateHull(hull: Pt[], pixels: number): Pt[] {
   });
 }
 
+/**
+ * Inpaint mask for coaching corrections: hull over user + pro landmarks so the
+ * editable region includes where pro limbs extend beyond the user's silhouette.
+ */
+export async function buildCoachingInpaintMaskPng(
+  userLandmarks: FrameLandmarks,
+  proLandmarks: FrameLandmarks | null | undefined,
+  options: BuildPoseMaskOptions
+): Promise<Buffer> {
+  const width = Math.max(64, Math.round(options.width));
+  const height = Math.max(64, Math.round(options.height));
+  const dilatePct = options.dilatePct ?? 0.2;
+  const blurSigma = options.blurSigma ?? 6;
+
+  const points = landmarksToPoints(userLandmarks, width, height);
+  if (proLandmarks && typeof proLandmarks === "object") {
+    points.push(...landmarksToPoints(proLandmarks, width, height));
+  }
+
+  return rasterizeHullMask(points, width, height, dilatePct, blurSigma);
+}
+
 export async function buildPoseMaskPng(
   landmarks: FrameLandmarks,
   options: BuildPoseMaskOptions
@@ -108,9 +150,18 @@ export async function buildPoseMaskPng(
   const blurSigma = options.blurSigma ?? 6;
 
   const points = landmarksToPoints(landmarks, width, height);
+  return rasterizeHullMask(points, width, height, dilatePct, blurSigma);
+}
+
+async function rasterizeHullMask(
+  points: Pt[],
+  width: number,
+  height: number,
+  dilatePct: number,
+  blurSigma: number
+): Promise<Buffer> {
   let hull = convexHull(points);
 
-  // Fallback: if we have <3 landmarks, mask the full frame (== no mask effect, but won't crash).
   if (hull.length < 3) {
     hull = [
       { x: 0, y: 0 },

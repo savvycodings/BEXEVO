@@ -215,6 +215,60 @@ export function averagePillarOverall(breakdown: V61Breakdown): number {
 /** @deprecated Use `averagePillarOverall` — equal pillar weights only. */
 export const weightedPillarOverall = averagePillarOverall
 
+const SCORE_DISPLAY_BOOST_DEFAULT = 12
+const SCORE_DISPLAY_BOOST_MAX = 25
+
+/** Tunable uplift on displayed pillar scores after LLM output (`XEVO_SCORE_DISPLAY_BOOST`, default 12). */
+export function parseScoreDisplayBoost(): number {
+  const raw = String(process.env.XEVO_SCORE_DISPLAY_BOOST ?? "").trim()
+  if (!raw) return SCORE_DISPLAY_BOOST_DEFAULT
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return SCORE_DISPLAY_BOOST_DEFAULT
+  return Math.max(0, Math.min(SCORE_DISPLAY_BOOST_MAX, Math.round(n)))
+}
+
+export function applyScoreDisplayBoost(
+  breakdown: V61Breakdown,
+  boost: number
+): V61Breakdown {
+  const b = Math.round(boost)
+  if (b <= 0) return breakdown
+  return {
+    technique: clampScore(breakdown.technique + b),
+    outcome: clampScore(breakdown.outcome + b),
+    tactics: clampScore(breakdown.tactics + b),
+  }
+}
+
+export type V61DisplayedScores = V61CalibratedScores & {
+  pillarBlendPreBoost: number
+  scoreDisplayBoost: number
+}
+
+/**
+ * Applies display boost to pillars; `rawOverall` / `pillarBlendPreBoost` stay pre-boost for audit.
+ */
+export function finalizeDisplayedScores(
+  v61: V61CalibratedScores,
+  boost?: number
+): V61DisplayedScores {
+  const scoreDisplayBoost = boost ?? parseScoreDisplayBoost()
+  const pillarBlendPreBoost = v61.rawOverall
+  const breakdown =
+    scoreDisplayBoost > 0
+      ? applyScoreDisplayBoost(v61.breakdown, scoreDisplayBoost)
+      : v61.breakdown
+  const overall = averagePillarOverall(breakdown)
+  return {
+    ...v61,
+    overall,
+    breakdown,
+    rawOverall: pillarBlendPreBoost,
+    pillarBlendPreBoost,
+    scoreDisplayBoost,
+  }
+}
+
 /**
  * V6.1 score structure: overall = average of technique, outcome, tactics (shown in app).
  * Legacy text penalties are not subtracted from overall (see `calibration_trace` audit fields).

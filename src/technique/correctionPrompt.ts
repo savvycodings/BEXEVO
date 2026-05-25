@@ -445,16 +445,133 @@ Rules:
   }
 }
 
-export function deltasToInstructions(deltas: LandmarkDelta[]): string {
-  if (deltas.length === 0) return "Apply the coach's recommendations to correct the player's body positioning.";
+const MAGNITUDE_NORM_STEP: Record<LandmarkDelta["magnitude"], number> = {
+  small: 0.025,
+  moderate: 0.05,
+  large: 0.09,
+};
+
+function formatCoord(x: number, y: number): string {
+  return `(${x.toFixed(3)}, ${y.toFixed(3)})`;
+}
+
+function formatShiftHint(dx: number, dy: number): string {
+  const parts: string[] = [];
+  if (Math.abs(dx) >= 0.004) {
+    parts.push(
+      `${dx > 0 ? "right" : "left"} ${(Math.abs(dx) * 100).toFixed(1)}% of frame width`
+    );
+  }
+  if (Math.abs(dy) >= 0.004) {
+    parts.push(
+      `${dy > 0 ? "down" : "up"} ${(Math.abs(dy) * 100).toFixed(1)}% of frame height`
+    );
+  }
+  return parts.length > 0 ? parts.join(", ") : "minimal pixel shift";
+}
+
+/** Coach-only delta: approximate target in normalized 0–1 frame coords when no pro landmark. */
+function inferredTargetFromDelta(
+  u: Landmark,
+  d: LandmarkDelta
+): { x: number; y: number } {
+  const step = MAGNITUDE_NORM_STEP[d.magnitude];
+  let x = u.x;
+  let y = u.y;
+  if (d.axis === "x") {
+    x += d.direction === "increase" ? step : -step;
+  } else {
+    y += d.direction === "increase" ? step : -step;
+  }
+  return { x, y };
+}
+
+function formatJointMoveLine(
+  d: LandmarkDelta,
+  userLandmarks?: FrameLandmarks | null,
+  proLandmarks?: FrameLandmarks | null
+): string {
+  const u = userLandmarks?.[d.landmark];
+  const p = proLandmarks?.[d.landmark];
+  const hasUser =
+    u && typeof u.x === "number" && typeof u.y === "number";
+  const hasPro =
+    p && typeof p.x === "number" && typeof p.y === "number";
+
+  if (hasUser && hasPro) {
+    const dx = p.x - u.x;
+    const dy = p.y - u.y;
+    return (
+      `- ${d.landmark}: current ${formatCoord(u.x, u.y)} → target ${formatCoord(p.x, p.y)} ` +
+      `(shift ${formatShiftHint(dx, dy)}; ${d.magnitude}) — ${d.reason}`
+    );
+  }
+
+  if (hasUser) {
+    const t = inferredTargetFromDelta(u, d);
+    const dx = t.x - u.x;
+    const dy = t.y - u.y;
+    return (
+      `- ${d.landmark}: current ${formatCoord(u.x, u.y)} → target ${formatCoord(t.x, t.y)} ` +
+      `(shift ${formatShiftHint(dx, dy)}; ${d.magnitude}) — ${d.reason}`
+    );
+  }
+
+  const dirWord = d.direction === "increase" ? "move right/lower" : "move left/higher";
+  const axisWord = d.axis === "x" ? "horizontally" : "vertically";
+  return `- ${d.landmark}: ${dirWord} ${axisWord} (${d.magnitude}) — ${d.reason}`;
+}
+
+export function deltasToInstructions(
+  deltas: LandmarkDelta[],
+  userLandmarks?: FrameLandmarks | null,
+  proLandmarks?: FrameLandmarks | null
+): string {
+  if (deltas.length === 0) {
+    return "Apply the coach's recommendations to correct the player's body positioning.";
+  }
 
   return deltas
-    .map((d) => {
-      const dirWord = d.direction === "increase" ? "move right/lower" : "move left/higher";
-      const axisWord = d.axis === "x" ? "horizontally" : "vertically";
-      return `- ${d.landmark}: ${dirWord} ${axisWord} (${d.magnitude}) — ${d.reason}`;
-    })
+    .map((d) => formatJointMoveLine(d, userLandmarks, proLandmarks))
     .join("\n");
+}
+
+export function formatTopPriorityMove(
+  d: LandmarkDelta,
+  userLandmarks?: FrameLandmarks | null,
+  proLandmarks?: FrameLandmarks | null
+): string {
+  const line = formatJointMoveLine(d, userLandmarks, proLandmarks);
+  return line.replace(/^- /, "");
+}
+
+const PRO_GAP_MIN_SQ = 0.0004;
+
+function proGapMagnitude(absDelta: number): LandmarkDelta["magnitude"] {
+  if (absDelta < 0.03) return "small";
+  if (absDelta < 0.08) return "moderate";
+  return "large";
+}
+
+/** Plain-language hint for image models (normalized coords: larger y = lower in frame). */
+function proGapCoachingLine(
+  name: string,
+  axis: "x" | "y",
+  userVal: number,
+  proVal: number
+): string {
+  const delta = userVal - proVal;
+  if (Math.abs(delta) < 0.008) return "";
+  if (axis === "y") {
+    if (delta > 0) {
+      return `${name}: your joint sits lower in the frame than the pro — raise it toward the pro position.`;
+    }
+    return `${name}: your joint sits higher than the pro — lower it toward the pro position.`;
+  }
+  if (delta > 0) {
+    return `${name}: your joint is farther right than the pro — shift left toward the pro position.`;
+  }
+  return `${name}: your joint is farther left than the pro — shift right toward the pro position.`;
 }
 
 /** Top landmark gaps (user vs pro library frame) in normalized coords — guides img2img toward pro mechanics without changing scene. */
@@ -463,7 +580,7 @@ export function summarizeProUserLandmarkGap(
   pro: FrameLandmarks,
   topK = 10
 ): string {
-  const rows: { dist: number; line: string }[] = [];
+  const rows: { dist: number; line: string; coach: string }[] = [];
   for (const name of MEDIAPIPE_POSE_LANDMARK_NAMES) {
     const u = user[name];
     const p = pro[name];
@@ -480,17 +597,100 @@ export function summarizeProUserLandmarkGap(
     const dx = u.x - p.x;
     const dy = u.y - p.y;
     const dist = dx * dx + dy * dy;
+    if (dist < PRO_GAP_MIN_SQ) continue;
+    const axis: "x" | "y" = Math.abs(dx) >= Math.abs(dy) ? "x" : "y";
+    const coach =
+      proGapCoachingLine(
+        name,
+        axis,
+        axis === "x" ? u.x : u.y,
+        axis === "x" ? p.x : p.y
+      ) || `${name}: align toward pro.`;
     rows.push({
       dist,
       line: `${name}: user(${u.x.toFixed(3)},${u.y.toFixed(3)}) vs pro(${p.x.toFixed(3)},${p.y.toFixed(3)}) — nudge toward pro Δx=${(-dx).toFixed(3)} Δy=${(-dy).toFixed(3)}`,
+      coach,
     });
   }
   rows.sort((a, b) => b.dist - a.dist);
   if (rows.length === 0) return "(no overlapping landmarks vs pro reference)";
-  return rows
-    .slice(0, topK)
-    .map((r) => r.line)
-    .join("\n");
+  const top = rows.slice(0, topK);
+  const gapLines = top.map((r) => r.line).join("\n");
+  const coachLines = top.map((r) => `- ${r.coach}`).join("\n");
+  return `${gapLines}\n\nCoach-readable gaps (what to fix in the photo):\n${coachLines}`;
+}
+
+/**
+ * Deterministic joint adjustments: move user landmarks toward the retrieved pro pose.
+ * Merged into Comfy/Gemini prompts (with Unsloth coach deltas) so diffusion has explicit targets.
+ */
+export function proGapToLandmarkDeltas(
+  user: FrameLandmarks,
+  pro: FrameLandmarks,
+  topK = 12
+): LandmarkDelta[] {
+  const rows: {
+    dist: number;
+    name: string;
+    axis: "x" | "y";
+    direction: "increase" | "decrease";
+    magnitude: LandmarkDelta["magnitude"];
+  }[] = [];
+
+  for (const name of MEDIAPIPE_POSE_LANDMARK_NAMES) {
+    const u = user[name];
+    const p = pro[name];
+    if (
+      !u ||
+      !p ||
+      typeof u.x !== "number" ||
+      typeof u.y !== "number" ||
+      typeof p.x !== "number" ||
+      typeof p.y !== "number"
+    ) {
+      continue;
+    }
+    const dx = u.x - p.x;
+    const dy = u.y - p.y;
+    const dist = dx * dx + dy * dy;
+    if (dist < PRO_GAP_MIN_SQ) continue;
+
+    const axis: "x" | "y" = Math.abs(dx) >= Math.abs(dy) ? "x" : "y";
+    const delta = axis === "x" ? dx : dy;
+    const direction: "increase" | "decrease" = delta > 0 ? "decrease" : "increase";
+    rows.push({
+      dist,
+      name,
+      axis,
+      direction,
+      magnitude: proGapMagnitude(Math.abs(delta)),
+    });
+  }
+
+  rows.sort((a, b) => b.dist - a.dist);
+  return rows.slice(0, topK).map((r) => {
+    const u = user[r.name]!;
+    const p = pro[r.name]!;
+    return {
+      landmark: r.name,
+      axis: r.axis,
+      direction: r.direction,
+      magnitude: r.magnitude,
+      reason: `pro library: ${r.name} ${formatCoord(u.x, u.y)} → ${formatCoord(p.x, p.y)}`,
+    };
+  });
+}
+
+/** Pro-library deltas win on the same landmark+axis; coach deltas fill the rest. */
+export function mergeLandmarkDeltas(
+  proDeltas: LandmarkDelta[],
+  coachDeltas: LandmarkDelta[]
+): LandmarkDelta[] {
+  const key = (d: LandmarkDelta) => `${d.landmark}:${d.axis}`;
+  const map = new Map<string, LandmarkDelta>();
+  for (const d of coachDeltas) map.set(key(d), d);
+  for (const d of proDeltas) map.set(key(d), d);
+  return [...map.values()];
 }
 
 export interface ProNeighborCorrectionContextParams {
@@ -502,13 +702,18 @@ export interface ProNeighborCorrectionContextParams {
   proLandmarks: FrameLandmarks;
 }
 
-/** Text block for Gemini/Fal: nearest-pro retrieval + concrete landmark deltas for this frame. */
+/** Text block for Comfy/Gemini: nearest-pro retrieval + target pose + concrete gaps for this frame. */
 export function buildProNeighborCorrectionContext(
   p: ProNeighborCorrectionContextParams
 ): string {
   const gap = summarizeProUserLandmarkGap(p.userLandmarks, p.proLandmarks);
-  return `Nearest pro library clip (embedding distance ${p.distance.toFixed(4)}): "${p.strokeName}" / ${p.strokePreset} / ${p.skillLevel}.
-Per-joint gap vs this pro instant (normalized 0–1; adjust body toward pro, nothing else):
+  return `PRO LIBRARY MATCH (vector neighbor, distance ${p.distance.toFixed(4)}): "${p.strokeName}" / ${p.strokePreset} / skill ${p.skillLevel}.
+This is the constructive visual target — adjust the user's body in the photo toward the pro's pose at the same moment in the swing. Do not change court, camera, clothing, or identity.
+
+TARGET POSE LANDMARKS from pro clip (normalized 0-1, top-left — match these joint positions):
+${JSON.stringify(p.proLandmarks, null, 2)}
+
+USER vs PRO gaps at this frame:
 ${gap}`;
 }
 
@@ -741,6 +946,93 @@ Hard constraints: same framing and scale; keep head pose and gaze; no teleportin
  * impact lock, hair freeze, equipment inventory, etc.) — same content as the
  * Gemini path.
  */
+/** Rough CLIP token estimate (word-based; SDXL CLIP-L ~77 token cap per encoder). */
+export function estimateClipTokens(text: string): number {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return 0;
+  return Math.ceil(words.length * 1.28);
+}
+
+const SDXL_CLIP_TOKEN_BUDGET = 70;
+
+function truncateToClipBudget(text: string, maxTokens: number): string {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "";
+  const parts: string[] = [];
+  let tokens = 0;
+  for (const w of words) {
+    const wTok = Math.max(1, Math.ceil(w.length / 4));
+    if (tokens + wTok > maxTokens) break;
+    parts.push(w);
+    tokens += wTok;
+  }
+  return parts.join(" ");
+}
+
+/**
+ * Compact CLIP prompt for SDXL + IP-Adapter FaceID correction workflow.
+ * Keeps coaching signal within ~70 tokens so CLIPTextEncode does not truncate mid-sentence.
+ */
+export function buildSdxlCorrectionPrompt(
+  frameNumber: number,
+  deltas: LandmarkDelta[],
+  diagnosis: string,
+  recommendations: string[],
+  shotAndHandedness: ShotAndHandedness | null,
+  proReferenceText?: string | null
+): string {
+  const { shot, handedness } = shotAndHandednessForImagePrompt(shotAndHandedness);
+  const topDeltas = deltas.slice(0, 3).map((d) => {
+    const dir = d.direction === "increase" ? (d.axis === "x" ? "right" : "down") : d.axis === "x" ? "left" : "up";
+    return `${d.landmark} ${dir}`;
+  });
+  const deltaBit =
+    topDeltas.length > 0 ? topDeltas.join(", ") : "subtle pose fix per coach cues";
+  const recBit = recommendations
+    .slice(0, 2)
+    .map((r) => r.replace(/\s+/g, " ").trim())
+    .join("; ");
+  const diagShort = truncateToClipBudget(diagnosis.replace(/\s+/g, " ").trim(), 18);
+  const proShort =
+    proReferenceText && proReferenceText.trim().length > 0
+      ? truncateToClipBudget(
+          proReferenceText.replace(/\s+/g, " ").trim().slice(0, 200),
+          12
+        )
+      : "";
+
+  const parts = [
+    `raw amateur sports photo frame ${frameNumber}, unchanged lighting background skin tone`,
+    `padel perforated racket not tennis, ${handedness.dominant_hand} ${shot.shot_name}`,
+    diagShort ? `fix: ${diagShort}` : "",
+    recBit ? `cues: ${recBit}` : "",
+    `joints: ${deltaBit}`,
+    proShort ? `toward pro: ${proShort}` : "",
+    "freeze head gaze identity, adjust limbs only",
+  ].filter(Boolean);
+
+  let prompt = parts.join(", ");
+  if (estimateClipTokens(prompt) > SDXL_CLIP_TOKEN_BUDGET) {
+    const before = prompt;
+    prompt = truncateToClipBudget(prompt, SDXL_CLIP_TOKEN_BUDGET);
+    console.warn("[correctionPrompt] SDXL CLIP prompt truncated", {
+      frame: frameNumber,
+      estTokensBefore: estimateClipTokens(before),
+      estTokensAfter: estimateClipTokens(prompt),
+    });
+  }
+  return prompt;
+}
+
+export type CorrectionPromptIntensity = "coaching" | "subtle";
+
+export function resolveCorrectionPromptIntensity(): CorrectionPromptIntensity {
+  const raw = String(process.env.COMFYUI_CORRECTION_INTENSITY ?? "coaching")
+    .trim()
+    .toLowerCase();
+  return raw === "subtle" ? "subtle" : "coaching";
+}
+
 export function buildQwenCorrectionPrompt(
   frameNumber: number,
   landmarks: FrameLandmarks,
@@ -748,24 +1040,34 @@ export function buildQwenCorrectionPrompt(
   diagnosis: string,
   recommendations: string[],
   shotAndHandedness: ShotAndHandedness | null,
-  proReferenceText?: string | null
+  proReferenceText?: string | null,
+  intensity: CorrectionPromptIntensity = resolveCorrectionPromptIntensity(),
+  proLandmarks?: FrameLandmarks | null
 ): string {
-  const instructions = deltasToInstructions(deltas);
+  const instructions = deltasToInstructions(deltas, landmarks, proLandmarks);
   const { shot, handedness } = shotAndHandednessForImagePrompt(shotAndHandedness);
+  const coaching = intensity === "coaching";
+
+  const topMoves = deltas
+    .slice(0, 5)
+    .map((d, i) => `${i + 1}. ${formatTopPriorityMove(d, landmarks, proLandmarks)}`)
+    .join("\n");
+
+  const proVisualLine =
+    proReferenceText && proReferenceText.trim().length > 0
+      ? "Visual target: match pro neighbor body geometry at this swing instant (reference image2 + pose guide).\n"
+      : "";
 
   const proBlock =
     proReferenceText && proReferenceText.trim().length > 0
       ? `
 
-PRO LIBRARY POSE TARGET (nearest matching pro clip — prioritize moving joints toward these pro positions; same instant in the swing as aligned to this frame):
-${proReferenceText.trim()}
+=== PRO LIBRARY VISUAL TARGET (highest priority for body pose) ===
+The corrected photo must show the same athlete, but with limbs clearly shifted toward this pro reference at the same swing instant — the before/after should make the coaching mistake obvious.
+${proVisualLine}${proReferenceText.trim()}
+=== END PRO TARGET ===
 `
       : "";
-
-  // Diffusion models follow POSITIVE descriptions much more reliably than negation.
-  // We lead with a strong scene description so the model anchors the background
-  // (court, glass, net, floor lines, lighting) BEFORE it processes the corrections.
-  // The invariants block is kept short and at the end as reinforcement only.
 
   const sceneBlock = `PHOTOREALISTIC PADEL COURT — preserve scene exactly.
 
@@ -778,9 +1080,20 @@ Single frame from a padel match. Scene description (this is what the image SHOWS
 - Same padel racket (perforated solid face, short grip, wrist strap) — NOT a tennis racquet.
 - If a ball is visible in the source, it stays in the same location with the same motion blur; if no ball is visible, do not add one.`;
 
-  const taskBlock = `TASK — small biomechanical pose correction only.
+  const taskLead = coaching
+    ? `TASK — visible coaching pose correction (teaching before/after).
 
-Adjust ONLY the player's body joints to reflect the coach corrections below. The court, walls, net, floor lines, camera, lighting, clothing, equipment, face, and head pose must come from the source frame unchanged.
+Clearly adjust limb and racket-arm positions so the athlete's mistake is obvious compared to the source frame. Movement should be noticeable in a side-by-side view — not a subtle polish.`
+    : `TASK — small biomechanical pose correction only.
+
+Adjust ONLY the player's body joints with restrained, subtle changes.`;
+
+  const taskBlock = `${taskLead}
+When a PRO LIBRARY VISUAL TARGET section is present, prioritize moving limbs toward those pro joint coordinates (knee height, shoulder angle, elbow path, racket-arm path). Coach and pro targets win on conflicting joint moves.
+The court, walls, net, floor lines, camera, lighting, clothing, equipment, face, and head pose must come from the source frame unchanged.
+
+TOP PRIORITY MOVES (coach + pro-library merged — apply these visibly):
+${topMoves || "(see per-joint list below)"}
 
 COACH DIAGNOSIS:
 ${diagnosis}
@@ -797,12 +1110,11 @@ SHOT CLASSIFICATION (for context — do not change shot type or handedness):
 CURRENT POSE LANDMARKS (normalized 0-1, top-left origin — for spatial reference):
 ${JSON.stringify(landmarks, null, 2)}
 
-SPECIFIC PER-JOINT ADJUSTMENTS:
+SPECIFIC PER-JOINT ADJUSTMENTS (normalized 0–1 frame coords: current → target; coach + pro merged):
 ${instructions}
-${proBlock}`;
 
-  // Short reinforcement block. Long lists of "do not" get diluted by attention;
-  // five high-signal lines at the end are more effective than the previous 15.
+Paint each joint toward its target position in the list above — wrists, elbows, knees, and shoulders should land near the target coordinates while keeping the same athlete and court.`;
+
   const invariantBlock = `REINFORCEMENT (anchor on the source frame):
 - IDENTITY: same player (face, skin, hair, clothing, equipment, dominant hand = ${handedness.dominant_hand}).
 - SCENE: same court (glass walls, blue floor, white net + lines), same camera framing and scale, same lighting.
@@ -810,7 +1122,7 @@ ${proBlock}`;
 - MOMENT: same stroke instant and same ball-racket relationship as the source — preparation, impact, or follow-through stays the same phase.
 - OUTPUT: photorealistic, no overlays, no text, no skeleton lines.`;
 
-  return `${sceneBlock}\n\n${taskBlock}\n\n${invariantBlock}`;
+  return `${sceneBlock}${proBlock}\n\n${taskBlock}\n\n${invariantBlock}`;
 }
 
 const DEFAULT_FAL_CORRECTION_ENDPOINT = "fal-ai/flux-general/image-to-image";

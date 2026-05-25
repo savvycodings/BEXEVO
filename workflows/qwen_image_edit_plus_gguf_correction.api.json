@@ -61,10 +61,19 @@
       "image": "placeholder_pose_mask.png"
     }
   },
+  "98": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {
+      "image": ["92", 0],
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1
+    }
+  },
   "93": {
     "class_type": "ImageToMask",
     "inputs": {
-      "image": ["92", 0],
+      "image": ["98", 0],
       "channel": "red"
     }
   },
@@ -95,6 +104,36 @@
       "image2": ["91", 0]
     }
   },
+  "95": {
+    "class_type": "ControlNetLoader",
+    "inputs": {
+      "control_net_name": "Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors"
+    }
+  },
+  "96": {
+    "class_type": "OpenposePreprocessor",
+    "inputs": {
+      "image": ["91", 0],
+      "detect_hand": "enable",
+      "detect_body": "enable",
+      "detect_face": "disable",
+      "resolution": 512,
+      "scale_stick_for_xinsr_cn": "disable"
+    }
+  },
+  "97": {
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "positive": ["68", 0],
+      "negative": ["69", 0],
+      "control_net": ["95", 0],
+      "image": ["96", 0],
+      "vae": ["10", 0],
+      "strength": 0.78,
+      "start_percent": 0,
+      "end_percent": 1
+    }
+  },
   "67": {
     "class_type": "ModelSamplingAuraFlow",
     "inputs": {
@@ -118,10 +157,10 @@
       "cfg": 3,
       "sampler_name": "euler",
       "scheduler": "simple",
-      "positive": ["68", 0],
-      "negative": ["69", 0],
+      "positive": ["97", 0],
+      "negative": ["97", 1],
       "latent_image": ["94", 0],
-      "denoise": 0.88
+      "denoise": 0.92
     }
   },
   "8": {
