@@ -190,6 +190,20 @@
       "when": 1778692484011,
       "tag": "0026_user_profile_birth_date",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1778800000000,
+      "tag": "0027_fal_lora_stroke_preset_enum_and_regen_feedback",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1778800000001,
+      "tag": "0028_stroke_preset_text_to_enum",
+      "breakpoints": true
     }
   ]
 }

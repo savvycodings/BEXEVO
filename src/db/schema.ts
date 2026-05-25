@@ -44,10 +44,18 @@ export type TechniqueCorrectionContext = {
   generated_at: string;
   frame_count: number;
   frame_indices: number[];
+  image_provider?: string;
   shot_and_handedness?: {
     shot: TechniqueShotClassification;
     handedness: TechniqueHandednessClassification;
   } | null;
+  /** Saved for Activities / notifications — coach text used when generating images. */
+  coaching_summary?: {
+    diagnosis?: string | null;
+    shot_context?: string | null;
+    actionable_corrections?: string[];
+    recommendations?: string[];
+  };
 };
 
 /** pgvector k-NN against train_sample_embedding + train_video labels */
@@ -335,11 +343,25 @@ export const trainCategoryEnum = pgEnum("train_category", [
   "tactical_specials",
 ]);
 
+/** Keep in sync with `app/src/lib/train-taxonomy.ts` TrainStrokePreset */
 export const trainStrokePresetEnum = pgEnum("train_stroke_preset", [
   "forehand_drive",
   "backhand_drive",
   "forehand_lob",
   "backhand_lob",
+  "backhand_volley",
+  "forehand_volley",
+  "backhand_return",
+  "backhand_return_with_lob",
+  "forehand_return_with_lob",
+  "backhand_drive_with_wall",
+  "forehand_chiquita",
+  "half_volley",
+  "back_wall_backhand",
+  "back_wall_forehand",
+  "contrapared_boast",
+  "side_wall_backhand",
+  "side_wall_forehand",
   "bandeja",
 ]);
 
@@ -560,6 +582,38 @@ export const coachReviewAnnotation = pgTable(
       table.reviewId,
       table.timeMs
     ),
+  ]
+);
+
+/** User feedback when regenerating correction images (for product review). */
+export const techniqueCorrectionRegenerationFeedback = pgTable(
+  "technique_correction_regeneration_feedback",
+  {
+    id: text("id").primaryKey(),
+    userId: text("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    techniqueAnalysisId: text("techniqueAnalysisId")
+      .notNull()
+      .references(() => techniqueAnalysis.id, { onDelete: "cascade" }),
+    message: text("message").notNull(),
+    coachingSnapshot: jsonb("coachingSnapshot").$type<{
+      diagnosis?: string | null;
+      shot_context?: string | null;
+      recommendations?: string[];
+      actionable_corrections?: string[];
+      technical_errors?: string[];
+      strengths?: string[];
+      frame_indices?: number[];
+    }>(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("technique_corr_regen_fb_analysis_idx").on(
+      table.techniqueAnalysisId,
+      table.createdAt
+    ),
+    index("technique_corr_regen_fb_user_idx").on(table.userId, table.createdAt),
   ]
 );
 

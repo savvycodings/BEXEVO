@@ -16,6 +16,8 @@ import {
   coachStudent,
   coachReviewAnnotation,
   coachVideoReview,
+  userNotification,
+  techniqueCorrectionRegenerationFeedback,
   type TechniqueDetectionSummary,
 } from '../db'
 import { randomUUID, createHash } from 'crypto'
@@ -65,6 +67,8 @@ import {
 } from './techniqueScoreScale'
 import {
   buildImpactPoseSequenceForMetrics,
+  estimateFps,
+  type ClipMsRange,
   resolveVideoDurationMsForImpact,
   type LabeledPoseFrame,
 } from './impactPoseContext'
@@ -82,6 +86,9 @@ import {
   maxCorrectionImageFrames,
   maxPoseFramesForAnalyzePrompt,
 } from './poseEmbedding'
+import { metricsForClientFetch } from './clientMetrics'
+import { normalizeCorrectionsForClient } from './correctionImageStorage'
+import { poseDataForOverlayFetch } from './poseOverlay'
 import { fal } from '@fal-ai/client'
 
 function resolveFalKey(): string {
@@ -1679,10 +1686,14 @@ router.get('/analysis/:id', async (req, res) => {
           confidence: storedAiConfidenceToPercent(ai),
         }
       : null
+    const clientMetrics = metricsForClientFetch(
+      metricsObj as Record<string, unknown> | null
+    )
     return res.json({
       id: analysis.id,
+      techniqueVideoId: analysis.techniqueVideoId,
       status: analysis.status,
-      metrics: analysis.metrics,
+      metrics: clientMetrics,
       detectionSummary,
       aiSummary,
       feedbackText: analysis.feedbackText,
@@ -1711,16 +1722,129 @@ router.get('/analysis/:id', async (req, res) => {
   }
 })
 
+/** Pose + YOLO overlay data for video player (kept separate from slim analysis GET). */
+router.get('/analysis/:id/pose-overlay', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+    const { id } = req.params
+    if (!id) {
+      return res.status(400).json({ error: 'Missing analysis id' })
+    }
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) =>
+        and(_eq(ta.id, id), _eq(ta.userId, userId)),
+    })
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' })
+    }
+    const metricsObj = (analysis.metrics ?? {}) as Record<string, unknown>
+    const pose_data = poseDataForOverlayFetch(metricsObj.pose_data)
+    return res.json({
+      analysisId: id,
+      pose_data,
+      total_frames: metricsObj.total_frames ?? null,
+      analyzed_frames: metricsObj.analyzed_frames ?? null,
+      video_duration_ms: metricsObj.video_duration_ms ?? null,
+      detection_summary: metricsObj.detection_summary ?? null,
+      pose_data_total_samples: Array.isArray(metricsObj.pose_data)
+        ? metricsObj.pose_data.length
+        : 0,
+    })
+  } catch (e: any) {
+    console.error('[Technique] Pose-overlay fetch error:', e)
+    return res.status(500).json({ error: 'Failed to fetch pose overlay' })
+  }
+})
+
+/** Correction image pairs (URLs, not base64) — fetch separately to avoid OOM on mobile. */
+router.get('/analysis/:id/correction-images', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+    const { id } = req.params
+    if (!id) {
+      return res.status(400).json({ error: 'Missing analysis id' })
+    }
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) =>
+        and(_eq(ta.id, id), _eq(ta.userId, userId)),
+    })
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' })
+    }
+    const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
+    const toClient = (raw: unknown): CorrectionResult[] => {
+      if (!Array.isArray(raw) || raw.length === 0) return []
+      return normalizeCorrectionsForClient(id, raw as CorrectionResult[])
+    }
+    return res.json({
+      analysisId: id,
+      correction_images: toClient(metrics.correction_images),
+      correction_images_fal: toClient(metrics.correction_images_fal),
+      correction_images_comfy: toClient(metrics.correction_images_comfy),
+      correction_context: metrics.correction_context ?? null,
+      correction_context_fal: metrics.correction_context_fal ?? null,
+      correction_context_comfy: metrics.correction_context_comfy ?? null,
+    })
+  } catch (e: any) {
+    console.error('[Technique] Correction-images fetch error:', e)
+    return res.status(500).json({ error: 'Failed to fetch correction images' })
+  }
+})
+
 /** Gemini image generation is heavy; parallel calls often fail with "fetch failed" / 429 — run sequentially. */
 const MAX_CONCURRENT_FRAMES = 1
 type PoseFrameRow = { frame: number; landmarks: FrameLandmarks }
 
+function frameIndexToMs(frame: number, fps: number): number {
+  return (frame / fps) * 1000
+}
+
+/** Restrict pose samples to times inside user-marked clip ranges (Step 2). */
+function poseDataWithinUserClips(
+  poseData: PoseFrameRow[],
+  clips: ClipMsRange[],
+  videoDurationMs: number,
+  totalFrames: number
+): PoseFrameRow[] {
+  if (!clips.length || videoDurationMs <= 0) return poseData
+  const fps = estimateFps(totalFrames, videoDurationMs)
+  const filtered = poseData.filter((p) => {
+    const ms = frameIndexToMs(p.frame, fps)
+    return clips.some((c) => ms >= c.startMs && ms <= c.endMs)
+  })
+  return filtered.length > 0 ? filtered : poseData
+}
+
 /** Evenly sample pose frames across the clip (spread of the motion). */
 function selectPoseFramesForCorrections(
   poseData: PoseFrameRow[],
-  maxFrames: number
+  maxFrames: number,
+  opts?: {
+    userClips?: ClipMsRange[]
+    videoDurationMs?: number
+    totalFrames?: number
+  }
 ): PoseFrameRow[] {
-  const sorted = [...poseData].sort((a, b) => a.frame - b.frame)
+  let pool = poseData
+  if (
+    opts?.userClips?.length &&
+    typeof opts.videoDurationMs === 'number' &&
+    opts.videoDurationMs > 0
+  ) {
+    pool = poseDataWithinUserClips(
+      poseData,
+      opts.userClips,
+      opts.videoDurationMs,
+      opts.totalFrames ?? 0
+    )
+  }
+  const sorted = [...pool].sort((a, b) => a.frame - b.frame)
   const n = sorted.length
   if (n <= maxFrames) return sorted
   if (maxFrames <= 1) return [sorted[Math.min(n - 1, Math.floor(n / 2))]]
@@ -1798,6 +1922,25 @@ function orderCorrectionsByFrames(
     .filter((c): c is CorrectionResult => !!c)
 }
 
+function isGeminiCorrectionConfigured(): boolean {
+  return Boolean(String(process.env.GEMINI_API_KEY ?? '').trim())
+}
+
+/** Default when the client omits imageProvider (production: gemini). */
+function resolveDefaultCorrectionImageProvider(): 'gemini' | 'comfy' {
+  const requested = String(process.env.XEVO_DEFAULT_CORRECTION_IMAGE_PROVIDER ?? 'gemini')
+    .trim()
+    .toLowerCase()
+  const geminiOk = isGeminiCorrectionConfigured()
+  const comfyOk = isComfyCorrectionConfigured()
+
+  if (requested === 'comfy' && comfyOk) return 'comfy'
+  if (requested === 'gemini' && geminiOk) return 'gemini'
+  if (geminiOk) return 'gemini'
+  if (comfyOk) return 'comfy'
+  return 'gemini'
+}
+
 router.post('/correction-images', async (req, res) => {
   try {
     const rawProvider = String(
@@ -1821,25 +1964,26 @@ router.post('/correction-images', async (req, res) => {
       })
     }
 
-    // Production default: Comfy/Qwen when configured, with Gemini as legacy fallback.
-    // Explicit `imageProvider` from the app (gemini/fal/comfy) is always honored
-    // (unless blocked above by the disable-fallback flag).
+    // Default: Gemini when GEMINI_API_KEY is set (XEVO_DEFAULT_CORRECTION_IMAGE_PROVIDER).
+    // Explicit `imageProvider` from the app is honored unless blocked by disable-fallback.
     let imageProvider: 'gemini' | 'fal' | 'comfy'
     if (rawProvider === 'fal') imageProvider = 'fal'
     else if (rawProvider === 'comfy') imageProvider = 'comfy'
     else if (rawProvider === 'gemini') imageProvider = 'gemini'
-    else if (isComfyCorrectionConfigured()) imageProvider = 'comfy'
     else if (disableImageFallback) {
-      console.warn(
-        '[Technique] Comfy not configured and XEVO_DISABLE_IMAGE_FALLBACK=true — refusing to fall back to Gemini'
-      )
-      return res.status(503).json({
-        error:
-          'ComfyUI is not configured and image fallback is disabled ' +
-          '(XEVO_DISABLE_IMAGE_FALLBACK=true). Configure COMFYUI_* env vars or unset the flag.',
-      })
+      if (isComfyCorrectionConfigured()) imageProvider = 'comfy'
+      else {
+        console.warn(
+          '[Technique] Comfy not configured and XEVO_DISABLE_IMAGE_FALLBACK=true — refusing Gemini default'
+        )
+        return res.status(503).json({
+          error:
+            'ComfyUI is not configured and image fallback is disabled ' +
+            '(XEVO_DISABLE_IMAGE_FALLBACK=true). Configure COMFYUI_* env vars or unset the flag.',
+        })
+      }
     } else {
-      imageProvider = 'gemini'
+      imageProvider = resolveDefaultCorrectionImageProvider()
     }
     const correctionImagesKey =
       imageProvider === 'fal'
@@ -1862,11 +2006,13 @@ router.post('/correction-images', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { analysisId, frameIndices, forceRegenerate } = req.body as {
-      analysisId?: string
-      frameIndices?: number[]
-      forceRegenerate?: boolean
-    }
+    const { analysisId, frameIndices, forceRegenerate, regenerationFeedback } =
+      req.body as {
+        analysisId?: string
+        frameIndices?: number[]
+        forceRegenerate?: boolean
+        regenerationFeedback?: { message?: string }
+      }
     const skipCache = forceRegenerate === true
     const requestedFrameIndices = Array.isArray(frameIndices)
       ? Array.from(
@@ -1889,6 +2035,57 @@ router.post('/correction-images', async (req, res) => {
 
     if (analysis.status !== 'completed') {
       return res.status(400).json({ error: 'Analysis is not completed yet' })
+    }
+
+    if (skipCache) {
+      const feedbackMessage =
+        typeof regenerationFeedback?.message === 'string'
+          ? regenerationFeedback.message.trim()
+          : ''
+      if (!feedbackMessage) {
+        return res.status(400).json({
+          error: 'Regeneration feedback message is required',
+        })
+      }
+      const metricsForSnapshot = analysis.metrics as {
+        ai_analysis?: {
+          en?: {
+            diagnosis?: string
+            shot_context?: string
+            recommendations?: string[]
+            actionable_corrections?: string[]
+            technical_errors?: string[]
+            strengths?: string[]
+          }
+        }
+        correction_context?: { frame_indices?: number[] }
+      } | null
+      const enSnap = metricsForSnapshot?.ai_analysis?.en
+      const snapshotFrameIndices =
+        requestedFrameIndices && requestedFrameIndices.length > 0
+          ? requestedFrameIndices
+          : Array.isArray(metricsForSnapshot?.correction_context?.frame_indices)
+            ? metricsForSnapshot!.correction_context!.frame_indices
+            : undefined
+      await db.insert(techniqueCorrectionRegenerationFeedback).values({
+        id: randomUUID(),
+        userId,
+        techniqueAnalysisId: analysisId,
+        message: feedbackMessage,
+        coachingSnapshot: {
+          diagnosis: enSnap?.diagnosis ?? null,
+          shot_context: enSnap?.shot_context ?? null,
+          recommendations: enSnap?.recommendations,
+          actionable_corrections: enSnap?.actionable_corrections,
+          technical_errors: enSnap?.technical_errors,
+          strengths: enSnap?.strengths,
+          frame_indices: snapshotFrameIndices,
+        },
+      })
+      console.log('[Technique] Saved correction regeneration feedback', {
+        analysisId,
+        userId,
+      })
     }
 
     const existingCorrections = (analysis.metrics as any)?.[correctionImagesKey]
@@ -1914,7 +2111,10 @@ router.post('/correction-images', async (req, res) => {
             analysisId,
             count: limited.length,
           })
-          return res.json({ provider: imageProvider, corrections: limited })
+          return res.json({
+            provider: imageProvider,
+            corrections: normalizeCorrectionsForClient(analysisId, limited),
+          })
         }
 
         const cachedRequested = orderCorrectionsByFrames(
@@ -1929,7 +2129,7 @@ router.post('/correction-images', async (req, res) => {
           })
           return res.json({
             provider: imageProvider,
-            corrections: cachedRequested,
+            corrections: normalizeCorrectionsForClient(analysisId, cachedRequested),
           })
         }
       }
@@ -2001,7 +2201,17 @@ router.post('/correction-images', async (req, res) => {
         ? requestedFrameIndices
             .map((fi) => poseData.find((p) => p.frame === fi))
             .filter((p): p is PoseFrameRow => !!p)
-        : selectPoseFramesForCorrections(poseData, maxCorrectionImageFrames())
+        : selectPoseFramesForCorrections(poseData, maxCorrectionImageFrames(), {
+            userClips: Array.isArray(metrics?.user_clips)
+              ? (metrics.user_clips as ClipMsRange[])
+              : undefined,
+            videoDurationMs:
+              typeof metrics?.video_duration_ms === 'number'
+                ? metrics.video_duration_ms
+                : undefined,
+            totalFrames:
+              typeof metrics?.total_frames === 'number' ? metrics.total_frames : 0,
+          })
 
     if (requestedFrames.length === 0) {
       return res.status(400).json({ error: 'No matching frames found' })
@@ -2048,6 +2258,13 @@ router.post('/correction-images', async (req, res) => {
       return res.status(503).json({
         error:
           'ComfyUI is not configured. Set COMFYUI_BASE_URL and COMFYUI_WORKFLOW_PATH (and node id env vars) on the server.',
+      })
+    }
+
+    if (imageProvider === 'gemini' && !isGeminiCorrectionConfigured()) {
+      return res.status(503).json({
+        error:
+          'GEMINI_API_KEY is required for correction images. Add it to server environment.',
       })
     }
 
@@ -2441,16 +2658,22 @@ router.post('/correction-images', async (req, res) => {
       Array.from(mergedByFrame.values()).sort((a, b) => a.frame - b.frame),
       maxCorrectionImageFrames()
     )
+    const mergedCorrectionsOnDisk = normalizeCorrectionsForClient(
+      analysisId,
+      mergedCorrections
+    )
     const responseCorrections =
       requestedFrameIndices && requestedFrameIndices.length > 0
         ? orderCorrectionsByFrames(
-            new Map(mergedCorrections.map((c) => [c.frame, c] as const)),
+            new Map(mergedCorrectionsOnDisk.map((c) => [c.frame, c] as const)),
             requestedFrameIndices
           )
-        : mergedCorrections
+        : mergedCorrectionsOnDisk
 
     try {
-      const frameIndicesForContext = mergedCorrections.map((c) => c.frame)
+      const frameIndicesForContext = mergedCorrectionsOnDisk.map((c) => c.frame)
+      const enForContext = (metrics as { ai_analysis?: { en?: Record<string, unknown> } })
+        ?.ai_analysis?.en
       const correctionContext = {
         version:
           imageProvider === 'fal'
@@ -2460,20 +2683,58 @@ router.post('/correction-images', async (req, res) => {
               : 'shot-handedness-v1',
         image_provider: imageProvider,
         generated_at: new Date().toISOString(),
-        frame_count: mergedCorrections.length,
+        frame_count: mergedCorrectionsOnDisk.length,
         frame_indices: frameIndicesForContext,
         shot_and_handedness: shotAndHandednessForImages,
         shot_and_handedness_classified: shotAndHandedness,
+        coaching_summary: {
+          diagnosis:
+            typeof enForContext?.diagnosis === 'string' ? enForContext.diagnosis : null,
+          shot_context:
+            typeof enForContext?.shot_context === 'string' ? enForContext.shot_context : null,
+          actionable_corrections: Array.isArray(enForContext?.actionable_corrections)
+            ? enForContext.actionable_corrections.filter(
+                (x): x is string => typeof x === 'string' && x.trim().length > 0
+              )
+            : [],
+          recommendations: Array.isArray(enForContext?.recommendations)
+            ? enForContext.recommendations.filter(
+                (x): x is string => typeof x === 'string' && x.trim().length > 0
+              )
+            : [],
+        },
       }
       const updatedMetrics = {
         ...metrics,
-        [correctionImagesKey]: mergedCorrections,
+        [correctionImagesKey]: mergedCorrectionsOnDisk,
         [correctionContextKey]: correctionContext,
       }
       await db
         .update(techniqueAnalysis)
         .set({ metrics: updatedMetrics as any })
         .where(eq(techniqueAnalysis.id, analysisId))
+
+      if (corrections.length > 0 && responseCorrections.length > 0) {
+        const frameN = responseCorrections.length
+        const notiBody =
+          frameN === 1
+            ? 'Your corrected pose image is ready in Activities.'
+            : `Your ${frameN} corrected pose images are ready in Activities.`
+        try {
+          await db.insert(userNotification).values({
+            id: randomUUID(),
+            userId,
+            kind: 'correction_images_ready',
+            title: 'Corrected images ready',
+            body: notiBody,
+            refType: 'technique_analysis',
+            refId: analysisId,
+            createdAt: new Date(),
+          })
+        } catch (notiErr) {
+          console.error('[Technique] Failed to insert correction_images_ready notification', notiErr)
+        }
+      }
     } catch (cacheErr) {
       console.error('[Technique] Failed to cache correction images', cacheErr)
     }
@@ -2540,7 +2801,18 @@ router.post('/correction-test-frames', async (req, res) => {
 
     const requestedFrames = selectPoseFramesForCorrections(
       poseData,
-      maxCorrectionImageFrames()
+      maxCorrectionImageFrames(),
+      {
+        userClips: Array.isArray(metrics?.user_clips)
+          ? (metrics.user_clips as ClipMsRange[])
+          : undefined,
+        videoDurationMs:
+          typeof metrics?.video_duration_ms === 'number'
+            ? metrics.video_duration_ms
+            : undefined,
+        totalFrames:
+          typeof metrics?.total_frames === 'number' ? metrics.total_frames : 0,
+      }
     )
 
     if (requestedFrames.length === 0) {
