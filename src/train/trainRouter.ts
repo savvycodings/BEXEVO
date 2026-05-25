@@ -15,6 +15,11 @@ import { randomUUID } from "crypto";
 import { fromNodeHeaders } from "better-auth/node";
 import { auth } from "../auth";
 import { db, trainSample, trainVideo, trainVideoViewProfile } from "../db";
+import {
+  trainCategoryEnum,
+  trainSkillLevelEnum,
+  trainStrokePresetEnum,
+} from "../db/schema";
 import { eq } from "drizzle-orm";
 import {
   runTrainEmbeddingBackfill,
@@ -69,26 +74,14 @@ type TrainViewProfile = "front" | "side" | "behind";
 // fal.ai LoRA dataset + training routes (admin header required)
 router.use("/fal-lora", falLoraRouter);
 
-const TRAIN_CATEGORIES = [
-  "ground_strokes",
-  "net_play",
-  "defence_glass",
-  "save_return",
-  "overhead",
-  "tactical_specials",
-] as const;
+/** Allowlists must match `train_*` enums in schema.ts and `app/src/lib/train-taxonomy.ts`. */
+const TRAIN_CATEGORIES = trainCategoryEnum.enumValues;
 type TrainCategory = (typeof TRAIN_CATEGORIES)[number];
 
-const TRAIN_STROKE_PRESETS = [
-  "forehand_drive",
-  "backhand_drive",
-  "forehand_lob",
-  "backhand_lob",
-  "bandeja",
-] as const;
+const TRAIN_STROKE_PRESETS = trainStrokePresetEnum.enumValues;
 type TrainStrokePreset = (typeof TRAIN_STROKE_PRESETS)[number];
 
-const TRAIN_SKILL_LEVELS = ["beginner", "intermediate", "advanced"] as const;
+const TRAIN_SKILL_LEVELS = trainSkillLevelEnum.enumValues;
 type TrainSkillLevel = (typeof TRAIN_SKILL_LEVELS)[number];
 
 const CATEGORY_LABEL: Record<TrainCategory, string> = {
@@ -105,6 +98,19 @@ const PRESET_LABEL: Record<TrainStrokePreset, string> = {
   backhand_drive: "Backhand drive",
   forehand_lob: "Forehand lob",
   backhand_lob: "Backhand lob",
+  forehand_chiquita: "Forehand chiquita",
+  backhand_drive_with_wall: "Backhand drive (wall)",
+  forehand_volley: "Forehand volley",
+  backhand_volley: "Backhand volley",
+  half_volley: "Half volley",
+  backhand_return: "Backhand return",
+  backhand_return_with_lob: "Backhand return with lob",
+  forehand_return_with_lob: "Forehand return with lob",
+  back_wall_backhand: "Back wall backhand",
+  back_wall_forehand: "Back wall forehand",
+  side_wall_backhand: "Side wall backhand",
+  side_wall_forehand: "Side wall forehand",
+  contrapared_boast: "Contrapared boast",
   bandeja: "Bandeja",
 };
 
@@ -124,17 +130,17 @@ function parseViewProfile(raw: unknown): TrainViewProfile | null {
 
 function parseCategory(raw: unknown): TrainCategory | null {
   const v = String(raw ?? "").trim();
-  return (TRAIN_CATEGORIES as readonly string[]).includes(v) ? (v as TrainCategory) : null;
+  return TRAIN_CATEGORIES.includes(v as TrainCategory) ? (v as TrainCategory) : null;
 }
 
 function parseStrokePreset(raw: unknown): TrainStrokePreset | null {
   const v = String(raw ?? "").trim();
-  return (TRAIN_STROKE_PRESETS as readonly string[]).includes(v) ? (v as TrainStrokePreset) : null;
+  return TRAIN_STROKE_PRESETS.includes(v as TrainStrokePreset) ? (v as TrainStrokePreset) : null;
 }
 
 function parseSkillLevel(raw: unknown): TrainSkillLevel | null {
   const v = String(raw ?? "").trim();
-  return (TRAIN_SKILL_LEVELS as readonly string[]).includes(v) ? (v as TrainSkillLevel) : null;
+  return TRAIN_SKILL_LEVELS.includes(v as TrainSkillLevel) ? (v as TrainSkillLevel) : null;
 }
 
 /** Single line for strokeName column + Modal movement_label (Modal contract unchanged). */
