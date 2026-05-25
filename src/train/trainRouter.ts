@@ -162,6 +162,35 @@ function parseSkillLevel(raw: unknown): TrainSkillLevel | null {
   return TRAIN_SKILL_LEVELS.includes(v as TrainSkillLevel) ? (v as TrainSkillLevel) : null;
 }
 
+const TRAIN_LEVEL_SUFFIXES = new Set(["Beginner", "Intermediate", "Advanced"]);
+
+/** Exact admin shot label for DB identity (not preset enum alone). */
+function adminStrokeLabelKey(
+  strokeLabel: string | null | undefined,
+  strokeName: string
+): string {
+  const fromCol = (strokeLabel ?? "").trim();
+  if (fromCol) return fromCol;
+  const parts = strokeName.split(" · ");
+  if (parts.length >= 2 && TRAIN_LEVEL_SUFFIXES.has(parts[parts.length - 1] ?? "")) {
+    return parts.slice(0, -1).join(" · ").trim();
+  }
+  return strokeName.trim();
+}
+
+/** Uniquely identifies a trained admin shot (UI label can differ while sharing one preset). */
+function trainComboIdentityKey(row: {
+  category: string;
+  strokePreset: string;
+  skillLevel: string;
+  viewProfile: string;
+  strokeLabel?: string | null;
+  strokeName: string;
+}): string {
+  const label = adminStrokeLabelKey(row.strokeLabel, row.strokeName);
+  return `${row.category}|${row.strokePreset}|${row.skillLevel}|${row.viewProfile}|${label}`;
+}
+
 /** Single line for strokeName column + Modal movement_label (Modal contract unchanged). */
 function buildMovementLabel(
   preset: TrainStrokePreset,
@@ -383,7 +412,14 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
         error: "skillLevel must be one of: beginner, intermediate, advanced",
       });
     }
-    const strokeName = buildMovementLabel(strokePreset, category, skillLevel);
+    const strokeLabelRaw = String(req.body?.strokeLabel ?? "").trim();
+    if (!strokeLabelRaw) {
+      return res.status(400).json({
+        error:
+          "strokeLabel is required (exact admin shot name from the upload UI).",
+      });
+    }
+    const strokeName = `${strokeLabelRaw} · ${LEVEL_LABEL[skillLevel]}`;
     const viewProfile = parseViewProfile(req.body?.viewProfile);
     if (!viewProfile) {
       console.log("[Train] Upload rejected: invalid viewProfile", {
@@ -407,6 +443,7 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       userId: `${userId.slice(0, 8)}…`,
       category,
       strokePreset,
+      strokeLabel: strokeLabelRaw,
       skillLevel,
       strokeName,
       originalname: req.file.originalname,
@@ -432,6 +469,7 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       id,
       userId,
       strokeName,
+      strokeLabel: strokeLabelRaw,
       category,
       strokePreset,
       skillLevel,
@@ -647,6 +685,7 @@ router.get("/admin/pose-landmarks-coverage", async (req, res) => {
         strokePreset: trainVideo.strokePreset,
         skillLevel: trainVideo.skillLevel,
         strokeName: trainVideo.strokeName,
+        strokeLabel: trainVideo.strokeLabel,
         viewProfile: trainVideoViewProfile.viewProfile,
       })
       .from(trainSample)
@@ -664,6 +703,7 @@ router.get("/admin/pose-landmarks-coverage", async (req, res) => {
       skillLevel: string;
       viewProfile: string;
       strokeName: string;
+      strokeLabel: string | null;
       status: string;
       poseFrameCount: number | null;
       poseLandmarksReady: boolean;
@@ -673,6 +713,7 @@ router.get("/admin/pose-landmarks-coverage", async (req, res) => {
     const coverage: RowOut[] = rows.map((r) => {
       const poseLandmarksReady =
         r.status === "completed" && Number(r.frameCount ?? 0) > 0;
+      const strokeLabel = adminStrokeLabelKey(r.strokeLabel, r.strokeName);
       return {
         sampleId: r.sampleId,
         trainVideoId: r.trainVideoId,
@@ -681,6 +722,7 @@ router.get("/admin/pose-landmarks-coverage", async (req, res) => {
         skillLevel: r.skillLevel,
         viewProfile: r.viewProfile,
         strokeName: r.strokeName,
+        strokeLabel,
         status: r.status,
         poseFrameCount: r.frameCount,
         poseLandmarksReady,
@@ -692,19 +734,17 @@ router.get("/admin/pose-landmarks-coverage", async (req, res) => {
     const categoryHasPoseLandmarks: Record<string, boolean> = {};
     for (const c of coverage) {
       if (c.poseLandmarksReady) {
-        comboKeys.add(
-          `${c.category}|${c.strokePreset}|${c.skillLevel}|${c.viewProfile}`
-        );
+        comboKeys.add(trainComboIdentityKey(c));
         categoryHasPoseLandmarks[c.category] = true;
       }
     }
 
-    // Return one row per trained combo (category + stroke + skill + view), latest first.
+    // One row per admin shot identity (label + preset + level + view), latest first.
     const comboLatest = new Map<string, RowOut>();
     const comboSampleCounts = new Map<string, number>();
     for (const row of coverage) {
       if (!row.poseLandmarksReady) continue;
-      const key = `${row.category}|${row.strokePreset}|${row.skillLevel}|${row.viewProfile}`;
+      const key = trainComboIdentityKey(row);
       comboSampleCounts.set(key, (comboSampleCounts.get(key) ?? 0) + 1);
       const prev = comboLatest.get(key);
       if (

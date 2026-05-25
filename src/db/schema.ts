@@ -378,6 +378,8 @@ export const trainVideo = pgTable("train_video", {
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
   strokeName: text("strokeName").notNull(),
+  /** Exact admin UI shot label (e.g. "Back Wall Forehand low"); distinct from preset enum. */
+  strokeLabel: text("strokeLabel"),
   category: trainCategoryEnum("category").notNull(),
   strokePreset: trainStrokePresetEnum("strokePreset").notNull(),
   skillLevel: trainSkillLevelEnum("skillLevel").notNull(),
