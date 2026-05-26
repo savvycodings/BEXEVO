@@ -33,6 +33,8 @@ If Postgres returns `column "areaLocation" does not exist` (or similar) after pu
 
 - **If `pnpm run db:migrate` fails** on `relation "account" already exists`, your database was not created purely from the Drizzle migration journal (common for older sandboxes). Prefer `drizzle-kit push` for local dev, or run the new migration SQL manually (e.g. `drizzle/0020_user_profile_area_location.sql`) in `psql`.
 
+- **Admin Train upload / coverage 500 with `strokeLabel` in the SQL:** apply `drizzle/0029_train_video_stroke_label.sql` via `pnpm db:migrate` on every environment (local, staging, production) that runs the current API build, then restart the server.
+
 ## Environment
 
 Copy and edit `.env` (not committed). Required variables depend on which routes you exercise; see `src/auth.ts`, `src/technique/techniqueRouter.ts`, and `src/index.ts` for reads of `process.env`.

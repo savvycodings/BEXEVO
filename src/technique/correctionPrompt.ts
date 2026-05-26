@@ -707,7 +707,7 @@ export function buildProNeighborCorrectionContext(
   p: ProNeighborCorrectionContextParams
 ): string {
   const gap = summarizeProUserLandmarkGap(p.userLandmarks, p.proLandmarks);
-  return `PRO LIBRARY MATCH (vector neighbor, distance ${p.distance.toFixed(4)}): "${p.strokeName}" / ${p.strokePreset} / skill ${p.skillLevel}.
+  return `PRO LIBRARY MATCH (vector neighbor, distance ${p.distance.toFixed(4)}): shot "${p.strokeName}" (taxonomy preset ${p.strokePreset}, skill ${p.skillLevel}).
 This is the constructive visual target — adjust the user's body in the photo toward the pro's pose at the same moment in the swing. Do not change court, camera, clothing, or identity.
 
 TARGET POSE LANDMARKS from pro clip (normalized 0-1, top-left — match these joint positions):

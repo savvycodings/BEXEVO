@@ -87,6 +87,7 @@ import {
   maxPoseFramesForAnalyzePrompt,
 } from './poseEmbedding'
 import { metricsForClientFetch } from './clientMetrics'
+import { sanitizeUserClips } from './techniqueClipLimits'
 import { normalizeCorrectionsForClient } from './correctionImageStorage'
 import { poseDataForOverlayFetch } from './poseOverlay'
 import { fal } from '@fal-ai/client'
@@ -902,7 +903,9 @@ router.get('/activities', async (req, res) => {
         | undefined
       const hyp = retrieval?.shot_hypothesis as Record<string, unknown> | undefined
       let shotLabel = 'Technique'
-      if (typeof hyp?.stroke_preset === 'string' && hyp.stroke_preset.trim()) {
+      if (typeof hyp?.stroke_label === 'string' && hyp.stroke_label.trim()) {
+        shotLabel = hyp.stroke_label.trim()
+      } else if (typeof hyp?.stroke_preset === 'string' && hyp.stroke_preset.trim()) {
         shotLabel = hyp.stroke_preset
           .replace(/_/g, ' ')
           .replace(/\b\w/g, (ch) => ch.toUpperCase())
@@ -1126,13 +1129,12 @@ router.post('/analyze', async (req, res) => {
     const poseDataEarly = metrics.pose_data as
       | Array<{ frame: number; landmarks: FrameLandmarks }>
       | undefined
-    const clipList =
-      Array.isArray(clips) && clips.length > 0 ? clips : undefined
     const vdur = resolveVideoDurationMsForImpact(
       videoDurationMs,
       metrics.total_frames ?? 0,
       poseDataEarly
     )
+    const clipList = vdur ? sanitizeUserClips(clips, vdur) : undefined
     if (clipList && vdur) {
       const seq = buildImpactPoseSequenceForMetrics(
         metrics.pose_data,
@@ -2338,7 +2340,16 @@ router.post('/correction-images', async (req, res) => {
     })
 
     const retrievalBlock = metrics?.retrieval as
-      | { neighbors?: Array<{ train_sample_id: string; stroke_name: string; stroke_preset: string; skill_level: string; distance: number }> }
+      | {
+          neighbors?: Array<{
+            train_sample_id: string;
+            stroke_name: string;
+            stroke_label?: string;
+            stroke_preset: string;
+            skill_level: string;
+            distance: number;
+          }>;
+        }
       | undefined
     const topNeighbor = retrievalBlock?.neighbors?.[0]
     let proPoseSequence: Awaited<ReturnType<typeof getTrainSamplePoseSequence>> =
@@ -2486,7 +2497,8 @@ router.post('/correction-images', async (req, res) => {
                   }
                 }
                 proReferenceText = buildProNeighborCorrectionContext({
-                  strokeName: topNeighbor.stroke_name,
+                  strokeName:
+                    topNeighbor.stroke_label?.trim() || topNeighbor.stroke_name,
                   strokePreset: topNeighbor.stroke_preset,
                   skillLevel: topNeighbor.skill_level,
                   distance: topNeighbor.distance,

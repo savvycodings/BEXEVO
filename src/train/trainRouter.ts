@@ -26,6 +26,7 @@ import {
   indexTrainSampleEmbeddingIfReady,
 } from "../technique/trainRetrieval";
 import falLoraRouter from "./falLoraRouter";
+import { adminStrokeLabelKey } from "./trainShotDisplay";
 import { fal } from "@fal-ai/client";
 
 function resolveFalKey(): string {
@@ -83,6 +84,28 @@ async function markTrainSampleFailed(
     .update(trainSample)
     .set({ status: "failed", errorMessage })
     .where(eq(trainSample.id, sampleId));
+}
+
+/** Map Drizzle/Postgres failures to actionable admin messages (avoid raw SQL dumps). */
+function trainRouteDbError(e: unknown, fallback: string): string {
+  const err = e as {
+    message?: string;
+    cause?: { message?: string; code?: string };
+  };
+  const parts = [err?.message, err?.cause?.message].filter(Boolean) as string[];
+  const blob = parts.join(" ").toLowerCase();
+  if (
+    blob.includes("strokelabel") &&
+    (blob.includes("does not exist") || blob.includes("42703"))
+  ) {
+    return (
+      "Database is missing train_video.strokeLabel. From server/, run: pnpm db:migrate " +
+      "(migration 0029_train_video_stroke_label), then restart the API."
+    );
+  }
+  const short = parts[0]?.trim();
+  if (short && !short.startsWith("Failed query:")) return short;
+  return fallback;
 }
 
 const router = express.Router();
@@ -160,22 +183,6 @@ function parseStrokePreset(raw: unknown): TrainStrokePreset | null {
 function parseSkillLevel(raw: unknown): TrainSkillLevel | null {
   const v = String(raw ?? "").trim();
   return TRAIN_SKILL_LEVELS.includes(v as TrainSkillLevel) ? (v as TrainSkillLevel) : null;
-}
-
-const TRAIN_LEVEL_SUFFIXES = new Set(["Beginner", "Intermediate", "Advanced"]);
-
-/** Exact admin shot label for DB identity (not preset enum alone). */
-function adminStrokeLabelKey(
-  strokeLabel: string | null | undefined,
-  strokeName: string
-): string {
-  const fromCol = (strokeLabel ?? "").trim();
-  if (fromCol) return fromCol;
-  const parts = strokeName.split(" · ");
-  if (parts.length >= 2 && TRAIN_LEVEL_SUFFIXES.has(parts[parts.length - 1] ?? "")) {
-    return parts.slice(0, -1).join(" · ").trim();
-  }
-  return strokeName.trim();
 }
 
 /** Uniquely identifies a trained admin shot (UI label can differ while sharing one preset). */
@@ -541,12 +548,13 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       message:
         "Stored and pose extraction completed. DELETE /train/video/:id with admin header to remove.",
     });
-  } catch (e: any) {
-    console.error("[Train] Upload error (exception):", e?.message ?? e, e?.stack);
-    if (e.message?.includes("Only MP4 and MOV")) {
-      return res.status(400).json({ error: e.message });
+  } catch (e: unknown) {
+    const msg = trainRouteDbError(e, "Upload failed");
+    console.error("[Train] Upload error (exception):", msg, e);
+    if (msg.includes("Only MP4 and MOV")) {
+      return res.status(400).json({ error: msg });
     }
-    return res.status(500).json({ error: e.message || "Upload failed" });
+    return res.status(500).json({ error: msg });
   }
 });
 
@@ -770,9 +778,10 @@ router.get("/admin/pose-landmarks-coverage", async (req, res) => {
       comboKeys: Array.from(comboKeys),
       categoryHasPoseLandmarks,
     });
-  } catch (e: any) {
-    console.error("[Train] pose-landmarks-coverage error:", e);
-    return res.status(500).json({ error: e?.message || "Failed" });
+  } catch (e: unknown) {
+    const msg = trainRouteDbError(e, "Failed to load training coverage");
+    console.error("[Train] pose-landmarks-coverage error:", msg, e);
+    return res.status(500).json({ error: msg });
   }
 });
 

@@ -244,6 +244,9 @@ function deriveShotLabelFromAnalysis(analysis: typeof techniqueAnalysis.$inferSe
   const ai = metrics.ai_analysis as Record<string, unknown> | undefined;
   const retrieval = metrics.retrieval as Record<string, unknown> | undefined;
   const hyp = retrieval?.shot_hypothesis as Record<string, unknown> | undefined;
+  if (typeof hyp?.stroke_label === "string" && hyp.stroke_label.trim()) {
+    return hyp.stroke_label.trim();
+  }
   if (typeof hyp?.stroke_preset === "string" && hyp.stroke_preset.trim()) {
     return hyp.stroke_preset
       .replace(/_/g, " ")

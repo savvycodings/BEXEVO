@@ -67,6 +67,8 @@ export type TechniqueRetrievalResult = {
     train_sample_id: string;
     train_video_id: string;
     stroke_name: string;
+    /** Admin catalog label for UI (e.g. "Forehand Half Volley"). */
+    stroke_label: string;
     category: string;
     stroke_preset: string;
     skill_level: string;
@@ -75,6 +77,8 @@ export type TechniqueRetrievalResult = {
   }>;
   shot_hypothesis: {
     stroke_preset: string | null;
+    /** Human shot title from pro library neighbors. */
+    stroke_label: string | null;
     category: string | null;
     skill_level: string | null;
     /** 0–1 from neighbor agreement + distance margin */
