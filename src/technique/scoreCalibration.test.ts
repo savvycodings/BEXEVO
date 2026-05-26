@@ -4,8 +4,8 @@ import {
   applyProLibraryTierScoreConstraint,
   applyScoreDisplayBoost,
   calibrateTechniqueScoreV61,
+  computeDynamicScoreDisplayBoost,
   finalizeDisplayedScores,
-  parseScoreDisplayBoost,
 } from './scoreCalibration'
 
 test('applyProLibraryTierScoreConstraint does not floor advanced neighbors at 80', () => {
@@ -56,33 +56,28 @@ test('calibrateTechniqueScoreV61 overall matches average of pillars', () => {
   assert.equal(v.overall, 80)
 })
 
-test('applyScoreDisplayBoost adds boost to each pillar', () => {
-  const boosted = applyScoreDisplayBoost(
-    { technique: 50, outcome: 50, tactics: 50 },
-    12
-  )
+test('applyScoreDisplayBoost with flat mode adds same boost to each pillar', () => {
+  const boosted = applyScoreDisplayBoost({ technique: 50, outcome: 50, tactics: 50 }, 12, false)
   assert.deepEqual(boosted, { technique: 62, outcome: 62, tactics: 62 })
-  assert.equal(finalizeDisplayedScores(
-    calibrateTechniqueScoreV61({
-      score: 50,
-      technique_score: 50,
-      outcome_score: 50,
-      tactics_score: 50,
-      en: {},
-    }),
-    12
-  ).overall, 62)
+})
+
+test('applyScoreDisplayBoost per-pillar differs when pillars differ', () => {
+  const boosted = applyScoreDisplayBoost(
+    { technique: 40, outcome: 60, tactics: 75 },
+    10,
+    true
+  )
+  assert.equal(boosted.technique - 40, 9)
+  assert.equal(boosted.tactics - 75, 10)
+  assert.ok(boosted.technique < boosted.tactics)
 })
 
 test('applyScoreDisplayBoost clamps at 100', () => {
-  const boosted = applyScoreDisplayBoost(
-    { technique: 95, outcome: 95, tactics: 95 },
-    12
-  )
+  const boosted = applyScoreDisplayBoost({ technique: 95, outcome: 95, tactics: 95 }, 12, false)
   assert.deepEqual(boosted, { technique: 100, outcome: 100, tactics: 100 })
 })
 
-test('finalizeDisplayedScores with boost 0 leaves scores unchanged', () => {
+test('finalizeDisplayedScores with boost override 0 leaves scores unchanged', () => {
   const v61 = calibrateTechniqueScoreV61({
     score: 70,
     technique_score: 70,
@@ -90,19 +85,80 @@ test('finalizeDisplayedScores with boost 0 leaves scores unchanged', () => {
     tactics_score: 70,
     en: {},
   })
-  const displayed = finalizeDisplayedScores(v61, 0)
+  const displayed = finalizeDisplayedScores({ en: {} }, v61, 0)
   assert.equal(displayed.overall, 70)
   assert.equal(displayed.pillarBlendPreBoost, 70)
   assert.equal(displayed.scoreDisplayBoost, 0)
 })
 
-test('parseScoreDisplayBoost defaults to 12 when env unset', () => {
-  const prev = process.env.XEVO_SCORE_DISPLAY_BOOST
-  delete process.env.XEVO_SCORE_DISPLAY_BOOST
-  try {
-    assert.equal(parseScoreDisplayBoost(), 12)
-  } finally {
-    if (prev === undefined) delete process.env.XEVO_SCORE_DISPLAY_BOOST
-    else process.env.XEVO_SCORE_DISPLAY_BOOST = prev
+test('computeDynamicScoreDisplayBoost: strong session yields high boost', () => {
+  const v61 = calibrateTechniqueScoreV61({
+    score: 88,
+    technique_score: 88,
+    outcome_score: 90,
+    tactics_score: 86,
+    confidence_score: 92,
+    en: {
+      strengths: ['Good split step', 'Stable base', 'Clean contact'],
+      technical_errors: [],
+    },
+  })
+  const { boost, merit } = computeDynamicScoreDisplayBoost(
+    {
+      en: {
+        strengths: ['Good split step', 'Stable base', 'Clean contact'],
+        technical_errors: [],
+      },
+    },
+    v61
+  )
+  assert.ok(merit >= 0.75)
+  assert.ok(boost >= 9)
+  assert.ok(boost <= 12)
+})
+
+test('computeDynamicScoreDisplayBoost: many errors lowers boost vs clean session at same pillars', () => {
+  const base = {
+    score: 68,
+    technique_score: 68,
+    outcome_score: 66,
+    tactics_score: 70,
+    confidence_score: 80,
   }
+  const v61 = calibrateTechniqueScoreV61(base)
+  const clean = computeDynamicScoreDisplayBoost(
+    { en: { strengths: ['Solid rhythm'], technical_errors: [] } },
+    v61
+  )
+  const noisy = computeDynamicScoreDisplayBoost(
+    {
+      en: {
+        technical_errors: [
+          'Late contact',
+          'Off-balance finish',
+          'Poor split step',
+          'Wristy swing',
+        ],
+        actionable_corrections: ['Reset base', 'Earlier prep'],
+      },
+    },
+    v61
+  )
+  assert.ok(noisy.boost < clean.boost)
+  assert.ok(noisy.boost >= 1 && noisy.boost <= 12)
+  assert.ok(clean.boost >= 1 && clean.boost <= 12)
+})
+
+test('finalizeDisplayedScores dynamic boost changes overall vs raw pillars', () => {
+  const v61 = calibrateTechniqueScoreV61({
+    score: 65,
+    technique_score: 65,
+    outcome_score: 65,
+    tactics_score: 65,
+    en: { strengths: ['Good intent'] },
+  })
+  const displayed = finalizeDisplayedScores({ en: { strengths: ['Good intent'] } }, v61)
+  assert.ok(displayed.scoreDisplayBoost >= 1 && displayed.scoreDisplayBoost <= 12)
+  assert.ok(displayed.overall !== displayed.pillarBlendPreBoost || displayed.scoreDisplayBoost === 0)
+  assert.equal(displayed.scoreDisplayBoostMerit, displayed.scoreDisplayBoostFactors.merit)
 })

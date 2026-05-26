@@ -19,6 +19,7 @@ import {
   storedAiConfidenceToPercent,
   storedAiScoreToPercent,
 } from "../technique/techniqueScoreScale";
+import { deriveHumanShotLabelFromMetrics } from "../train/trainShotDisplay";
 
 const router = express.Router();
 router.use(express.json({ limit: "50mb" }));
@@ -240,24 +241,8 @@ async function resolveUserId(req: express.Request): Promise<string | null> {
 
 function deriveShotLabelFromAnalysis(analysis: typeof techniqueAnalysis.$inferSelect | null): string | null {
   if (!analysis?.metrics || typeof analysis.metrics !== "object") return null;
-  const metrics = analysis.metrics as Record<string, unknown>;
-  const ai = metrics.ai_analysis as Record<string, unknown> | undefined;
-  const retrieval = metrics.retrieval as Record<string, unknown> | undefined;
-  const hyp = retrieval?.shot_hypothesis as Record<string, unknown> | undefined;
-  if (typeof hyp?.stroke_label === "string" && hyp.stroke_label.trim()) {
-    return hyp.stroke_label.trim();
-  }
-  if (typeof hyp?.stroke_preset === "string" && hyp.stroke_preset.trim()) {
-    return hyp.stroke_preset
-      .replace(/_/g, " ")
-      .replace(/\b\w/g, (ch) => ch.toUpperCase());
-  }
-  const en = ai?.en as Record<string, unknown> | undefined;
-  if (typeof en?.shot_context === "string" && en.shot_context.trim()) {
-    const first = en.shot_context.split(/[.!?]/)[0]?.trim() ?? "";
-    return first || null;
-  }
-  return null;
+  const label = deriveHumanShotLabelFromMetrics(analysis.metrics as Record<string, unknown>);
+  return label === "Technique" ? null : label;
 }
 
 router.get("/review/:id", async (req, res) => {

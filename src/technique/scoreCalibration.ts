@@ -215,48 +215,146 @@ export function averagePillarOverall(breakdown: V61Breakdown): number {
 /** @deprecated Use `averagePillarOverall` — equal pillar weights only. */
 export const weightedPillarOverall = averagePillarOverall
 
-const SCORE_DISPLAY_BOOST_DEFAULT = 12
-const SCORE_DISPLAY_BOOST_MAX = 25
+const SCORE_DISPLAY_BOOST_MIN = 1
+const SCORE_DISPLAY_BOOST_MAX = 12
 
-/** Tunable uplift on displayed pillar scores after LLM output (`XEVO_SCORE_DISPLAY_BOOST`, default 12). */
-export function parseScoreDisplayBoost(): number {
-  const raw = String(process.env.XEVO_SCORE_DISPLAY_BOOST ?? "").trim()
-  if (!raw) return SCORE_DISPLAY_BOOST_DEFAULT
-  const n = Number(raw)
-  if (!Number.isFinite(n)) return SCORE_DISPLAY_BOOST_DEFAULT
-  return Math.max(0, Math.min(SCORE_DISPLAY_BOOST_MAX, Math.round(n)))
+export type ScoreDisplayBoostFactors = {
+  rawOverallNorm: number
+  confidenceNorm: number
+  errorLoad: number
+  strengthLoad: number
+  pillarSpreadNorm: number
+  merit: number
 }
 
+export type ScoreDisplayBoostResult = {
+  boost: number
+  merit: number
+  factors: ScoreDisplayBoostFactors
+}
+
+/**
+ * Criteria-driven uplift (1–12) from pillar blend, confidence, and structured feedback.
+ * Replaces static `XEVO_SCORE_DISPLAY_BOOST` env (v6.1.3+).
+ */
+export function computeDynamicScoreDisplayBoost(
+  analysis: AnalysisLike,
+  v61: V61CalibratedScores
+): ScoreDisplayBoostResult {
+  const en = analysis?.en ?? {}
+  const strengths = toStringList(en.strengths ?? en.observations)
+  const technicalErrors = toStringList(en.technical_errors)
+  const actionable = toStringList(en.actionable_corrections ?? en.recommendations)
+  const diagnosis = typeof en.diagnosis === 'string' ? en.diagnosis : ''
+  const severeErrors = countSevereErrors(technicalErrors, diagnosis)
+
+  const errorLoad = Math.min(
+    1,
+    technicalErrors.length * 0.12 + severeErrors * 0.15 + actionable.length * 0.08
+  )
+  const strengthLoad = Math.min(0.35, strengths.length * 0.07)
+
+  const pillars = [v61.breakdown.technique, v61.breakdown.outcome, v61.breakdown.tactics]
+  const pillarSpreadNorm = (Math.max(...pillars) - Math.min(...pillars)) / 100
+
+  const rawOverallNorm = v61.rawOverall / 100
+  const confidenceNorm = v61.confidence.score / 100
+
+  const merit = clamp01(
+    0.4 * rawOverallNorm +
+      0.2 * confidenceNorm +
+      0.25 * (1 - errorLoad) +
+      0.1 * strengthLoad +
+      0.05 * pillarSpreadNorm
+  )
+
+  const boost = Math.max(
+    SCORE_DISPLAY_BOOST_MIN,
+    Math.min(
+      SCORE_DISPLAY_BOOST_MAX,
+      Math.round(SCORE_DISPLAY_BOOST_MIN + merit * (SCORE_DISPLAY_BOOST_MAX - SCORE_DISPLAY_BOOST_MIN))
+    )
+  )
+
+  return {
+    boost,
+    merit,
+    factors: {
+      rawOverallNorm,
+      confidenceNorm,
+      errorLoad,
+      strengthLoad,
+      pillarSpreadNorm,
+      merit,
+    },
+  }
+}
+
+function pillarDisplayBoostAmount(pillarScore: number, baseBoost: number): number {
+  const b = Math.round(baseBoost)
+  if (b <= 0) return 0
+  return Math.round(b * (0.88 + 0.12 * (pillarScore / 100)))
+}
+
+/** Adds per-pillar uplift (scaled by pillar score when `perPillar` is true). */
 export function applyScoreDisplayBoost(
   breakdown: V61Breakdown,
-  boost: number
+  baseBoost: number,
+  perPillar = true
 ): V61Breakdown {
-  const b = Math.round(boost)
+  const b = Math.round(baseBoost)
   if (b <= 0) return breakdown
+  if (!perPillar) {
+    return {
+      technique: clampScore(breakdown.technique + b),
+      outcome: clampScore(breakdown.outcome + b),
+      tactics: clampScore(breakdown.tactics + b),
+    }
+  }
   return {
-    technique: clampScore(breakdown.technique + b),
-    outcome: clampScore(breakdown.outcome + b),
-    tactics: clampScore(breakdown.tactics + b),
+    technique: clampScore(breakdown.technique + pillarDisplayBoostAmount(breakdown.technique, b)),
+    outcome: clampScore(breakdown.outcome + pillarDisplayBoostAmount(breakdown.outcome, b)),
+    tactics: clampScore(breakdown.tactics + pillarDisplayBoostAmount(breakdown.tactics, b)),
   }
 }
 
 export type V61DisplayedScores = V61CalibratedScores & {
   pillarBlendPreBoost: number
   scoreDisplayBoost: number
+  scoreDisplayBoostMerit: number
+  scoreDisplayBoostFactors: ScoreDisplayBoostFactors
 }
 
 /**
  * Applies display boost to pillars; `rawOverall` / `pillarBlendPreBoost` stay pre-boost for audit.
+ * Uses dynamic 1–12 boost from `analysis` unless `boostOverride` is set (tests).
  */
 export function finalizeDisplayedScores(
+  analysis: AnalysisLike,
   v61: V61CalibratedScores,
-  boost?: number
+  boostOverride?: number
 ): V61DisplayedScores {
-  const scoreDisplayBoost = boost ?? parseScoreDisplayBoost()
+  const dynamic =
+    boostOverride !== undefined
+      ? {
+          boost: Math.max(0, Math.round(boostOverride)),
+          merit: 0,
+          factors: {
+            rawOverallNorm: v61.rawOverall / 100,
+            confidenceNorm: v61.confidence.score / 100,
+            errorLoad: 0,
+            strengthLoad: 0,
+            pillarSpreadNorm: 0,
+            merit: 0,
+          },
+        }
+      : computeDynamicScoreDisplayBoost(analysis, v61)
+
+  const scoreDisplayBoost = dynamic.boost
   const pillarBlendPreBoost = v61.rawOverall
   const breakdown =
     scoreDisplayBoost > 0
-      ? applyScoreDisplayBoost(v61.breakdown, scoreDisplayBoost)
+      ? applyScoreDisplayBoost(v61.breakdown, scoreDisplayBoost, boostOverride === undefined)
       : v61.breakdown
   const overall = averagePillarOverall(breakdown)
   return {
@@ -266,6 +364,8 @@ export function finalizeDisplayedScores(
     rawOverall: pillarBlendPreBoost,
     pillarBlendPreBoost,
     scoreDisplayBoost,
+    scoreDisplayBoostMerit: dynamic.merit,
+    scoreDisplayBoostFactors: dynamic.factors,
   }
 }
 

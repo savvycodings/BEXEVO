@@ -56,7 +56,6 @@ import {
   calibrateTechniqueScoreV61,
   averagePillarOverall,
   finalizeDisplayedScores,
-  parseScoreDisplayBoost,
   penaltyAdjustedOverallLegacy,
   applyProLibraryTierScoreConstraint,
 } from './scoreCalibration'
@@ -88,6 +87,7 @@ import {
 } from './poseEmbedding'
 import { metricsForClientFetch } from './clientMetrics'
 import { sanitizeUserClips } from './techniqueClipLimits'
+import { deriveHumanShotLabelFromMetrics } from '../train/trainShotDisplay'
 import { normalizeCorrectionsForClient } from './correctionImageStorage'
 import { poseDataForOverlayFetch } from './poseOverlay'
 import { fal } from '@fal-ai/client'
@@ -901,18 +901,9 @@ router.get('/activities', async (req, res) => {
       const detectionSummary = metrics?.detection_summary as
         | TechniqueDetectionSummary
         | undefined
-      const hyp = retrieval?.shot_hypothesis as Record<string, unknown> | undefined
-      let shotLabel = 'Technique'
-      if (typeof hyp?.stroke_label === 'string' && hyp.stroke_label.trim()) {
-        shotLabel = hyp.stroke_label.trim()
-      } else if (typeof hyp?.stroke_preset === 'string' && hyp.stroke_preset.trim()) {
-        shotLabel = hyp.stroke_preset
-          .replace(/_/g, ' ')
-          .replace(/\b\w/g, (ch) => ch.toUpperCase())
-      } else if (typeof en?.shot_context === 'string' && en.shot_context.trim()) {
-        const first = en.shot_context.split(/[.!?]/)[0]?.trim() ?? ''
-        shotLabel = first.length > 36 ? `${first.slice(0, 34)}…` : first || 'Technique'
-      }
+      const shotLabel = deriveHumanShotLabelFromMetrics(
+        metrics && typeof metrics === 'object' ? metrics : null
+      )
       const review = reviewByVideoId.get(a.techniqueVideoId)
       return {
         analysisId: a.id,
@@ -1495,8 +1486,7 @@ Rules:
           ...aiAnalysis,
           score: modelRawScore,
         })
-        const scoreDisplayBoost = parseScoreDisplayBoost()
-        const displayed = finalizeDisplayedScores(v61, scoreDisplayBoost)
+        const displayed = finalizeDisplayedScores(aiAnalysis, v61)
         const topProSkill =
           metrics?.retrieval?.neighbors?.[0]?.skill_level ??
           metrics?.retrieval?.shot_hypothesis?.skill_level
@@ -1505,7 +1495,7 @@ Rules:
         aiAnalysis.score_calibrated_before_pro_tier = legacyCalibrated
         aiAnalysis.score = s
         aiAnalysis.score_scale = 'percent'
-        aiAnalysis.scoring_version = 'v6.1.2'
+        aiAnalysis.scoring_version = 'v6.1.3'
         aiAnalysis.technique_score = clampPercent(displayed.breakdown.technique)
         aiAnalysis.outcome_score = clampPercent(displayed.breakdown.outcome)
         aiAnalysis.tactics_score = clampPercent(displayed.breakdown.tactics)
@@ -1526,9 +1516,11 @@ Rules:
         aiAnalysis.calibration_trace = {
           pillar_blend: displayed.pillarBlendPreBoost,
           score_display_boost: displayed.scoreDisplayBoost,
+          score_display_boost_merit: displayed.scoreDisplayBoostMerit,
+          score_display_boost_factors: displayed.scoreDisplayBoostFactors,
           overall_displayed: s,
           weighted_formula:
-            'overall = round((technique + outcome + tactics) / 3) + score_display_boost per pillar',
+            'overall = avg(pillars each + round(boost * (0.88 + 0.12 * pillar/100))); boost 1–12 from merit (pillars, confidence, errors, strengths)',
           legacy_penalty_adjusted_audit: penaltyAdjustedOverallLegacy(
             aiAnalysis,
             displayed.pillarBlendPreBoost
