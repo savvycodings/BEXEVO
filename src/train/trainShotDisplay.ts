@@ -88,21 +88,6 @@ function resolutionFromRerankTopNeighbor(
     | undefined;
   if (!rerank?.applied || neighbors.length === 0) return null;
 
-  if (rerank.bandeja_contention || rerank.supports_overhead) {
-    for (const n of neighbors) {
-      const c = neighborAsCandidate(n);
-      if (c && isBandejaNeighbor(c)) {
-        return {
-          shotName: c.stroke_label,
-          category: c.category || "overhead",
-          skillLevel: c.skill_level || null,
-          confidence: hypConf,
-          source: "rerank_neighbor",
-        };
-      }
-    }
-  }
-
   const top = neighbors[0]!;
   const stroke_label = typeof top.stroke_label === "string" ? top.stroke_label.trim() : "";
   if (!stroke_label || looksLikeStrokePresetId(stroke_label)) return null;
@@ -184,14 +169,13 @@ export function resolveCanonicalShotFromMetrics(
     const top = neighbors[0];
     const topLabel =
       typeof top?.stroke_label === "string" ? top.stroke_label.trim() : "";
-    const rerank = retrieval?.rerank as { applied?: boolean } | undefined;
-    if (rerank?.applied && topLabel && !looksLikeStrokePresetId(topLabel)) {
+    if (topLabel && !looksLikeStrokePresetId(topLabel)) {
       return {
         shotName: topLabel,
         category: typeof top?.category === "string" ? top.category : null,
         skillLevel: typeof top?.skill_level === "string" ? top.skill_level : null,
         confidence: hypConf,
-        source: "rerank_neighbor",
+        source: "neighbor",
       };
     }
     const cat =

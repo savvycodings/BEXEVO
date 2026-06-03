@@ -71,21 +71,46 @@ test("deriveHumanShotLabelFromMetrics delegates to resolveCanonicalShotFromMetri
   assert.equal(label, "Drop Shot forehand");
 });
 
-test("resolveCanonicalShotFromMetrics low_confidence_fallback when gap and vote are weak", () => {
+test("resolveCanonicalShotFromMetrics low confidence uses top neighbor label not category pillar", () => {
   const r = resolveCanonicalShotFromMetrics({
     retrieval: {
       shot_hypothesis: {
-        stroke_label: "Backhand Volley 1",
-        confidence: 0.02,
-        category: "net_play",
+        stroke_label: "Forehand drive · Save & return",
+        confidence: 0.04,
+        category: "save_return",
       },
+      neighbor_distance_gap: 0.005,
+      neighbors: [
+        {
+          stroke_label: "Forehand drive · Save & return",
+          distance: 0.106,
+          category: "save_return",
+          stroke_preset: "forehand_drive",
+        },
+        {
+          stroke_label: "Bandeja 1",
+          distance: 0.112,
+          category: "overhead",
+          stroke_preset: "bandeja",
+        },
+      ],
+    },
+  });
+  assert.equal(r.source, "neighbor");
+  assert.equal(r.shotName, "Forehand drive · Save & return");
+});
+
+test("resolveCanonicalShotFromMetrics category fallback only when top label unusable", () => {
+  const r = resolveCanonicalShotFromMetrics({
+    retrieval: {
+      shot_hypothesis: { stroke_label: "half_volley", confidence: 0.02, category: "net_play" },
       neighbor_distance_gap: 0.008,
       neighbors: [
         {
-          stroke_label: "Backhand Volley 1",
+          stroke_label: "half_volley",
           distance: 0.01,
           category: "net_play",
-          stroke_preset: "backhand_volley",
+          stroke_preset: "half_volley",
         },
         {
           stroke_label: "Forehand Return",
@@ -129,36 +154,6 @@ test("resolveCanonicalShotFromMetrics uses rerank top bandeja over Save Return f
   assert.equal(r.shotName, "Bandeja 1");
   assert.equal(r.source, "rerank_neighbor");
   assert.equal(r.category, "overhead");
-});
-
-test("resolveCanonicalShotFromMetrics picks bandeja on contention when drive is still #1", () => {
-  const r = resolveCanonicalShotFromMetrics({
-    retrieval: {
-      shot_hypothesis: {
-        stroke_label: "Forehand drive · Save & return",
-        confidence: 0.04,
-        category: "save_return",
-      },
-      neighbor_distance_gap: 0.005,
-      rerank: { applied: true, bandeja_contention: true, supports_overhead: false },
-      neighbors: [
-        {
-          stroke_label: "Forehand drive · Save & return",
-          stroke_preset: "forehand_drive",
-          category: "save_return",
-          distance: 0.106,
-        },
-        {
-          stroke_label: "Bandeja 1",
-          stroke_preset: "bandeja",
-          category: "overhead",
-          distance: 0.112,
-        },
-      ],
-    },
-  });
-  assert.equal(r.shotName, "Bandeja 1");
-  assert.equal(r.source, "rerank_neighbor");
 });
 
 test("deriveHumanShotLabelFromMetrics uses neighbor when hypothesis confidence low", () => {
