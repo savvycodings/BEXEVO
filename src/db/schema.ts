@@ -103,6 +103,16 @@ export type TechniqueRetrievalResult = {
   };
   /** Distance gap between #1 and #2 neighbor (cosine distance); debug / low-conf gating */
   neighbor_distance_gap?: number | null;
+  /** Bandeja / overhead rerank debug (post-rerank distances in neighbors) */
+  rerank?: {
+    applied: boolean;
+    supports_overhead: boolean;
+    bandeja_contention: boolean;
+    bandeja_bonus: number;
+    serve_penalty: number;
+    top_raw_distance: number | null;
+    top_effective_distance: number | null;
+  };
   /** Set when pgvector/table missing or query failed */
   error?: string;
 };

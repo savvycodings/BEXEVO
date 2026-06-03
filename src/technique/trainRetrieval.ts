@@ -17,6 +17,7 @@ import {
   filterTrainNeighborsForRetrieval,
   type TrainNeighborCandidate,
 } from "./trainRetrievalHygiene";
+import { rerankTrainNeighbors } from "./trainRetrievalRerank";
 
 export { buildShotHypothesis } from "./shotHypothesis";
 
@@ -123,12 +124,12 @@ export async function upsertTrainSampleEmbedding(
   );
 }
 
-export async function findNearestTrainNeighbors(
+async function queryFilteredTrainCandidates(
   queryVector: number[],
   k: number
-): Promise<NeighborRow[]> {
+): Promise<TrainNeighborCandidate[]> {
   const literal = formatVectorSqlLiteral(queryVector);
-  const fetchLimit = Math.max(k * 4, 24);
+  const fetchLimit = Math.max(k * 6, 36);
   const { rows } = await pool.query<{
     trainSampleId: string;
     trainVideoId: string;
@@ -175,9 +176,21 @@ export async function findNearestTrainNeighbors(
     };
   });
 
-  return filterTrainNeighborsForRetrieval(mapped)
+  return filterTrainNeighborsForRetrieval(mapped);
+}
+
+export async function findNearestTrainNeighbors(
+  queryVector: number[],
+  k: number,
+  metrics?: Record<string, unknown> | null
+): Promise<NeighborRow[]> {
+  const filtered = await queryFilteredTrainCandidates(queryVector, k);
+  const metricsObj =
+    metrics && typeof metrics === "object" ? metrics : null;
+  const { neighbors: reranked } = rerankTrainNeighbors(filtered, metricsObj);
+  return reranked
     .slice(0, k)
-    .map(({ extraction_meta: _em, ...rest }) => rest);
+    .map(({ extraction_meta: _em, raw_distance: _rd, ...rest }) => rest);
 }
 
 /** Run after migrations; safe to call repeatedly (upserts). */
@@ -252,7 +265,19 @@ export async function retrieveForTechniqueMetrics(
   }
 
   try {
-    const neighbors = await findNearestTrainNeighbors(query, k);
+    const metricsRecord =
+      metrics && typeof metrics === "object"
+        ? (metrics as Record<string, unknown>)
+        : null;
+    const filtered = await queryFilteredTrainCandidates(query, k);
+    const { neighbors: reranked, rerank } = rerankTrainNeighbors(
+      filtered,
+      metricsRecord
+    );
+    const neighbors = reranked
+      .slice(0, k)
+      .map(({ extraction_meta: _em, raw_distance: _rd, ...rest }) => rest);
+
     if (neighbors.length === 0) {
       console.log(
         "[TrainRetrieval] no neighbors — ensure migration 0011, CREATE EXTENSION vector, and POST /train/embeddings/backfill with completed train_sample rows"
@@ -279,6 +304,7 @@ export async function retrieveForTechniqueMetrics(
       })),
       shot_hypothesis: buildShotHypothesis(neighbors),
       neighbor_distance_gap,
+      rerank,
     };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
