@@ -1,8 +1,14 @@
-import type { FrameLandmarks } from "./impactPoseContext";
+import type {
+  ClipMsRange,
+  FrameLandmarks,
+  LabeledPoseFrame,
+} from "./impactPoseContext";
+import { estimateFps, impactMsToFrameIndex } from "./impactPoseContext";
 
 /** Must match train_sample_embedding.embedding dimension (pgvector). */
 export const POSE_EMBEDDING_DIM = 128;
-export const POSE_EMBEDDING_SPEC_VERSION = "v1";
+/** v2: impact/clip-end (technique) and last frame (train trim ≈ contact). */
+export const POSE_EMBEDDING_SPEC_VERSION = "v2";
 
 /** MediaPipe PoseLandmark enum order (33 landmarks). */
 export const MEDIAPIPE_POSE_LANDMARK_NAMES = [
@@ -91,32 +97,119 @@ type PoseFrameRow = {
   landmarks?: FrameLandmarks;
 };
 
-/** Train Modal: pose_sequence rows use frame_idx + landmarks. */
-export function embedTrainPoseSequence(
-  poseSequence: PoseFrameRow[] | null | undefined
-): number[] | null {
-  if (!Array.isArray(poseSequence) || poseSequence.length === 0) return null;
-  const withLm = poseSequence.filter((r) => r?.landmarks && typeof r.landmarks === "object");
-  if (withLm.length === 0) return null;
-  const mid = Math.floor(withLm.length / 2);
-  const frame = withLm[mid];
-  return landmarksToEmbeddingVector(frame.landmarks as FrameLandmarks);
+export type RetrievalEmbeddingInput = {
+  pose_data?: Array<{ frame: number; landmarks: FrameLandmarks }>;
+  impact_pose_sequence?: LabeledPoseFrame[];
+  /** Resolved impact frame index (YOLO/clip); aligns embedding with impact_pose_sequence */
+  impact_frame_resolved?: number;
+  user_clips?: ClipMsRange[];
+  /** Train Modal `pose_sequence` — admin trim ends near contact; use last frame. */
+  pose_sequence?: PoseFrameRow[];
+  total_frames?: number;
+  video_duration_ms?: number;
+  mode?: "train" | "technique";
+};
+
+function frameIndexOfRow(row: PoseFrameRow): number {
+  if (typeof row.frame_idx === "number") return row.frame_idx;
+  if (typeof row.frame === "number") return row.frame;
+  return 0;
 }
 
 /**
- * Pro-library kNN (must match {@link embedTrainPoseSequence}): middle frame of
- * subsampled `pose_data` only. Using impact-frame here breaks matching when the
- * same file exists in train (train embeds middle of clip, not user trim impact).
+ * Single-frame selector shared by technique k-NN query and train index (spec v2).
  */
-export function embedPoseForProRetrieval(metrics: {
-  pose_data?: Array<{ frame: number; landmarks: FrameLandmarks }>;
-}): number[] | null {
-  const pd = metrics.pose_data;
-  if (!Array.isArray(pd) || pd.length === 0) return null;
-  const sorted = [...pd].sort((a, b) => a.frame - b.frame);
-  const mid = sorted[Math.floor(sorted.length / 2)];
-  if (!mid?.landmarks) return null;
-  return landmarksToEmbeddingVector(mid.landmarks);
+export function selectLandmarksForRetrievalEmbedding(
+  input: RetrievalEmbeddingInput
+): FrameLandmarks | null {
+  const mode = input.mode ?? (input.pose_sequence?.length ? "train" : "technique");
+
+  if (mode === "train") {
+    const seq = input.pose_sequence;
+    if (!Array.isArray(seq) || seq.length === 0) return null;
+    const withLm = seq.filter((r) => r?.landmarks && typeof r.landmarks === "object");
+    if (withLm.length === 0) return null;
+    const sorted = [...withLm].sort((a, b) => frameIndexOfRow(a) - frameIndexOfRow(b));
+    const last = sorted[sorted.length - 1];
+    return (last?.landmarks as FrameLandmarks) ?? null;
+  }
+
+  const impactSeq = input.impact_pose_sequence;
+  if (impactSeq?.length) {
+    const impact =
+      impactSeq.find((p) => p.phase === "impact") ?? impactSeq[impactSeq.length - 1];
+    if (impact?.landmarks) return impact.landmarks;
+  }
+
+  const pd = input.pose_data;
+  const tf = input.total_frames;
+  if (
+    pd?.length &&
+    typeof input.impact_frame_resolved === "number" &&
+    Number.isFinite(input.impact_frame_resolved)
+  ) {
+    const target = Math.round(input.impact_frame_resolved);
+    const sorted = [...pd].sort((a, b) => a.frame - b.frame);
+    let closest = sorted[0]!;
+    let bestD = Math.abs(sorted[0]!.frame - target);
+    for (const p of sorted) {
+      const d = Math.abs(p.frame - target);
+      if (d < bestD) {
+        bestD = d;
+        closest = p;
+      }
+    }
+    if (closest?.landmarks) return closest.landmarks;
+  }
+
+  const clips = input.user_clips;
+  const vdur = input.video_duration_ms;
+  if (clips?.length && pd?.length && vdur && vdur > 0 && tf && tf > 0) {
+    const fps = estimateFps(tf, vdur);
+    const impactFrame = impactMsToFrameIndex(clips[0]!.endMs, fps);
+    const sorted = [...pd].sort((a, b) => a.frame - b.frame);
+    let closest = sorted[0]!;
+    let bestD = Math.abs(sorted[0]!.frame - impactFrame);
+    for (const p of sorted) {
+      const d = Math.abs(p.frame - impactFrame);
+      if (d < bestD) {
+        bestD = d;
+        closest = p;
+      }
+    }
+    if (closest?.landmarks) return closest.landmarks;
+  }
+
+  if (pd?.length) {
+    const sorted = [...pd].sort((a, b) => a.frame - b.frame);
+    const mid = sorted[Math.floor(sorted.length / 2)];
+    if (mid?.landmarks) return mid.landmarks;
+  }
+  return null;
+}
+
+/** Train Modal: last pose_sequence frame (admin trim ends near ball contact). */
+export function embedTrainPoseSequence(
+  poseSequence: PoseFrameRow[] | null | undefined
+): number[] | null {
+  const lm = selectLandmarksForRetrievalEmbedding({
+    pose_sequence: poseSequence ?? undefined,
+    mode: "train",
+  });
+  if (!lm) return null;
+  return landmarksToEmbeddingVector(lm);
+}
+
+/** Technique analyze: impact phase, else clip endMs, else middle of pose_data. */
+export function embedPoseForProRetrieval(
+  metrics: RetrievalEmbeddingInput
+): number[] | null {
+  const lm = selectLandmarksForRetrievalEmbedding({
+    ...metrics,
+    mode: "technique",
+  });
+  if (!lm) return null;
+  return landmarksToEmbeddingVector(lm);
 }
 
 /** Cap pose frames sent to GPT (full `metrics.pose_data` stays for embeddings / impact math). */

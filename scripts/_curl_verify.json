@@ -1,0 +1,130 @@
+{
+  "tokenUsed": true,
+  "tokenUserId": "L2xWlNCowP0yTzFtIORcM5Mt9BUi7hZc",
+  "ownerIds": [
+    "NhLiGRCgXG77WToPP1Bc1tiI4cswvrVC",
+    "L2xWlNCowP0yTzFtIORcM5Mt9BUi7hZc"
+  ],
+  "owners": [
+    {
+      "id": "6534b76c-d6f3-46f5-a91c-ce9ad4ee465e",
+      "userId": "NhLiGRCgXG77WToPP1Bc1tiI4cswvrVC",
+      "techniqueVideoId": "f965ffcd-3216-4fea-b787-86d1f18ad948",
+      "status": "completed"
+    },
+    {
+      "id": "5a3c3f89-d5ef-44c5-902e-ca58468dabe3",
+      "userId": "L2xWlNCowP0yTzFtIORcM5Mt9BUi7hZc",
+      "techniqueVideoId": "6a0caf6f-52c0-4749-8be0-40b2dd95f1fe",
+      "status": "completed"
+    },
+    {
+      "id": "ee64a055-068e-4d43-a555-452f977f0d58",
+      "userId": "L2xWlNCowP0yTzFtIORcM5Mt9BUi7hZc",
+      "techniqueVideoId": "5358431a-e644-4733-90df-5bba21400386",
+      "status": "completed"
+    },
+    {
+      "id": "0d7313a7-b9ca-41ea-91ca-b9dc59775905",
+      "userId": "L2xWlNCowP0yTzFtIORcM5Mt9BUi7hZc",
+      "techniqueVideoId": "ef1a60b5-8ea5-45df-aab2-da8debbb33a8",
+      "status": "completed"
+    }
+  ],
+  "activitiesStatus": 200,
+  "activitiesForFlagged": [],
+  "curlResults": [
+    {
+      "id": "0d7313a7-b9ca-41ea-91ca-b9dc59775905",
+      "analysisStatus": 200,
+      "corrStatus": 200,
+      "hyp": {
+        "category": "net_play",
+        "confidence": 0.2331086029640971,
+        "skill_level": "advanced",
+        "stroke_label": "Forehand Half Volley",
+        "stroke_preset": "half_volley"
+      },
+      "shot_context": "This is a controlled net shot (half-volley) with medium confidence based on the contact height and racket path.",
+      "correction_shot": {
+        "variant": "Controlled Lift",
+        "objective": "Control pace and placement over power",
+        "shot_name": "Half-Volley",
+        "confidence": 0.92,
+        "court_zone": "Net",
+        "player_side": "Forehand",
+        "shot_family": "Net Play",
+        "ball_context": "Low trajectory, near knee height",
+        "spin_profile": "Low to medium topspin with lift",
+        "contact_height": "Knee to lower thigh",
+        "contact_timing": "Early preparation to impact transition",
+        "tactical_phase": "Transition",
+        "diagnostic_features": [
+          "Contact point below optimal waist height",
+          "Racket face slightly open to generate lift",
+          "Support arm extended for rotational stability"
+        ]
+      }
+    },
+    {
+      "id": "ee64a055-068e-4d43-a555-452f977f0d58",
+      "analysisStatus": 200,
+      "corrStatus": 200,
+      "hyp": {
+        "category": "net_play",
+        "confidence": 0.3329050772461041,
+        "skill_level": "advanced",
+        "stroke_label": "Block Volley (FH)",
+        "stroke_preset": "half_volley"
+      },
+      "shot_context": "This is a defensive glass shot (defence_glass) where you hit the ball off the back wall with medium confidence.",
+      "correction_shot": null
+    },
+    {
+      "id": "5a3c3f89-d5ef-44c5-902e-ca58468dabe3",
+      "analysisStatus": 200,
+      "corrStatus": 200,
+      "hyp": {
+        "category": "net_play",
+        "confidence": 0.018557245842130667,
+        "skill_level": "advanced",
+        "stroke_label": "Forehand Half Volley",
+        "stroke_preset": "half_volley"
+      },
+      "shot_context": "This is a net play shot, specifically a backhand volley, with high confidence in the classification.",
+      "correction_shot": null
+    },
+    {
+      "id": "6534b76c-d6f3-46f5-a91c-ce9ad4ee465e",
+      "analysisStatus": 200,
+      "corrStatus": 200,
+      "hyp": {
+        "category": "save_return",
+        "confidence": 0.005062539915386327,
+        "skill_level": "advanced",
+        "stroke_label": "Forehand Return glass",
+        "stroke_preset": "side_wall_forehand"
+      },
+      "shot_context": "This is a groundstroke return from the back of the court, likely a drive or chiquita, with medium confidence in the specific stroke label.",
+      "correction_shot": {
+        "variant": "two-handed",
+        "objective": "defensive placement",
+        "shot_name": "forehand",
+        "confidence": 0.85,
+        "court_zone": "service box",
+        "player_side": "right",
+        "shot_family": "groundstroke",
+        "ball_context": "controlled return",
+        "spin_profile": "flat",
+        "contact_height": "waist",
+        "contact_timing": "late",
+        "tactical_phase": "mid-court",
+        "diagnostic_features": [
+          "incomplete weight transfer to front foot",
+          "delayed split step execution",
+          "racket face stability maintained despite late preparation"
+        ]
+      }
+    }
+  ]
+}

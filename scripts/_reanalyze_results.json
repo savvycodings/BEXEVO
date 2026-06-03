@@ -1,0 +1,4 @@
+{
+  "note": "Full POST /technique/analyze skipped: technique_video paths in Neon point to Railway (/app/uploads/technique/...) with no local copies under server/uploads/technique. v9 retrieval/YOLO were applied in-place via scripts/_reprocess_v9_metrics.ts on the same analysis IDs.",
+  "results": []
+}

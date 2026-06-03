@@ -1,3 +1,8 @@
+import {
+  resolveImpactFrameIndex,
+  type ImpactFrameSource,
+} from "./resolveImpactFrame";
+
 export type FrameLandmarks = Record<string, { x: number; y: number }>;
 
 export type ClipMsRange = { startMs: number; endMs: number };
@@ -101,13 +106,60 @@ export function buildImpactPoseSequenceForMetrics(
   poseData: Array<{ frame: number; landmarks: FrameLandmarks }> | undefined,
   totalFrames: number,
   videoDurationMs: number | undefined,
-  clips: ClipMsRange[] | undefined
+  clips: ClipMsRange[] | undefined,
+  impactFrameIndex?: number
 ): LabeledPoseFrame[] | null {
   if (!poseData?.length || !clips?.length || !videoDurationMs || videoDurationMs <= 0) {
     return null;
   }
+  const clip = clips[0]!;
   const fps = estimateFps(totalFrames, videoDurationMs);
-  const impactMs = clips[0].endMs;
-  const impactFrameIndex = impactMsToFrameIndex(impactMs, fps);
-  return selectBeforeImpactAfterSequence(poseData, impactFrameIndex);
+  const resolved =
+    typeof impactFrameIndex === "number" && Number.isFinite(impactFrameIndex)
+      ? Math.max(0, Math.min(totalFrames - 1, Math.round(impactFrameIndex)))
+      : impactMsToFrameIndex(clip.endMs, fps);
+  return selectBeforeImpactAfterSequence(poseData, resolved);
+}
+
+/** Build impact sequence using YOLO/contact-aware frame resolution (after detection summary exists). */
+export function applyUserClipImpactToMetrics(
+  metrics: {
+    pose_data?: Array<{ frame: number; landmarks: FrameLandmarks }>;
+    total_frames?: number;
+    video_duration_ms?: number;
+    detection_summary?: { contact_window_frames?: number[] };
+    impact_frame_resolved?: number;
+    impact_frame_source?: ImpactFrameSource;
+  },
+  clips: ClipMsRange[],
+  videoDurationMs: number
+): {
+  impact_pose_sequence: LabeledPoseFrame[] | null;
+  impact_frame_resolved: number;
+  impact_frame_source: ImpactFrameSource;
+} | null {
+  if (!metrics.pose_data?.length || !clips.length || videoDurationMs <= 0) {
+    return null;
+  }
+  const totalFrames = metrics.total_frames ?? 0;
+  const clip = clips[0]!;
+  const resolved = resolveImpactFrameIndex({
+    clip,
+    totalFrames,
+    videoDurationMs,
+    contactFrames: metrics.detection_summary?.contact_window_frames,
+  });
+
+  const seq = buildImpactPoseSequenceForMetrics(
+    metrics.pose_data,
+    totalFrames,
+    videoDurationMs,
+    clips,
+    resolved.impactFrameIndex
+  );
+  return {
+    impact_pose_sequence: seq,
+    impact_frame_resolved: resolved.impactFrameIndex,
+    impact_frame_source: resolved.source,
+  };
 }

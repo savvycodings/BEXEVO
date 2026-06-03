@@ -19,6 +19,7 @@ import {
   userNotification,
   techniqueCorrectionRegenerationFeedback,
   type TechniqueDetectionSummary,
+  type TechniqueCorrectionFrameInsight,
 } from '../db'
 import { randomUUID, createHash } from 'crypto'
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
@@ -30,7 +31,7 @@ import {
 } from './frameExtractor'
 import {
   translateRecommendationsToDeltas,
-  classifyShotAndHandedness,
+  classifyHandednessOnly,
   mergeCorrectionShotAndHandedness,
   computeRacketHandConsensusForFrames,
   profileTextToDominantHand,
@@ -65,7 +66,7 @@ import {
   storedAiScoreToPercent,
 } from './techniqueScoreScale'
 import {
-  buildImpactPoseSequenceForMetrics,
+  applyUserClipImpactToMetrics,
   estimateFps,
   type ClipMsRange,
   resolveVideoDurationMsForImpact,
@@ -87,7 +88,20 @@ import {
 } from './poseEmbedding'
 import { metricsForClientFetch } from './clientMetrics'
 import { sanitizeUserClips } from './techniqueClipLimits'
-import { deriveHumanShotLabelFromMetrics } from '../train/trainShotDisplay'
+import {
+  deriveHumanShotLabelFromMetrics,
+  resolveCanonicalShotFromMetrics,
+  shotClassificationFromResolved,
+  RETRIEVAL_CONFIDENCE_THRESHOLD,
+} from '../train/trainShotDisplay'
+import {
+  attachClipLocalContactFrames,
+  contactFramesForPrompt,
+} from './yoloContactHints'
+import {
+  buildCorrectionFrameInsight,
+  orderFrameInsights,
+} from './correctionFrameInsights'
 import { normalizeCorrectionsForClient } from './correctionImageStorage'
 import { poseDataForOverlayFetch } from './poseOverlay'
 import { fal } from '@fal-ai/client'
@@ -387,13 +401,43 @@ async function persistTechniqueDetections(
   })
 }
 
+function buildCanonicalShotAnalyzeHint(metrics: Record<string, unknown>): string {
+  const r = resolveCanonicalShotFromMetrics(metrics)
+  if (r.source !== 'retrieval_hypothesis') return ''
+  const cat = r.category ? ` — category ${r.category}` : ''
+  return `\nCanonical shot from pro library (k-NN confidence ≥ ${RETRIEVAL_CONFIDENCE_THRESHOLD}): "${r.shotName}"${cat}. Use this for en.shot_context and primary_train_category when consistent with pose.\n`
+}
+
+function alignAnalyzeShotContextWithRetrieval(
+  aiAnalysis: Record<string, unknown>,
+  metrics: Record<string, unknown>
+): boolean {
+  const resolved = resolveCanonicalShotFromMetrics(metrics)
+  if (resolved.source !== 'retrieval_hypothesis') return false
+  const en = (aiAnalysis.en ?? {}) as Record<string, unknown>
+  const es = (aiAnalysis.es ?? {}) as Record<string, unknown>
+  aiAnalysis.en = {
+    ...en,
+    shot_context: `Pro library match: ${resolved.shotName}.`,
+  }
+  aiAnalysis.es = {
+    ...es,
+    shot_context: `Coincidencia con biblioteca pro: ${resolved.shotName}.`,
+  }
+  if (resolved.category && !aiAnalysis.primary_train_category) {
+    aiAnalysis.primary_train_category = resolved.category
+  }
+  return true
+}
+
 function buildDetectionPromptBlock(summary: TechniqueDetectionSummary | null): string {
   if (!summary || !summary.enabled || summary.detected_frames <= 0) {
     return 'YOLO object detections: unavailable or disabled. Infer ball/racket context from pose only when needed.'
   }
+  const promptContacts = contactFramesForPrompt(summary)
   const contact =
-    Array.isArray(summary.contact_window_frames) && summary.contact_window_frames.length > 0
-      ? summary.contact_window_frames.join(', ')
+    Array.isArray(promptContacts) && promptContacts.length > 0
+      ? promptContacts.join(', ')
       : 'none'
   return `YOLO object detections (model ${summary.model}):
 - sampled frames: ${summary.sampled_frames}
@@ -406,9 +450,10 @@ function buildDetectionPromptBlock(summary: TechniqueDetectionSummary | null): s
 
 function buildCorrectionDetectionHint(summary: TechniqueDetectionSummary | null): string {
   if (!summary || !summary.enabled || summary.detected_frames <= 0) return ''
+  const promptContacts = contactFramesForPrompt(summary)
   const contact =
-    Array.isArray(summary.contact_window_frames) && summary.contact_window_frames.length > 0
-      ? summary.contact_window_frames.slice(0, 10).join(', ')
+    Array.isArray(promptContacts) && promptContacts.length > 0
+      ? promptContacts.slice(0, 10).join(', ')
       : 'none'
   return `\nObject tracking context (YOLO): sports_ball=${summary.sports_ball_count}, racket=${summary.racket_count}, likely contact frames=${contact}. Preserve visible ball and padel racket relation for the same swing instant.`
 }
@@ -1126,21 +1171,14 @@ router.post('/analyze', async (req, res) => {
       poseDataEarly
     )
     const clipList = vdur ? sanitizeUserClips(clips, vdur) : undefined
+    const clientSentDuration =
+      typeof videoDurationMs === 'number' && videoDurationMs > 0
     if (clipList && vdur) {
-      const seq = buildImpactPoseSequenceForMetrics(
-        metrics.pose_data,
-        metrics.total_frames ?? 0,
-        vdur,
-        clipList
-      )
-      const clientSentDuration =
-        typeof videoDurationMs === 'number' && videoDurationMs > 0
       metrics = {
         ...metrics,
         video_duration_ms: vdur,
         user_clips: clipList,
         video_duration_ms_source: clientSentDuration ? 'client' : 'inferred',
-        ...(seq?.length ? { impact_pose_sequence: seq } : {}),
       }
     }
 
@@ -1166,10 +1204,35 @@ router.post('/analyze', async (req, res) => {
       metrics?.pose_data,
       normalizedDetections
     )
+    if (poseDataWithRacket) {
+      metrics = { ...metrics, pose_data: poseDataWithRacket }
+    }
     metrics = {
       ...metrics,
-      ...(poseDataWithRacket ? { pose_data: poseDataWithRacket } : {}),
       detection_summary: detectionSummary,
+    }
+
+    if (clipList && vdur) {
+      const impactApplied = applyUserClipImpactToMetrics(metrics, clipList, vdur)
+      if (impactApplied) {
+        metrics = {
+          ...metrics,
+          impact_pose_sequence: impactApplied.impact_pose_sequence ?? undefined,
+          impact_frame_resolved: impactApplied.impact_frame_resolved,
+          impact_frame_source: impactApplied.impact_frame_source,
+        }
+      }
+    }
+
+    const detectionForPrompt = attachClipLocalContactFrames(detectionSummary, {
+      total_frames: metrics?.total_frames,
+      video_duration_ms: metrics?.video_duration_ms,
+      user_clips: metrics?.user_clips,
+      impact_pose_sequence: metrics?.impact_pose_sequence,
+    })
+    metrics = {
+      ...metrics,
+      detection_summary: detectionForPrompt,
     }
     delete metrics.yolo_detections
     delete metrics.yolo_summary
@@ -1219,7 +1282,7 @@ router.post('/analyze', async (req, res) => {
       )
       const poseSummary = metrics.impact_pose_sequence?.length
         ? JSON.stringify({
-            note: 'User marked ball impact (clip end). Phases: preparation → impact (nearest frame to impact) → follow-through. Prefer this sequence for shot type and movement.',
+            note: 'Ball impact frame resolved from YOLO contacts and user clip (not always clip end). Phases: preparation → impact → follow-through. Prefer this sequence for shot type and movement.',
             impact_pose_sequence: metrics.impact_pose_sequence,
             all_pose_samples: poseDataForPrompt,
           })
@@ -1228,6 +1291,7 @@ router.post('/analyze', async (req, res) => {
 Analyze the video strictly from a padel coaching perspective, not general biomechanics.
 
 ${formatRetrievalForPrompt(metrics.retrieval)}
+${buildCanonicalShotAnalyzeHint(metrics as Record<string, unknown>)}
 
 ${buildDetectionPromptBlock(metrics?.detection_summary ?? null)}
 
@@ -1476,6 +1540,19 @@ Rules:
         }
       }
 
+      if (aiAnalysis) {
+        const aligned = alignAnalyzeShotContextWithRetrieval(
+          aiAnalysis as Record<string, unknown>,
+          metrics as Record<string, unknown>
+        )
+        if (aligned) {
+          console.log('[Technique] Aligned analyze shot_context with retrieval', {
+            analysisId,
+            shot: resolveCanonicalShotFromMetrics(metrics as Record<string, unknown>).shotName,
+          })
+        }
+      }
+
       if (typeof aiAnalysis?.score === 'number') {
         const modelRawScore = clampPercent(Number(aiAnalysis.score))
         const legacyCalibrated = calibrateTechniqueScore({
@@ -1596,7 +1673,7 @@ Rules:
         ai_score: combinedMetrics?.ai_analysis?.score,
         ai_rating: combinedMetrics?.ai_analysis?.rating,
         retrieval_confidence: combinedMetrics?.retrieval?.shot_hypothesis?.confidence,
-        retrieval_shot: combinedMetrics?.retrieval?.shot_hypothesis?.stroke_preset,
+        retrieval_shot: combinedMetrics?.retrieval?.shot_hypothesis?.stroke_label,
       },
     })
 
@@ -2163,18 +2240,18 @@ router.post('/correction-images', async (req, res) => {
       metrics?.total_frames ?? 0,
       poseData
     )
-    if (
-      (!poseSequence || poseSequence.length === 0) &&
-      metrics?.user_clips?.length &&
-      durationForRebuild
-    ) {
-      poseSequence =
-        buildImpactPoseSequenceForMetrics(
-          poseData,
-          metrics?.total_frames ?? 0,
-          durationForRebuild,
-          metrics.user_clips
-        ) ?? undefined
+    if (metrics?.user_clips?.length && durationForRebuild) {
+      const impactApplied = applyUserClipImpactToMetrics(
+        {
+          ...metrics,
+          pose_data: poseData,
+        },
+        metrics.user_clips as ClipMsRange[],
+        durationForRebuild
+      )
+      if (impactApplied?.impact_pose_sequence?.length) {
+        poseSequence = impactApplied.impact_pose_sequence
+      }
     }
 
     const video = await db.query.techniqueVideo.findFirst({
@@ -2290,24 +2367,37 @@ router.post('/correction-images', async (req, res) => {
     // Per-frame delta cache so concurrent batches do not duplicate calls for the same frame.
     const frameDeltasCache = new Map<number, LandmarkDelta[]>()
 
-    let shotAndHandedness: ShotAndHandedness | null = null
+    const resolvedShot = resolveCanonicalShotFromMetrics(
+      metrics && typeof metrics === 'object' ? metrics : null
+    )
+    const shotFromRetrieval = shotClassificationFromResolved(resolvedShot)
+    let handednessClass = null
     try {
-      shotAndHandedness = await classifyShotAndHandedness(
+      handednessClass = await classifyHandednessOnly(
         enAnalysis.recommendations ?? [],
         `${enAnalysis.diagnosis ?? ''}${detectionHint}`,
         landmarksForGpt,
         poseSequence ?? null
       )
-      console.log('[Technique] Shot + handedness classification', {
-        shot: shotAndHandedness.shot.shot_name,
-        family: shotAndHandedness.shot.shot_family,
-        shotConfidence: shotAndHandedness.shot.confidence,
-        dominantHand: shotAndHandedness.handedness.dominant_hand,
-        handConfidence: shotAndHandedness.handedness.confidence,
+      console.log('[Technique] Handedness classification (shot from retrieval)', {
+        shot: shotFromRetrieval.shot_name,
+        shotSource: resolvedShot.source,
+        shotConfidence: resolvedShot.confidence,
+        dominantHand: handednessClass.dominant_hand,
+        handConfidence: handednessClass.confidence,
       })
     } catch (classificationErr) {
-      console.error('[Technique] Shot/handedness classification failed', classificationErr)
-      shotAndHandedness = null
+      console.error('[Technique] Handedness classification failed', classificationErr)
+      handednessClass = null
+    }
+
+    const shotAndHandedness: ShotAndHandedness | null = {
+      shot: shotFromRetrieval,
+      handedness: handednessClass ?? {
+        dominant_hand: 'unknown',
+        confidence: 0,
+        evidence: [],
+      },
     }
 
     const profileRow = await db.query.userProfile.findFirst({
@@ -2388,6 +2478,13 @@ router.post('/correction-images', async (req, res) => {
         : maxPoseFrame + 1
 
     const corrections: CorrectionResult[] = []
+    const frameInsightsByFrame = new Map<number, TechniqueCorrectionFrameInsight>()
+    const impactPoseSequenceForInsights = metrics?.impact_pose_sequence as
+      | LabeledPoseFrame[]
+      | undefined
+    const correctionShotName =
+      shotAndHandednessForImages.shot.shot_name?.trim() || 'your shot'
+    const correctionDominantHand = shotAndHandednessForImages.handedness.dominant_hand
 
     for (let i = 0; i < framesToGenerate.length; i += MAX_CONCURRENT_FRAMES) {
       const batch = framesToGenerate.slice(i, i + MAX_CONCURRENT_FRAMES)
@@ -2489,8 +2586,8 @@ router.post('/correction-images', async (req, res) => {
                   }
                 }
                 proReferenceText = buildProNeighborCorrectionContext({
-                  strokeName:
-                    topNeighbor.stroke_label?.trim() || topNeighbor.stroke_name,
+                  strokeName: topNeighbor.stroke_name,
+                  strokeLabel: topNeighbor.stroke_label?.trim() || undefined,
                   strokePreset: topNeighbor.stroke_preset,
                   skillLevel: topNeighbor.skill_level,
                   distance: topNeighbor.distance,
@@ -2629,6 +2726,20 @@ router.post('/correction-images', async (req, res) => {
               return null
             }
 
+            frameInsightsByFrame.set(
+              frameData.frame,
+              buildCorrectionFrameInsight({
+                frame: frameData.frame,
+                imageIndex: frameInsightsByFrame.size + 1,
+                userLandmarks: frameData.landmarks,
+                proLandmarks: proLandmarksForFrame ?? null,
+                frameDeltas,
+                shotName: correctionShotName,
+                dominantHand: correctionDominantHand,
+                impactPoseSequence: impactPoseSequenceForInsights,
+              })
+            )
+
             return {
               frame: frameData.frame,
               originalImage: originalDataUri,
@@ -2676,6 +2787,10 @@ router.post('/correction-images', async (req, res) => {
 
     try {
       const frameIndicesForContext = mergedCorrectionsOnDisk.map((c) => c.frame)
+      const orderedFrameInsights = orderFrameInsights(
+        Array.from(frameInsightsByFrame.values()),
+        frameIndicesForContext
+      )
       const enForContext = (metrics as { ai_analysis?: { en?: Record<string, unknown> } })
         ?.ai_analysis?.en
       const correctionContext = {
@@ -2689,6 +2804,7 @@ router.post('/correction-images', async (req, res) => {
         generated_at: new Date().toISOString(),
         frame_count: mergedCorrectionsOnDisk.length,
         frame_indices: frameIndicesForContext,
+        frames: orderedFrameInsights.length > 0 ? orderedFrameInsights : undefined,
         shot_and_handedness: shotAndHandednessForImages,
         shot_and_handedness_classified: shotAndHandedness,
         coaching_summary: {
@@ -2743,9 +2859,18 @@ router.post('/correction-images', async (req, res) => {
       console.error('[Technique] Failed to cache correction images', cacheErr)
     }
 
+    const metricsAfter = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { eq: _eq }) => _eq(ta.id, analysisId),
+      columns: { metrics: true },
+    })
+    const ctxAfter = (metricsAfter?.metrics as Record<string, unknown> | null)?.[
+      correctionContextKey
+    ]
+
     return res.json({
       provider: imageProvider,
       corrections: responseCorrections,
+      correction_context: ctxAfter ?? null,
     })
   } catch (e: any) {
     console.error('[Technique] Correction-images error:', e)
@@ -2833,18 +2958,18 @@ router.post('/correction-test-frames', async (req, res) => {
       metrics?.total_frames ?? 0,
       poseData
     )
-    if (
-      (!poseSequence || poseSequence.length === 0) &&
-      metrics?.user_clips?.length &&
-      durationForRebuild
-    ) {
-      poseSequence =
-        buildImpactPoseSequenceForMetrics(
-          poseData,
-          metrics?.total_frames ?? 0,
-          durationForRebuild,
-          metrics.user_clips
-        ) ?? undefined
+    if (metrics?.user_clips?.length && durationForRebuild) {
+      const impactApplied = applyUserClipImpactToMetrics(
+        {
+          ...metrics,
+          pose_data: poseData,
+        },
+        metrics.user_clips as ClipMsRange[],
+        durationForRebuild
+      )
+      if (impactApplied?.impact_pose_sequence?.length) {
+        poseSequence = impactApplied.impact_pose_sequence
+      }
     }
 
     const framesToExtract = [...requestedFrames]

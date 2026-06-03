@@ -1,0 +1,126 @@
+{
+  "api_base": "http://127.0.0.1:3050",
+  "tokenUsed": true,
+  "userId": "X7Z0YF6RXo5btKkYUOEcVEEk4tpFSzug",
+  "db_overview": [
+    {
+      "id": "622056d0-1da6-407f-a273-ded9c4e9735a",
+      "createdAt": "2026-06-02T21:37:31.302Z",
+      "strokeLabel": "Forehand Drive 1",
+      "retrievalConfidence": "0.04859920657999881",
+      "strokePreset": "forehand_drive",
+      "category": "ground_strokes",
+      "skillLevel": "advanced",
+      "correction_shot": "Forehand Drive 1",
+      "frame_insights_n": 0
+    },
+    {
+      "id": "d6e63c01-969a-4811-b2ad-95d930864181",
+      "createdAt": "2026-06-02T22:08:47.184Z",
+      "strokeLabel": "Backhand Volley 1",
+      "retrievalConfidence": "0.020057459340691447",
+      "strokePreset": "backhand_volley",
+      "category": "net_play",
+      "skillLevel": "advanced",
+      "correction_shot": "Backhand Volley 1",
+      "frame_insights_n": 5
+    }
+  ],
+  "activitiesStatus": 200,
+  "activities": [],
+  "curlResults": [
+    {
+      "id": "622056d0-1da6-407f-a273-ded9c4e9735a",
+      "analysisStatus": 200,
+      "corrStatus": 200,
+      "hyp": {
+        "category": "ground_strokes",
+        "confidence": 0.04859920657999881,
+        "skill_level": "advanced",
+        "stroke_label": "Forehand Drive 1",
+        "stroke_preset": "forehand_drive"
+      },
+      "top_neighbors": null,
+      "shot_context": "This is a groundstroke forehand drive executed from mid-court with medium confidence.",
+      "score": 76,
+      "correction_shot": {
+        "variant": "unknown",
+        "objective": "unknown",
+        "shot_name": "Forehand Drive 1",
+        "confidence": 0.04859920657999881,
+        "court_zone": "unknown",
+        "player_side": "unknown",
+        "shot_family": "ground_strokes",
+        "ball_context": "unknown",
+        "spin_profile": "unknown",
+        "contact_height": "unknown",
+        "contact_timing": "unknown",
+        "tactical_phase": "unknown",
+        "diagnostic_features": []
+      },
+      "frame_insights": []
+    },
+    {
+      "id": "d6e63c01-969a-4811-b2ad-95d930864181",
+      "analysisStatus": 200,
+      "corrStatus": 200,
+      "hyp": {
+        "category": "net_play",
+        "confidence": 0.020057459340691447,
+        "skill_level": "advanced",
+        "stroke_label": "Backhand Volley 1",
+        "stroke_preset": "backhand_volley"
+      },
+      "top_neighbors": null,
+      "shot_context": "You played a precise backhand volley at the net with high confidence.",
+      "score": 82,
+      "correction_shot": {
+        "variant": "unknown",
+        "objective": "unknown",
+        "shot_name": "Backhand Volley 1",
+        "confidence": 0.020057459340691447,
+        "court_zone": "unknown",
+        "player_side": "unknown",
+        "shot_family": "net_play",
+        "ball_context": "unknown",
+        "spin_profile": "unknown",
+        "contact_height": "unknown",
+        "contact_timing": "unknown",
+        "tactical_phase": "unknown",
+        "diagnostic_features": []
+      },
+      "frame_insights": [
+        {
+          "frame": 0,
+          "label": "Image 1",
+          "pro_match": 0,
+          "summary": "This image focuses on this moment in your clip. Left Index sits lower than the pro — raise it toward the pro position. L"
+        },
+        {
+          "frame": 40,
+          "label": "Image 2",
+          "pro_match": 0,
+          "summary": "This image focuses on this moment in your clip. Right Foot Index is farther right than the pro — shift left toward the p"
+        },
+        {
+          "frame": 80,
+          "label": "Image 3",
+          "pro_match": 18,
+          "summary": "This image focuses on this moment in your clip. Left Thumb sits lower than the pro — raise it toward the pro position. L"
+        },
+        {
+          "frame": 119,
+          "label": "Image 4",
+          "pro_match": 35,
+          "summary": "This image focuses on this moment in your clip. Right Pinky sits higher than the pro — lower it toward the pro position."
+        },
+        {
+          "frame": 159,
+          "label": "Image 5",
+          "pro_match": 29,
+          "summary": "This image focuses on contact moment. Right Eye Inner sits lower than the pro — raise it toward the pro position. Right "
+        }
+      ]
+    }
+  ]
+}

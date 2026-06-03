@@ -8,7 +8,17 @@ import {
   POSE_EMBEDDING_DIM,
   POSE_EMBEDDING_SPEC_VERSION,
 } from "./poseEmbedding";
-import { adminStrokeLabelKey } from "../train/trainShotDisplay";
+import {
+  adminStrokeLabelKey,
+  RETRIEVAL_CONFIDENCE_THRESHOLD,
+} from "../train/trainShotDisplay";
+import { buildShotHypothesis } from "./shotHypothesis";
+import {
+  filterTrainNeighborsForRetrieval,
+  type TrainNeighborCandidate,
+} from "./trainRetrievalHygiene";
+
+export { buildShotHypothesis } from "./shotHypothesis";
 
 export type NeighborRow = {
   train_sample_id: string;
@@ -48,80 +58,8 @@ export function formatRetrievalForPrompt(r: TechniqueRetrievalResult | undefined
 Pro reference similarity (pose embedding ${r.spec_version}; lower distance = closer match to that labeled clip):
 ${JSON.stringify(payload, null, 2)}
 
-When shot_hypothesis.confidence is at least 0.35, treat shot_hypothesis.stroke_label (admin shot name) and category as the primary shot classification for the user. stroke_preset is an internal taxonomy bucket only. Otherwise infer the shot from the pose sequence below.
+When shot_hypothesis.confidence is at least ${RETRIEVAL_CONFIDENCE_THRESHOLD}, treat shot_hypothesis.stroke_label (admin trained shot name from the pro library) and category as the primary shot classification. Do not let stroke_preset override stroke_label — preset is legacy taxonomy metadata only. Otherwise infer the shot from the pose sequence below.
 `;
-}
-
-export function buildShotHypothesis(
-  neighbors: NeighborRow[]
-): TechniqueRetrievalResult["shot_hypothesis"] {
-  if (neighbors.length === 0) {
-    return {
-      stroke_preset: null,
-      stroke_label: null,
-      category: null,
-      skill_level: null,
-      confidence: 0,
-    };
-  }
-
-  const byPreset = new Map<
-    string,
-    { w: number; category: string; skill_level: string; stroke_label: string }
-  >();
-  const byLabel = new Map<
-    string,
-    { w: number; category: string; skill_level: string; stroke_preset: string }
-  >();
-  for (const n of neighbors) {
-    const add = 1 / (n.distance + 0.03);
-    const cur = byPreset.get(n.stroke_preset);
-    if (cur) {
-      cur.w += add;
-    } else {
-      byPreset.set(n.stroke_preset, {
-        w: add,
-        category: n.category,
-        skill_level: n.skill_level,
-        stroke_label: n.stroke_label,
-      });
-    }
-    const labelKey = n.stroke_label.trim() || n.stroke_preset;
-    const curLabel = byLabel.get(labelKey);
-    if (curLabel) {
-      curLabel.w += add;
-    } else {
-      byLabel.set(labelKey, {
-        w: add,
-        category: n.category,
-        skill_level: n.skill_level,
-        stroke_preset: n.stroke_preset,
-      });
-    }
-  }
-
-  const sorted = [...byPreset.entries()].sort((a, b) => b[1].w - a[1].w);
-  const top = sorted[0];
-  const second = sorted[1];
-  const sortedLabels = [...byLabel.entries()].sort((a, b) => b[1].w - a[1].w);
-  const topLabel = sortedLabels[0];
-  let confidence: number;
-  if (second) {
-    confidence = Math.max(
-      0,
-      Math.min(1, (top[1].w - second[1].w) / (top[1].w + 1e-6))
-    );
-  } else {
-    confidence = Math.max(0, Math.min(1, 1 - neighbors[0].distance / 0.45));
-  }
-
-  return {
-    stroke_preset: top[0],
-    stroke_label: topLabel?.[0] ?? top[1].stroke_label ?? null,
-    category: top[1].category,
-    skill_level: top[1].skill_level,
-    confidence,
-  };
 }
 
 /**
@@ -190,6 +128,7 @@ export async function findNearestTrainNeighbors(
   k: number
 ): Promise<NeighborRow[]> {
   const literal = formatVectorSqlLiteral(queryVector);
+  const fetchLimit = Math.max(k * 4, 24);
   const { rows } = await pool.query<{
     trainSampleId: string;
     trainVideoId: string;
@@ -199,6 +138,7 @@ export async function findNearestTrainNeighbors(
     stroke_preset: string;
     skill_level: string;
     dist: string;
+    extraction_meta: TrainNeighborCandidate["extraction_meta"];
   }>(
     `SELECT
       tse."trainSampleId" AS "trainSampleId",
@@ -208,17 +148,19 @@ export async function findNearestTrainNeighbors(
       tv.category::text AS category,
       tv."strokePreset"::text AS stroke_preset,
       tv."skillLevel"::text AS skill_level,
+      ts."extractionMeta" AS extraction_meta,
       (tse.embedding <=> $1::vector)::float8 AS dist
     FROM train_sample_embedding tse
     INNER JOIN train_sample ts ON ts.id = tse."trainSampleId"
     INNER JOIN train_video tv ON tv.id = ts."trainVideoId"
     WHERE ts.status = $2
+      AND tse."specVersion" = $4
     ORDER BY tse.embedding <=> $1::vector
     LIMIT $3`,
-    [literal, "completed", k]
+    [literal, "completed", fetchLimit, POSE_EMBEDDING_SPEC_VERSION]
   );
 
-  return rows.map((r) => {
+  const mapped: TrainNeighborCandidate[] = rows.map((r) => {
     const stroke_label = adminStrokeLabelKey(r.strokeLabel, r.strokeName);
     return {
       train_sample_id: r.trainSampleId,
@@ -229,8 +171,13 @@ export async function findNearestTrainNeighbors(
       stroke_preset: r.stroke_preset,
       skill_level: r.skill_level,
       distance: Number(r.dist),
+      extraction_meta: r.extraction_meta ?? null,
     };
   });
+
+  return filterTrainNeighborsForRetrieval(mapped)
+    .slice(0, k)
+    .map(({ extraction_meta: _em, ...rest }) => rest);
 }
 
 /** Run after migrations; safe to call repeatedly (upserts). */
@@ -311,6 +258,11 @@ export async function retrieveForTechniqueMetrics(
         "[TrainRetrieval] no neighbors — ensure migration 0011, CREATE EXTENSION vector, and POST /train/embeddings/backfill with completed train_sample rows"
       );
     }
+    const neighbor_distance_gap =
+      neighbors.length >= 2
+        ? neighbors[1]!.distance - neighbors[0]!.distance
+        : null;
+
     return {
       spec_version: POSE_EMBEDDING_SPEC_VERSION,
       embedding_dim: POSE_EMBEDDING_DIM,
@@ -326,6 +278,7 @@ export async function retrieveForTechniqueMetrics(
         distance: n.distance,
       })),
       shot_hypothesis: buildShotHypothesis(neighbors),
+      neighbor_distance_gap,
     };
   } catch (e: any) {
     const msg = e?.message ?? String(e);

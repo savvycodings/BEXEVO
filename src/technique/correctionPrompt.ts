@@ -255,6 +255,86 @@ ${poseSequence
 ${JSON.stringify(landmarks, null, 2)}`;
 }
 
+export async function classifyHandednessOnly(
+  recommendations: string[],
+  diagnosis: string,
+  landmarks: FrameLandmarks,
+  poseSequence?: LabeledPoseFrame[] | null
+): Promise<HandednessClassification> {
+  const prompt = `You are a world-class padel biomechanics classifier.
+
+Infer dominant handedness only. Shot type is already resolved from the pro library — do not classify the shot.
+
+COACH DIAGNOSIS:
+${diagnosis}
+
+COACH RECOMMENDATIONS:
+${recommendations.map((r, i) => `${i + 1}. ${r}`).join("\n")}
+
+${formatLandmarksForPrompt(landmarks, poseSequence)}
+
+Output ONLY valid JSON matching:
+{
+  "handedness": {
+    "dominant_hand": "right-handed | left-handed | unknown",
+    "confidence": 0.0,
+    "evidence": ["", "", ""]
+  }
+}
+
+Rules:
+- When a POSE SEQUENCE is provided, weight preparation + impact + follow-through together.
+- Preserve left-handed interpretation if evidence indicates left dominance.
+- Do NOT use camera-left/camera-right as forehand/backhand by itself.
+- Base handedness on pose, racket/body orientation, and movement — not appearance stereotypes.
+- If uncertain, return "unknown" with lower confidence.
+- Return JSON only.`;
+
+  let content: string | null = null;
+  try {
+    const res = await runChat(
+      {
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You classify padel handedness from biomechanics. Respond only with strict JSON. No markdown fences.",
+          },
+          { role: "user", content: prompt },
+        ],
+      },
+      { provider: "xevo" }
+    );
+    content = chatContent(res);
+    if (!content) {
+      console.error("[CorrectionPrompt] Handedness classification returned no content", res);
+      return DEFAULT_SHOT_AND_HANDEDNESS.handedness;
+    }
+  } catch (err) {
+    console.error("[CorrectionPrompt] Handedness classification chat call failed", err);
+    return DEFAULT_SHOT_AND_HANDEDNESS.handedness;
+  }
+
+  try {
+    const parsed = parseFlexibleJsonFromLlmContent(content) as {
+      handedness?: Partial<HandednessClassification>;
+    };
+    const handedness = parsed?.handedness ?? {};
+    return {
+      dominant_hand: normalizeDominantHand(handedness.dominant_hand),
+      confidence: clampConfidence(handedness.confidence),
+      evidence: Array.isArray(handedness.evidence)
+        ? handedness.evidence.map(String).filter(Boolean)
+        : [],
+    };
+  } catch (err) {
+    console.error("[CorrectionPrompt] Handedness classification parse failed", err);
+    return DEFAULT_SHOT_AND_HANDEDNESS.handedness;
+  }
+}
+
 export async function classifyShotAndHandedness(
   recommendations: string[],
   diagnosis: string,
@@ -695,6 +775,8 @@ export function mergeLandmarkDeltas(
 
 export interface ProNeighborCorrectionContextParams {
   strokeName: string;
+  /** Admin trained label (primary); preset is taxonomy metadata only. */
+  strokeLabel?: string;
   strokePreset: string;
   skillLevel: string;
   distance: number;
@@ -707,7 +789,8 @@ export function buildProNeighborCorrectionContext(
   p: ProNeighborCorrectionContextParams
 ): string {
   const gap = summarizeProUserLandmarkGap(p.userLandmarks, p.proLandmarks);
-  return `PRO LIBRARY MATCH (vector neighbor, distance ${p.distance.toFixed(4)}): shot "${p.strokeName}" (taxonomy preset ${p.strokePreset}, skill ${p.skillLevel}).
+  const displayLabel = (p.strokeLabel ?? p.strokeName).trim() || p.strokeName;
+  return `PRO LIBRARY MATCH (vector neighbor, distance ${p.distance.toFixed(4)}): trained shot "${displayLabel}" (internal preset ${p.strokePreset}, skill ${p.skillLevel}).
 This is the constructive visual target — adjust the user's body in the photo toward the pro's pose at the same moment in the swing. Do not change court, camera, clothing, or identity.
 
 TARGET POSE LANDMARKS from pro clip (normalized 0-1, top-left — match these joint positions):

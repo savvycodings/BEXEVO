@@ -39,6 +39,21 @@ export type TechniqueHandednessClassification = {
   evidence: string[];
 };
 
+export type TechniqueCorrectionFrameInsight = {
+  frame: number;
+  label: string;
+  phase?: "preparation" | "impact" | "follow_through" | "other";
+  summary: string;
+  focus_joints: string[];
+  stats: {
+    pro_match: number;
+    adjustment_need: number;
+    stability: number;
+    power_line: number;
+  };
+  top_adjustments?: Array<{ joint: string; axis: string; direction: string }>;
+};
+
 export type TechniqueCorrectionContext = {
   version: string;
   generated_at: string;
@@ -49,6 +64,8 @@ export type TechniqueCorrectionContext = {
     shot: TechniqueShotClassification;
     handedness: TechniqueHandednessClassification;
   } | null;
+  /** Per corrected frame: FIFA-style stats + short explanation for UI tabs. */
+  frames?: TechniqueCorrectionFrameInsight[];
   /** Saved for Activities / notifications — coach text used when generating images. */
   coaching_summary?: {
     diagnosis?: string | null;
@@ -84,6 +101,8 @@ export type TechniqueRetrievalResult = {
     /** 0–1 from neighbor agreement + distance margin */
     confidence: number;
   };
+  /** Distance gap between #1 and #2 neighbor (cosine distance); debug / low-conf gating */
+  neighbor_distance_gap?: number | null;
   /** Set when pgvector/table missing or query failed */
   error?: string;
 };
@@ -99,6 +118,8 @@ export type TechniqueDetectionSummary = {
   racket_count: number;
   avg_confidence: number;
   contact_window_frames?: number[];
+  /** Clip-local + impact-near subset for LLM prompts (raw list kept for debug). */
+  contact_window_frames_prompt?: number[];
   confidence_threshold?: number;
   confidence_threshold_racket?: number;
   confidence_threshold_ball?: number;

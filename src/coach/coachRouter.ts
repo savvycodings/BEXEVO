@@ -12,8 +12,10 @@ import {
   coachVideoReview,
   techniqueAnalysis,
   techniqueVideo,
+  user,
   userNotification,
 } from "../db";
+import { sendCoachReviewReadyEmail } from "../lib/email/sendCoachReviewReadyEmail";
 import {
   storedAiBreakdownToPercent,
   storedAiConfidenceToPercent,
@@ -444,6 +446,35 @@ router.post("/review/:id/submit", async (req, res) => {
       refId: review.id,
       createdAt: now,
     });
+
+    try {
+      const student = await db.query.user.findFirst({
+        where: (u, { eq: _eq }) => _eq(u.id, review.studentUserId),
+        columns: { email: true, name: true },
+      });
+      if (student?.email) {
+        const emailResult = await sendCoachReviewReadyEmail({
+          reviewId: review.id,
+          to: student.email,
+          studentName: student.name,
+          coachFeedbackText,
+          annotationCount: persistedAnnotations.length,
+        });
+        if (emailResult.sent) {
+          console.log("[Coach] coach_review_ready email sent", {
+            reviewId: review.id,
+            emailId: emailResult.emailId,
+          });
+        } else if (emailResult.skipped) {
+          console.log("[Coach] coach_review_ready email skipped", {
+            reviewId: review.id,
+            reason: emailResult.skipped,
+          });
+        }
+      }
+    } catch (emailErr) {
+      console.error("[Coach] coach_review_ready email failed", emailErr);
+    }
 
     return res.json({ ok: true });
   } catch (e: any) {

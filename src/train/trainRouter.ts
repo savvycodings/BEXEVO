@@ -25,6 +25,7 @@ import {
   runTrainEmbeddingBackfill,
   indexTrainSampleEmbeddingIfReady,
 } from "../technique/trainRetrieval";
+import { POSE_EMBEDDING_SPEC_VERSION } from "../technique/poseEmbedding";
 import falLoraRouter from "./falLoraRouter";
 import { adminStrokeLabelKey } from "./trainShotDisplay";
 import { fal } from "@fal-ai/client";
@@ -797,7 +798,7 @@ router.post("/embeddings/backfill", async (req, res) => {
     return res.json({
       ok: true,
       ...out,
-      specVersion: "v1",
+      specVersion: POSE_EMBEDDING_SPEC_VERSION,
       dims: 128,
     });
   } catch (e: any) {
