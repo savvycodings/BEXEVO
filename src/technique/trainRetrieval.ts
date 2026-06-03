@@ -46,6 +46,7 @@ export function formatRetrievalForPrompt(r: TechniqueRetrievalResult | undefined
   }
   const payload = {
     shot_hypothesis: r.shot_hypothesis,
+    rerank: r.rerank ?? null,
     neighbors: r.neighbors.slice(0, 6).map((n) => ({
       stroke_label: n.stroke_label,
       stroke_name: n.stroke_name,
@@ -59,7 +60,9 @@ export function formatRetrievalForPrompt(r: TechniqueRetrievalResult | undefined
 Pro reference similarity (pose embedding ${r.spec_version}; lower distance = closer match to that labeled clip):
 ${JSON.stringify(payload, null, 2)}
 
-When shot_hypothesis.confidence is at least ${RETRIEVAL_CONFIDENCE_THRESHOLD}, treat shot_hypothesis.stroke_label (admin trained shot name from the pro library) and category as the primary shot classification. Do not let stroke_preset override stroke_label — preset is legacy taxonomy metadata only. Otherwise infer the shot from the pose sequence below.
+When shot_hypothesis.confidence is at least ${RETRIEVAL_CONFIDENCE_THRESHOLD}, treat shot_hypothesis.stroke_label (admin trained shot name from the pro library) and category as the primary shot classification. Do not let stroke_preset override stroke_label — preset is legacy taxonomy metadata only.
+If rerank.applied is true, neighbors are re-ordered for overhead/bandeja — prefer neighbors[0].stroke_label (especially bandeja or overhead category) over save_return serve labels when pose shows an overhead arc.
+Otherwise infer the shot from the pose sequence below.
 `;
 }
 

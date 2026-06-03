@@ -100,6 +100,67 @@ test("resolveCanonicalShotFromMetrics low_confidence_fallback when gap and vote 
   assert.equal(r.shotName, "Net Play");
 });
 
+test("resolveCanonicalShotFromMetrics uses rerank top bandeja over Save Return fallback", () => {
+  const r = resolveCanonicalShotFromMetrics({
+    retrieval: {
+      shot_hypothesis: {
+        stroke_label: "Flat Serve",
+        confidence: 0,
+        category: "save_return",
+      },
+      neighbor_distance_gap: 0,
+      rerank: { applied: true, supports_overhead: true },
+      neighbors: [
+        {
+          stroke_label: "Bandeja 1",
+          stroke_preset: "bandeja",
+          category: "overhead",
+          distance: 0.112,
+        },
+        {
+          stroke_label: "Flat Serve",
+          stroke_preset: "forehand_drive",
+          category: "save_return",
+          distance: 0.156,
+        },
+      ],
+    },
+  });
+  assert.equal(r.shotName, "Bandeja 1");
+  assert.equal(r.source, "rerank_neighbor");
+  assert.equal(r.category, "overhead");
+});
+
+test("resolveCanonicalShotFromMetrics picks bandeja on contention when drive is still #1", () => {
+  const r = resolveCanonicalShotFromMetrics({
+    retrieval: {
+      shot_hypothesis: {
+        stroke_label: "Forehand drive · Save & return",
+        confidence: 0.04,
+        category: "save_return",
+      },
+      neighbor_distance_gap: 0.005,
+      rerank: { applied: true, bandeja_contention: true, supports_overhead: false },
+      neighbors: [
+        {
+          stroke_label: "Forehand drive · Save & return",
+          stroke_preset: "forehand_drive",
+          category: "save_return",
+          distance: 0.106,
+        },
+        {
+          stroke_label: "Bandeja 1",
+          stroke_preset: "bandeja",
+          category: "overhead",
+          distance: 0.112,
+        },
+      ],
+    },
+  });
+  assert.equal(r.shotName, "Bandeja 1");
+  assert.equal(r.source, "rerank_neighbor");
+});
+
 test("deriveHumanShotLabelFromMetrics uses neighbor when hypothesis confidence low", () => {
   const label = deriveHumanShotLabelFromMetrics({
     retrieval: {

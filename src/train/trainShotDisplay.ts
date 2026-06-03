@@ -1,6 +1,8 @@
 /** Human-facing train shot title (admin catalog label), not enum preset. */
 
 import type { ShotClassification } from "../technique/correctionPrompt";
+import { isBandejaNeighbor } from "../technique/trainRetrievalRerank";
+import type { TrainNeighborCandidate } from "../technique/trainRetrievalHygiene";
 
 const TRAIN_LEVEL_SUFFIXES = new Set(["Beginner", "Intermediate", "Advanced"]);
 
@@ -37,6 +39,7 @@ function looksLikeStrokePresetId(s: string): boolean {
 
 export type CanonicalShotSource =
   | "retrieval_hypothesis"
+  | "rerank_neighbor"
   | "neighbor"
   | "ai_shot_context"
   | "low_confidence_fallback"
@@ -54,6 +57,68 @@ function firstSentenceShotContext(shotContext: string): string {
   const first = shotContext.split(/[.!?]/)[0]?.trim() ?? "";
   if (!first) return "";
   return first.length > 36 ? `${first.slice(0, 34)}…` : first;
+}
+
+function neighborAsCandidate(
+  n: Record<string, unknown>
+): TrainNeighborCandidate | null {
+  const stroke_label = typeof n.stroke_label === "string" ? n.stroke_label : "";
+  if (!stroke_label.trim()) return null;
+  return {
+    train_sample_id: String(n.train_sample_id ?? ""),
+    train_video_id: String(n.train_video_id ?? ""),
+    stroke_name: typeof n.stroke_name === "string" ? n.stroke_name : stroke_label,
+    stroke_label,
+    category: typeof n.category === "string" ? n.category : "",
+    stroke_preset: typeof n.stroke_preset === "string" ? n.stroke_preset : "",
+    skill_level: typeof n.skill_level === "string" ? n.skill_level : "",
+    distance: typeof n.distance === "number" ? n.distance : 0,
+    extraction_meta: null,
+  };
+}
+
+/** After bandeja/overhead rerank, prefer bandeja/overhead library label over Save Return fallback. */
+function resolutionFromRerankTopNeighbor(
+  retrieval: Record<string, unknown>,
+  neighbors: Array<Record<string, unknown>>,
+  hypConf: number
+): CanonicalShotResolution | null {
+  const rerank = retrieval.rerank as
+    | { applied?: boolean; bandeja_contention?: boolean; supports_overhead?: boolean }
+    | undefined;
+  if (!rerank?.applied || neighbors.length === 0) return null;
+
+  if (rerank.bandeja_contention || rerank.supports_overhead) {
+    for (const n of neighbors) {
+      const c = neighborAsCandidate(n);
+      if (c && isBandejaNeighbor(c)) {
+        return {
+          shotName: c.stroke_label,
+          category: c.category || "overhead",
+          skillLevel: c.skill_level || null,
+          confidence: hypConf,
+          source: "rerank_neighbor",
+        };
+      }
+    }
+  }
+
+  const top = neighbors[0]!;
+  const stroke_label = typeof top.stroke_label === "string" ? top.stroke_label.trim() : "";
+  if (!stroke_label || looksLikeStrokePresetId(stroke_label)) return null;
+
+  const candidate = neighborAsCandidate(top);
+  const overheadShot =
+    top.category === "overhead" || (candidate != null && isBandejaNeighbor(candidate));
+  if (!overheadShot) return null;
+
+  return {
+    shotName: stroke_label,
+    category: typeof top.category === "string" ? top.category : null,
+    skillLevel: typeof top.skill_level === "string" ? top.skill_level : null,
+    confidence: hypConf,
+    source: "rerank_neighbor",
+  };
 }
 
 /**
@@ -94,6 +159,12 @@ export function resolveCanonicalShotFromMetrics(
     neighborDistanceGap != null &&
     neighborDistanceGap < NEIGHBOR_DISTANCE_GAP_MIN;
 
+  const rerankTop =
+    retrieval != null
+      ? resolutionFromRerankTopNeighbor(retrieval, neighbors, hypConf)
+      : null;
+  if (rerankTop) return rerankTop;
+
   if (
     !ambiguousRetrieval &&
     hypConf >= RETRIEVAL_CONFIDENCE_THRESHOLD &&
@@ -111,6 +182,18 @@ export function resolveCanonicalShotFromMetrics(
 
   if (ambiguousRetrieval) {
     const top = neighbors[0];
+    const topLabel =
+      typeof top?.stroke_label === "string" ? top.stroke_label.trim() : "";
+    const rerank = retrieval?.rerank as { applied?: boolean } | undefined;
+    if (rerank?.applied && topLabel && !looksLikeStrokePresetId(topLabel)) {
+      return {
+        shotName: topLabel,
+        category: typeof top?.category === "string" ? top.category : null,
+        skillLevel: typeof top?.skill_level === "string" ? top.skill_level : null,
+        confidence: hypConf,
+        source: "rerank_neighbor",
+      };
+    }
     const cat =
       typeof top?.category === "string" && top.category.trim()
         ? categoryDisplayName(top.category.trim())

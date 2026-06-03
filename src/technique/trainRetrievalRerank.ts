@@ -36,6 +36,16 @@ export function isServeLikeSaveReturn(row: TrainNeighborCandidate): boolean {
   return lower === "flat serve" || lower === "slice serve";
 }
 
+/** save_return clips that steal bandeja/overhead k-NN (drives labeled under serve pillar). */
+export function isSaveReturnMisleadingForOverhead(
+  row: TrainNeighborCandidate
+): boolean {
+  if (row.category !== "save_return") return false;
+  if (isServeLikeSaveReturn(row)) return true;
+  if (row.stroke_preset === "forehand_drive") return true;
+  return /forehand\s+drive/i.test(row.stroke_label);
+}
+
 function bestRawBandejaDistance(rows: TrainNeighborCandidate[]): number | null {
   let best: number | null = null;
   for (const r of rows) {
@@ -70,7 +80,7 @@ export function effectiveNeighborDistance(
   if (isBandejaNeighbor(row)) {
     d -= BANDEJA_DISTANCE_BONUS;
   }
-  if (isServeLikeSaveReturn(row)) {
+  if (isSaveReturnMisleadingForOverhead(row)) {
     d += SAVE_RETURN_SERVE_PENALTY;
   }
   return Math.max(0, d);

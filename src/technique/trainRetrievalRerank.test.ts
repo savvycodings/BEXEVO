@@ -98,6 +98,25 @@ test("contention gate applies bandeja bonus without overhead pose", () => {
   assert.ok(effBandeja < effServe);
 });
 
+test("forehand drive save_return gets penalty when rerank applies", () => {
+  const rows = [
+    row({
+      stroke_label: "Forehand drive · Save & return",
+      stroke_preset: "forehand_drive",
+      category: "save_return",
+      distance: 0.106,
+    }),
+    row({
+      stroke_label: "Bandeja 1",
+      stroke_preset: "bandeja",
+      category: "overhead",
+      distance: 0.162,
+    }),
+  ];
+  const { neighbors } = rerankTrainNeighbors(rows, { pose_data: [] });
+  assert.equal(neighbors[0]!.stroke_label, "Bandeja 1");
+});
+
 test("serve penalty does not affect forehand return", () => {
   assert.equal(
     isServeLikeSaveReturn(

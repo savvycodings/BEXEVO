@@ -98,7 +98,10 @@ import {
   attachClipLocalContactFrames,
   contactFramesForPrompt,
 } from './yoloContactHints'
-import { summarizeOverheadEvidence } from './overheadPoseEvidence'
+import {
+  summarizeOverheadEvidence,
+  overheadEvidenceFromMetrics,
+} from './overheadPoseEvidence'
 import {
   buildCorrectionFrameInsight,
   orderFrameInsights,
@@ -404,9 +407,13 @@ async function persistTechniqueDetections(
 
 function buildCanonicalShotAnalyzeHint(metrics: Record<string, unknown>): string {
   const r = resolveCanonicalShotFromMetrics(metrics)
-  if (r.source !== 'retrieval_hypothesis') return ''
+  if (r.source !== 'retrieval_hypothesis' && r.source !== 'rerank_neighbor') return ''
   const cat = r.category ? ` — category ${r.category}` : ''
-  return `\nCanonical shot from pro library (k-NN confidence ≥ ${RETRIEVAL_CONFIDENCE_THRESHOLD}): "${r.shotName}"${cat}. Use this for en.shot_context and primary_train_category when consistent with pose.\n`
+  const overhead = overheadEvidenceFromMetrics(metrics)
+  const overheadNote = overhead.supportsOverhead
+    ? ' Overhead pose detected in clip; bandeja/smash/víbora are plausible — do not label as flat serve or generic save_return unless pose clearly shows serve/return from baseline.'
+    : ''
+  return `\nCanonical shot from pro library (k-NN / rerank): "${r.shotName}"${cat}.${overheadNote} Use this for en.shot_context and primary_train_category when consistent with pose. For bandeja use primary_train_category overhead.\n`
 }
 
 function alignAnalyzeShotContextWithRetrieval(
@@ -414,7 +421,9 @@ function alignAnalyzeShotContextWithRetrieval(
   metrics: Record<string, unknown>
 ): boolean {
   const resolved = resolveCanonicalShotFromMetrics(metrics)
-  if (resolved.source !== 'retrieval_hypothesis') return false
+  if (resolved.source !== 'retrieval_hypothesis' && resolved.source !== 'rerank_neighbor') {
+    return false
+  }
   const en = (aiAnalysis.en ?? {}) as Record<string, unknown>
   const es = (aiAnalysis.es ?? {}) as Record<string, unknown>
   aiAnalysis.en = {
@@ -602,6 +611,9 @@ function correctLikelyFalseOverheadShotContext(
   poseData: Array<{ frame?: number; landmarks?: Record<string, { x: number; y: number }> }>
 ) {
   const shotContext = String(aiAnalysis?.en?.shot_context ?? '')
+  if (/\b(bandeja|vibora|víbora)\b/i.test(shotContext)) {
+    return { changed: false as const }
+  }
   const mentionsOverhead = /\b(smash|overhead|remate|x3|x4)\b/i.test(shotContext)
   if (!mentionsOverhead) return { changed: false as const }
 
