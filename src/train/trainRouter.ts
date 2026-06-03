@@ -27,6 +27,7 @@ import {
 } from "../technique/trainRetrieval";
 import { POSE_EMBEDDING_SPEC_VERSION } from "../technique/poseEmbedding";
 import falLoraRouter from "./falLoraRouter";
+import adminAccuracyRouter from "../adminAccuracy/adminAccuracyRouter";
 import { adminStrokeLabelKey } from "./trainShotDisplay";
 import { fal } from "@fal-ai/client";
 
@@ -116,6 +117,7 @@ type TrainViewProfile = "front" | "side" | "behind";
 
 // fal.ai LoRA dataset + training routes (admin header required)
 router.use("/fal-lora", falLoraRouter);
+router.use("/admin/accuracy", adminAccuracyRouter);
 
 /** Allowlists must match `train_*` enums in schema.ts and `app/src/lib/train-taxonomy.ts`. */
 const TRAIN_CATEGORIES = trainCategoryEnum.enumValues;

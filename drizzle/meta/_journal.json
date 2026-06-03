@@ -218,6 +218,13 @@
       "when": 1780000000000,
       "tag": "0030_technique_analysis_overview_view",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1780100000000,
+      "tag": "0031_admin_accuracy_test_run",
+      "breakpoints": true
     }
   ]
 }

@@ -715,6 +715,29 @@ export const falLoraImage = pgTable("fal_lora_image", {
   createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
 
+/** Admin shot-retrieval accuracy checks (clickable tests in Admin UI). */
+export const adminAccuracyTestRun = pgTable(
+  "admin_accuracy_test_run",
+  {
+    id: text("id").primaryKey(),
+    testId: text("testId").notNull(),
+    scorePercent: integer("scorePercent").notNull(),
+    passed: boolean("passed").notNull(),
+    summary: text("summary").notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown> | null>(),
+    triggeredByUserId: text("triggeredByUserId").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("admin_accuracy_test_run_test_created_idx").on(
+      table.testId,
+      table.createdAt
+    ),
+  ]
+);
+
 export const falLoraTrainingRun = pgTable("fal_lora_training_run", {
   id: text("id").primaryKey(),
   datasetId: text("datasetId")
