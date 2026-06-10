@@ -7,6 +7,7 @@ import {
   getGamificationState,
   trackClientQuest,
 } from "./service";
+import { getXpLeaderboard, type LeaderboardScope } from "./leaderboard";
 import { localDateKey } from "./stats";
 
 const router = express.Router();
@@ -22,6 +23,24 @@ async function resolveUserId(req: express.Request): Promise<string | null> {
     return null;
   }
 }
+
+router.get("/leaderboard", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const raw =
+      typeof req.query.scope === "string" ? req.query.scope.trim() : "global";
+    const scope: LeaderboardScope =
+      raw === "country" || raw === "city" || raw === "friends" ? raw : "global";
+
+    const entries = await getXpLeaderboard(userId, scope);
+    return res.json({ scope, entries });
+  } catch (e: unknown) {
+    console.error("[Gamification] leaderboard GET error", e);
+    return res.status(500).json({ error: "Failed to load leaderboard" });
+  }
+});
 
 router.get("/state", async (req, res) => {
   try {
@@ -53,8 +72,20 @@ router.post("/daily-quests/:questKey/claim", async (req, res) => {
       typeof req.body?.dateKey === "string" && req.body.dateKey.trim()
         ? req.body.dateKey.trim()
         : localDateKey();
+    const cadence =
+      req.body?.cadence === "weekly" || req.body?.cadence === "season"
+        ? req.body.cadence
+        : "daily";
+    const periodKey =
+      typeof req.body?.periodKey === "string" && req.body.periodKey.trim()
+        ? req.body.periodKey.trim()
+        : undefined;
 
-    const result = await claimDailyQuest(userId, questKey, dateKey);
+    const result = await claimDailyQuest(userId, questKey, {
+      cadence,
+      periodKey,
+      dateKey,
+    });
     if (!result.ok) {
       return res.status(400).json({ error: result.error });
     }

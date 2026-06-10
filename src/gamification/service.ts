@@ -4,11 +4,14 @@ import { db, userAchievement, userDailyQuest, userGamification } from "../db";
 import { evaluateNewAchievements, unlockAchievements } from "./achievements";
 import {
   CLIENT_TRACKABLE_QUEST_KEYS,
-  getDailyQuestDef,
+  getQuestDef,
   levelFromXp,
   pickDailyQuestKeysForDate,
+  isQuestActiveInPeriod,
+  periodKeyForCadence,
 } from "./definitions";
-import { syncDailyQuestRows, type QuestProgress } from "./dailyQuests";
+import { syncAllQuestRows, type QuestProgress } from "./dailyQuests";
+import type { QuestCadence } from "./questPeriods";
 import {
   loadUserGamificationStats,
   localDateKey,
@@ -26,7 +29,11 @@ export type GamificationState = {
   achievements: { key: string; unlockedAt: string; claimedAt: string }[];
   claimableAchievements: { key: string; earnedAt: string }[];
   dailyQuests: QuestProgress[];
+  weeklyQuests: QuestProgress[];
+  seasonQuests: QuestProgress[];
   dateKey: string;
+  weeklyPeriodKey: string;
+  seasonPeriodKey: string;
   newlyEarnedAchievements: string[];
 };
 
@@ -135,7 +142,11 @@ export async function refreshGamification(
     });
   }
 
-  const dailyQuests = await syncDailyQuestRows(userId, dateKey, stats);
+  const { dailyQuests, weeklyQuests, seasonQuests } = await syncAllQuestRows(
+    userId,
+    dateKey,
+    stats
+  );
   const g = await ensureUserGamification(userId);
   const { level, xpInLevel, xpGoal, tier, totalXp } = levelFromXp(g.totalXp);
 
@@ -164,7 +175,11 @@ export async function refreshGamification(
       earnedAt: a.unlockedAt.toISOString(),
     })),
     dailyQuests,
+    weeklyQuests,
+    seasonQuests,
     dateKey,
+    weeklyPeriodKey: periodKeyForCadence("weekly"),
+    seasonPeriodKey: periodKeyForCadence("season"),
     newlyEarnedAchievements,
   };
 }
@@ -200,8 +215,8 @@ export async function trackClientQuest(
   if (!CLIENT_TRACKABLE_QUEST_KEYS.has(questKey)) return null;
   if (!pickDailyQuestKeysForDate(dateKey).includes(questKey)) return null;
 
-  const def = getDailyQuestDef(questKey);
-  if (!def) return null;
+  const def = getQuestDef(questKey);
+  if (!def || def.cadence !== "daily") return null;
 
   const now = new Date();
   const existing = await db.query.userDailyQuest.findFirst({
@@ -236,22 +251,35 @@ export async function trackClientQuest(
 export async function claimDailyQuest(
   userId: string,
   questKey: string,
-  dateKey: string = localDateKey()
+  opts: {
+    cadence?: QuestCadence;
+    periodKey?: string;
+    dateKey?: string;
+  } = {}
 ): Promise<
   | { ok: true; state: GamificationState; xpAwarded: number }
   | { ok: false; error: string }
 > {
-  if (!pickDailyQuestKeysForDate(dateKey).includes(questKey)) {
-    return { ok: false, error: "Quest is not active today" };
+  const def = getQuestDef(questKey);
+  if (!def) return { ok: false, error: "Unknown quest" };
+
+  const cadence = opts.cadence ?? def.cadence;
+  const todayKey = opts.dateKey ?? localDateKey();
+  const periodKey =
+    opts.periodKey ??
+    (cadence === "daily" ? todayKey : periodKeyForCadence(cadence));
+
+  if (!isQuestActiveInPeriod(questKey, cadence, periodKey)) {
+    return { ok: false, error: "Quest is not active for this period" };
   }
 
-  await refreshGamification(userId, dateKey);
+  await refreshGamification(userId, todayKey);
 
   const row = await db.query.userDailyQuest.findFirst({
     where: (q, { and: _and, eq: _eq }) =>
       _and(
         _eq(q.userId, userId),
-        _eq(q.dateKey, dateKey),
+        _eq(q.dateKey, periodKey),
         _eq(q.questKey, questKey)
       ),
   });
@@ -262,9 +290,6 @@ export async function claimDailyQuest(
     return { ok: false, error: "Quest not complete yet" };
   }
 
-  const def = getDailyQuestDef(questKey);
-  if (!def) return { ok: false, error: "Unknown quest" };
-
   const now = new Date();
   await db
     .update(userDailyQuest)
@@ -274,11 +299,11 @@ export async function claimDailyQuest(
   const xpResult = await awardXp(
     userId,
     def.xp,
-    "daily_quest",
-    `${dateKey}:${questKey}`
+    `${cadence}_quest`,
+    `${periodKey}:${questKey}`
   );
 
-  const state = await refreshGamification(userId, dateKey);
+  const state = await refreshGamification(userId, todayKey);
   return { ok: true, state, xpAwarded: xpResult.awarded ? def.xp : 0 };
 }
 

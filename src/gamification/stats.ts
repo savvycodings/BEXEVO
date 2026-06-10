@@ -48,6 +48,7 @@ export type UserGamificationStats = {
   hasCoachRated100: boolean;
   friendLinkCount: number;
   friendLinkToday: boolean;
+  friendLinkDateKeys: Set<string>;
   loginStreak: number;
   analyses: AnalysisSnapshot[];
   todayAnalyses: AnalysisSnapshot[];
@@ -343,11 +344,13 @@ export async function loadUserGamificationStats(
   const claimedKeys = new Set(
     achievements.filter((a) => a.claimedAt != null).map((a) => a.achievementKey)
   );
+  const friendLinkDateKeys = new Set<string>();
   let friendLinkToday = false;
   for (const link of friendLinks) {
-    if (localDateKey(link.createdAt) === opts.todayKey) {
+    const dk = localDateKey(link.createdAt);
+    friendLinkDateKeys.add(dk);
+    if (dk === opts.todayKey) {
       friendLinkToday = true;
-      break;
     }
   }
 
@@ -368,6 +371,7 @@ export async function loadUserGamificationStats(
     hasCoachRated100,
     friendLinkCount: friendLinks.length,
     friendLinkToday,
+    friendLinkDateKeys,
     loginStreak: opts.loginStreak,
     analyses: analysisSnaps,
     todayAnalyses,
