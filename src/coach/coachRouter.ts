@@ -22,6 +22,7 @@ import {
   storedAiScoreToPercent,
 } from "../technique/techniqueScoreScale";
 import { deriveHumanShotLabelFromMetrics } from "../train/trainShotDisplay";
+import { onCoachReviewCompleted } from "../gamification/service";
 
 const router = express.Router();
 router.use(express.json({ limit: "50mb" }));
@@ -475,6 +476,10 @@ router.post("/review/:id/submit", async (req, res) => {
     } catch (emailErr) {
       console.error("[Coach] coach_review_ready email failed", emailErr);
     }
+
+    void onCoachReviewCompleted(review.studentUserId).catch((err) => {
+      console.error("[Gamification] coach review hook failed", err);
+    });
 
     return res.json({ ok: true });
   } catch (e: any) {

@@ -748,6 +748,94 @@ export const adminAccuracyTestRun = pgTable(
   ]
 );
 
+/** Per-user XP, login streak, and level tracking for achievements / daily quests. */
+export const userGamification = pgTable("user_gamification", {
+  userId: text("userId")
+    .primaryKey()
+    .references(() => user.id, { onDelete: "cascade" }),
+  totalXp: integer("totalXp").notNull().default(0),
+  loginStreak: integer("loginStreak").notNull().default(0),
+  /** Local calendar date `YYYY-MM-DD` of the most recent login streak day. */
+  lastLoginDate: text("lastLoginDate"),
+  /** Last recorded level (for "reach new division" daily quest). */
+  lastLevel: integer("lastLevel").notNull().default(1),
+  /** Level at the start of `dayStartDate` (local calendar day). */
+  dayStartDate: text("dayStartDate"),
+  dayStartLevel: integer("dayStartLevel").notNull().default(1),
+  updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+});
+
+/** Unlocked achievement badges (keys match app `achievementsCatalog`). */
+export const userAchievement = pgTable(
+  "user_achievement",
+  {
+    id: text("id").primaryKey(),
+    userId: text("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    achievementKey: text("achievementKey").notNull(),
+    /** When the user first met the achievement requirements. */
+    unlockedAt: timestamp("unlockedAt").notNull().defaultNow(),
+    /** When the user tapped Claim on the achievement detail screen. */
+    claimedAt: timestamp("claimedAt"),
+  },
+  (table) => [
+    uniqueIndex("user_achievement_user_key_idx").on(
+      table.userId,
+      table.achievementKey
+    ),
+    index("user_achievement_user_idx").on(table.userId),
+  ]
+);
+
+/** Daily quest progress for the user's assigned quests on a calendar day. */
+export const userDailyQuest = pgTable(
+  "user_daily_quest",
+  {
+    id: text("id").primaryKey(),
+    userId: text("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    dateKey: text("dateKey").notNull(),
+    questKey: text("questKey").notNull(),
+    progress: integer("progress").notNull().default(0),
+    goal: integer("goal").notNull().default(1),
+    claimedAt: timestamp("claimedAt"),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("user_daily_quest_user_date_key_idx").on(
+      table.userId,
+      table.dateKey,
+      table.questKey
+    ),
+    index("user_daily_quest_user_date_idx").on(table.userId, table.dateKey),
+  ]
+);
+
+/** XP ledger — deduplicates awards (`source` + `sourceRef` unique per user). */
+export const xpEvent = pgTable(
+  "xp_event",
+  {
+    id: text("id").primaryKey(),
+    userId: text("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    amount: integer("amount").notNull(),
+    source: text("source").notNull(),
+    sourceRef: text("sourceRef").notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("xp_event_user_source_ref_idx").on(
+      table.userId,
+      table.source,
+      table.sourceRef
+    ),
+    index("xp_event_user_idx").on(table.userId),
+  ]
+);
+
 export const falLoraTrainingRun = pgTable("fal_lora_training_run", {
   id: text("id").primaryKey(),
   datasetId: text("datasetId")

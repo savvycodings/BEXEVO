@@ -52,6 +52,7 @@ import {
   parseJsonFromLlmContent,
 } from '../lib/llmResponse'
 import { createAnalyzeTimer, slimMetricsForFailedPersist } from '../lib/analyzeTimings'
+import { onAnalysisCompleted, onVideoUploaded } from '../gamification/service'
 import {
   calibrateTechniqueScore,
   calibrateTechniqueScoreV61,
@@ -718,6 +719,9 @@ router.post('/upload', upload.single('video'), async (req, res) => {
       coachReviewCreated,
     }
     console.log('[Technique] Sending success response')
+    void onVideoUploaded(userId).catch((err) => {
+      console.error('[Gamification] upload hook failed', err)
+    })
     return res.json(payload)
   } catch (e: any) {
     console.error('[Technique] Upload error:', e)
@@ -1651,6 +1655,11 @@ Rules:
     })
 
     console.log('[Technique] Analysis row updated, id:', analysisId)
+    if (aiAnalysis) {
+      void onAnalysisCompleted(userId).catch((err) => {
+        console.error('[Gamification] analysis hook failed', err)
+      })
+    }
     timer.summary()
     return res.json({ analysisId })
   } catch (e: any) {

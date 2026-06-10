@@ -21,10 +21,13 @@ import {
   storedAiBreakdownToPercent,
   storedAiScoreToPercent,
 } from "../technique/techniqueScoreScale";
+import gamificationRouter from "../gamification/gamificationRouter";
+import { onFriendLinked } from "../gamification/service";
 
 const router = express.Router();
 router.use(express.json());
 router.use(express.urlencoded({ extended: true }));
+router.use("/gamification", gamificationRouter);
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024 },
@@ -815,6 +818,10 @@ router.post("/coach-students", async (req, res) => {
     if (studentRole !== "coach") {
       await setCoachStudentRole(studentUserId, "student");
     }
+
+    void onFriendLinked(studentUserId).catch((err) => {
+      console.error("[Gamification] friend link hook failed", err);
+    });
 
     return res.json({ ok: true });
   } catch (e: any) {
