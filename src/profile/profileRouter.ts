@@ -169,8 +169,12 @@ function scorePercentFromTechniqueMetrics(metrics: unknown): number | null {
 /** Profile + coach roster: per-train-category averages from technique_analysis (retrieval shot category). */
 router.get("/rating-by-category", async (req, res) => {
   try {
-    const userId = await resolveUserId(req);
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const requesterId = await resolveUserId(req);
+    if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
+
+    const rawTarget =
+      typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+    const userId = rawTarget || requesterId;
 
     const { thisWeekStart, nextWeekStart, prevWeekStart } = utcMondayWeekBounds();
 
@@ -277,6 +281,100 @@ router.get("/rating-by-category", async (req, res) => {
   } catch (e: any) {
     console.error("[Profile] rating-by-category GET error", e);
     return res.status(500).json({ error: "Failed to load rating by category" });
+  }
+});
+
+const BIRTH_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+function formatBirthDisplay(iso: string | null | undefined): string | null {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const [y, m, d] = iso.split("-").map(Number);
+  const month = BIRTH_MONTHS[m - 1];
+  if (!month || !Number.isFinite(d) || !Number.isFinite(y)) return null;
+  return `${d} ${month} ${y}`;
+}
+
+function playerHeadline(profile: {
+  hasRanking?: boolean | null;
+  rankingOrg?: string | null;
+  rankingValue?: string | null;
+  level?: string | null;
+} | null): string {
+  if (profile?.hasRanking && profile.rankingOrg && profile.rankingValue) {
+    return `${profile.rankingOrg} · ${profile.rankingValue}`;
+  }
+  if (profile?.level?.trim()) return profile.level.trim();
+  return "Player";
+}
+
+router.get("/users/:userId/public", async (req, res) => {
+  try {
+    const requesterId = await resolveUserId(req);
+    if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
+
+    const targetId = String(req.params.userId || "").trim();
+    if (!targetId) return res.status(400).json({ error: "Missing user id" });
+
+    const userRow = await db.query.user.findFirst({
+      where: (u, { eq: _eq }) => _eq(u.id, targetId),
+    });
+    if (!userRow) return res.status(404).json({ error: "User not found" });
+
+    const profile = await db.query.userProfile.findFirst({
+      where: (p, { eq: _eq }) => _eq(p.userId, targetId),
+    });
+
+    const gamification = await db.query.userGamification.findFirst({
+      where: (g, { eq: _eq }) => _eq(g.userId, targetId),
+    });
+
+    return res.json({
+      user: {
+        id: userRow.id,
+        name: userRow.name,
+        image: userRow.image ?? null,
+      },
+      profile: profile
+        ? {
+            username: profile.username ?? null,
+            areaLocation: profile.areaLocation ?? null,
+            birthDate: profile.birthDate ?? null,
+            birthDisplay: formatBirthDisplay(profile.birthDate),
+            level: profile.level ?? null,
+            rankingOrg: profile.rankingOrg ?? null,
+            rankingValue: profile.rankingValue ?? null,
+            hasRanking: profile.hasRanking ?? null,
+            headline: playerHeadline(profile),
+          }
+        : {
+            username: null,
+            areaLocation: null,
+            birthDate: null,
+            birthDisplay: null,
+            level: null,
+            rankingOrg: null,
+            rankingValue: null,
+            hasRanking: null,
+            headline: "Player",
+          },
+      totalXp: gamification?.totalXp ?? 0,
+    });
+  } catch (e: unknown) {
+    console.error("[Profile] public user GET error", e);
+    return res.status(500).json({ error: "Failed to load player profile" });
   }
 });
 
