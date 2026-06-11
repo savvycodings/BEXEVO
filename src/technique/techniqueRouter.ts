@@ -761,6 +761,43 @@ router.get('/video/:id', async (req, res) => {
   }
 })
 
+/** Recent technique videos for any user (leaderboard / public player profile gallery). */
+router.get('/users/:userId/recent-videos', async (req, res) => {
+  try {
+    const requesterId = await resolveUserId(req)
+    if (!requesterId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const targetUserId = String(req.params.userId || '').trim()
+    if (!targetUserId) {
+      return res.status(400).json({ error: 'Missing user id' })
+    }
+
+    const rawLimit = parseInt(String(req.query.limit ?? '5'), 10)
+    const limit = Math.min(10, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 5))
+
+    const analyses = await db
+      .select()
+      .from(techniqueAnalysis)
+      .where(eq(techniqueAnalysis.userId, targetUserId))
+      .orderBy(desc(techniqueAnalysis.createdAt))
+      .limit(limit)
+
+    const items = analyses.map((a) => ({
+      analysisId: a.id,
+      techniqueVideoId: a.techniqueVideoId,
+      createdAt: a.createdAt.toISOString(),
+      videoPath: `/technique/video/${a.techniqueVideoId}`,
+    }))
+
+    return res.json({ items })
+  } catch (e: any) {
+    console.error('[Technique] Recent videos error:', e)
+    return res.status(500).json({ error: e.message || 'Failed to load recent videos' })
+  }
+})
+
 /** List technique analyses for the signed-in user (for Activities calendar). */
 router.get('/activities', async (req, res) => {
   try {
