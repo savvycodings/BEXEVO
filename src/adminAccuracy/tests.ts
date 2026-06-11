@@ -13,6 +13,8 @@ import {
   hasYoloContacts,
   hypothesisMatchesTopNeighbor,
   impactFrameSource,
+  meshDebugSample,
+  meshEnrichmentUsed,
   retrievalFromMetrics,
   shotHypothesis,
   topNeighbor,
@@ -82,6 +84,11 @@ export const ACCURACY_TEST_CATALOG: AccuracyTestDefinition[] = [
     title: "Conf / gap OK",
     description: "Strong vote or clear neighbor distance gap (not ambiguous).",
   },
+  {
+    id: "mesh_enrichment",
+    title: "Mesh on impact",
+    description: "Impact-frame pose_enrichment present (SAM or mesh proxy).",
+  },
 ];
 
 const catalogById = new Map(ACCURACY_TEST_CATALOG.map((t) => [t.id, t]));
@@ -110,6 +117,8 @@ export async function runAccuracyTest(testId: string): Promise<TestRunResult> {
       return runTrainCoverage();
     case "confidence_healthy":
       return runConfidenceHealthy();
+    case "mesh_enrichment":
+      return runMeshEnrichment();
     default:
       throw new Error(`Unknown test: ${testId}`);
   }
@@ -126,15 +135,23 @@ async function runRecentUploads(): Promise<TestRunResult> {
   };
 }
 
+function withMeshDebug(
+  id: string,
+  metrics: Record<string, unknown> | null | undefined,
+  extra: Record<string, unknown>
+) {
+  return { id, ...meshDebugSample(metrics), ...extra };
+}
+
 async function runEmbeddingReady(): Promise<TestRunResult> {
   const rows = await fetchRecentCompletedAnalyses(RECENT_ANALYSIS_LIMIT);
   let ok = 0;
-  const samples: { id: string; ok: boolean }[] = [];
+  const samples: Record<string, unknown>[] = [];
   for (const row of rows) {
     const r = retrievalFromMetrics(row.metrics);
     const good = r?.query_embedding_ok === true;
     if (good) ok += 1;
-    samples.push({ id: row.id, ok: good });
+    samples.push(withMeshDebug(row.id, row.metrics, { ok: good }));
   }
   return buildTestRun(ok, rows.length, "No completed analyses", {
     samples: samples.slice(0, 8),
@@ -144,16 +161,17 @@ async function runEmbeddingReady(): Promise<TestRunResult> {
 async function runLibraryMatch(): Promise<TestRunResult> {
   const rows = await fetchRecentCompletedAnalyses(RECENT_ANALYSIS_LIMIT);
   let ok = 0;
-  const samples: { id: string; neighbor: string | null; distance: number | null }[] = [];
+  const samples: Record<string, unknown>[] = [];
   for (const row of rows) {
     const n = topNeighbor(row.metrics);
     const has = !!n && typeof n.stroke_label === "string";
     if (has) ok += 1;
-    samples.push({
-      id: row.id,
-      neighbor: has ? String(n.stroke_label) : null,
-      distance: typeof n?.distance === "number" ? n.distance : null,
-    });
+    samples.push(
+      withMeshDebug(row.id, row.metrics, {
+        neighbor: has ? String(n.stroke_label) : null,
+        distance: typeof n?.distance === "number" ? n.distance : null,
+      })
+    );
   }
   return buildTestRun(ok, rows.length, "No completed analyses", {
     samples: samples.slice(0, 8),
@@ -270,10 +288,24 @@ async function runTrainCoverage(): Promise<TestRunResult> {
   });
 }
 
+async function runMeshEnrichment(): Promise<TestRunResult> {
+  const rows = await fetchRecentCompletedAnalyses(RECENT_ANALYSIS_LIMIT);
+  let ok = 0;
+  const samples: Record<string, unknown>[] = [];
+  for (const row of rows) {
+    const used = meshEnrichmentUsed(row.metrics);
+    if (used) ok += 1;
+    samples.push(withMeshDebug(row.id, row.metrics, { mesh_enriched: used }));
+  }
+  return buildTestRun(ok, rows.length, "No completed analyses", {
+    samples: samples.slice(0, 8),
+  });
+}
+
 async function runConfidenceHealthy(): Promise<TestRunResult> {
   const rows = await fetchRecentCompletedAnalyses(RECENT_ANALYSIS_LIMIT);
   let ok = 0;
-  const samples: { id: string; confidence: number; gap: number | null; healthy: boolean }[] = [];
+  const samples: Record<string, unknown>[] = [];
   for (const row of rows) {
     const hyp = shotHypothesis(row.metrics);
     const conf = typeof hyp?.confidence === "number" ? hyp.confidence : 0;
@@ -299,7 +331,7 @@ async function runConfidenceHealthy(): Promise<TestRunResult> {
       (conf >= RETRIEVAL_CONFIDENCE_THRESHOLD ||
         (gap != null && gap >= NEIGHBOR_DISTANCE_GAP_MIN));
     if (healthy) ok += 1;
-    samples.push({ id: row.id, confidence: conf, gap, healthy });
+    samples.push(withMeshDebug(row.id, row.metrics, { confidence: conf, gap, healthy }));
   }
   return buildTestRun(ok, rows.length, "No completed analyses", {
     samples: samples.slice(0, 8),

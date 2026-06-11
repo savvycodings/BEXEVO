@@ -100,10 +100,6 @@ import {
   contactFramesForPrompt,
 } from './yoloContactHints'
 import {
-  summarizeOverheadEvidence,
-  overheadEvidenceFromMetrics,
-} from './overheadPoseEvidence'
-import {
   buildCorrectionFrameInsight,
   orderFrameInsights,
 } from './correctionFrameInsights'
@@ -408,13 +404,9 @@ async function persistTechniqueDetections(
 
 function buildCanonicalShotAnalyzeHint(metrics: Record<string, unknown>): string {
   const r = resolveCanonicalShotFromMetrics(metrics)
-  if (r.source !== 'retrieval_hypothesis' && r.source !== 'rerank_neighbor') return ''
+  if (r.source !== 'retrieval_hypothesis') return ''
   const cat = r.category ? ` — category ${r.category}` : ''
-  const overhead = overheadEvidenceFromMetrics(metrics)
-  const overheadNote = overhead.supportsOverhead
-    ? ' Overhead pose detected in clip; bandeja/smash/víbora are plausible — do not label as flat serve or generic save_return unless pose clearly shows serve/return from baseline.'
-    : ''
-  return `\nCanonical shot from pro library (k-NN / rerank): "${r.shotName}"${cat}.${overheadNote} Use this for en.shot_context and primary_train_category when consistent with pose. For bandeja use primary_train_category overhead.\n`
+  return `\nCanonical shot from pro library (k-NN): "${r.shotName}"${cat}. Use this for en.shot_context and primary_train_category when consistent with pose.\n`
 }
 
 function alignAnalyzeShotContextWithRetrieval(
@@ -422,7 +414,7 @@ function alignAnalyzeShotContextWithRetrieval(
   metrics: Record<string, unknown>
 ): boolean {
   const resolved = resolveCanonicalShotFromMetrics(metrics)
-  if (resolved.source !== 'retrieval_hypothesis' && resolved.source !== 'rerank_neighbor') {
+  if (resolved.source !== 'retrieval_hypothesis') {
     return false
   }
   const en = (aiAnalysis.en ?? {}) as Record<string, unknown>
@@ -605,31 +597,6 @@ async function resolveUserId(req: express.Request): Promise<string | null> {
 
   console.log('[Technique] Guest fallback: bearer token not found in session table')
   return ensureGuestUser()
-}
-
-function correctLikelyFalseOverheadShotContext(
-  aiAnalysis: any,
-  poseData: Array<{ frame?: number; landmarks?: Record<string, { x: number; y: number }> }>
-) {
-  const shotContext = String(aiAnalysis?.en?.shot_context ?? '')
-  if (/\b(bandeja|vibora|víbora)\b/i.test(shotContext)) {
-    return { changed: false as const }
-  }
-  const mentionsOverhead = /\b(smash|overhead|remate|x3|x4)\b/i.test(shotContext)
-  if (!mentionsOverhead) return { changed: false as const }
-
-  const evidence = summarizeOverheadEvidence(poseData)
-  if (evidence.supportsOverhead) return { changed: false as const, ...evidence }
-
-  if (!aiAnalysis.en || typeof aiAnalysis.en !== 'object') aiAnalysis.en = {}
-  if (!aiAnalysis.es || typeof aiAnalysis.es !== 'object') aiAnalysis.es = {}
-
-  aiAnalysis.en.shot_context =
-    'Likely not an overhead smash. Your movement in this clip looks closer to a groundstroke or volley pattern.'
-  aiAnalysis.es.shot_context =
-    'Probablemente no es un smash por arriba. Tu movimiento en este clip se parece mas a un golpe de fondo o una volea.'
-
-  return { changed: true as const, ...evidence }
 }
 
 router.post('/upload', upload.single('video'), async (req, res) => {
@@ -1486,18 +1453,6 @@ Rules:
         aiAnalysis = parseJsonFromLlmContent(content, {
           label: llmLabel,
         })
-      }
-
-      if (aiAnalysis && Array.isArray(metrics?.pose_data)) {
-        const shotFix = correctLikelyFalseOverheadShotContext(aiAnalysis, metrics.pose_data)
-        if (shotFix.changed) {
-          console.log('[Technique] Corrected likely false overhead shot label', {
-            analysisId,
-            overheadConfidence: shotFix.confidence,
-            overheadFrames: shotFix.overheadFrames,
-            validFrames: shotFix.validFrames,
-          })
-        }
       }
 
       if (aiAnalysis) {

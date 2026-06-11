@@ -1,5 +1,10 @@
 import { resolveCanonicalShotFromMetrics } from "../train/trainShotDisplay";
 import { labelsMatch } from "./scoring";
+import {
+  meshConfidenceFromMetrics,
+  meshUsedFromMetrics,
+  parsePoseEnrichment,
+} from "../technique/meshEmbedding";
 
 export function retrievalFromMetrics(metrics: Record<string, unknown> | null | undefined) {
   const r = metrics?.retrieval;
@@ -73,4 +78,30 @@ export function correctionMatchesDisplay(metrics: Record<string, unknown> | null
   const corr = correctionShotName(metrics);
   if (!corr) return false;
   return labelsMatch(corr, canonicalDisplayShot(metrics));
+}
+
+export function meshEnrichmentUsed(metrics: Record<string, unknown> | null | undefined): boolean {
+  return meshUsedFromMetrics(metrics);
+}
+
+export function embeddingSource(metrics: Record<string, unknown> | null | undefined): string | null {
+  const r = retrievalFromMetrics(metrics);
+  const src = r?.embedding_source;
+  return typeof src === "string" ? src : null;
+}
+
+export function meshDebugSample(metrics: Record<string, unknown> | null | undefined) {
+  const pe = parsePoseEnrichment(metrics);
+  const impact =
+    typeof metrics?.impact_frame_resolved === "number"
+      ? metrics.impact_frame_resolved
+      : undefined;
+  return {
+    mesh_used: meshEnrichmentUsed(metrics),
+    embedding_source: embeddingSource(metrics),
+    mesh_confidence: meshConfidenceFromMetrics(metrics, impact),
+    mesh_trigger: pe?.trigger ?? null,
+    sam_model_loaded: pe?.sam_model_loaded ?? null,
+    mesh_frame_count: Array.isArray(pe?.frames) ? pe.frames.length : 0,
+  };
 }

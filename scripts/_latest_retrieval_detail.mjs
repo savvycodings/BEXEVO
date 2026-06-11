@@ -34,7 +34,10 @@ async function main() {
     impact_frame: m.impact_pose_sequence?.find((p) => p.phase === "impact")?.frame ?? null,
     user_clips: m.user_clips ?? null,
     yolo_contacts: m.yolo_summary?.contact_window_frames?.slice?.(0, 12) ?? null,
-    rerank: r.rerank ?? null,
+    embedding_source: r.embedding_source ?? null,
+    mesh_used: r.mesh_used ?? null,
+    mesh_confidence: r.mesh_confidence ?? null,
+    pose_enrichment_frames: m.pose_enrichment?.frames?.length ?? 0,
     top_neighbors: (r.neighbors ?? []).slice(0, 8).map((n) => ({
       stroke_label: n.stroke_label,
       stroke_preset: n.stroke_preset,

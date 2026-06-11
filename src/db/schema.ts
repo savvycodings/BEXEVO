@@ -103,18 +103,12 @@ export type TechniqueRetrievalResult = {
   };
   /** Distance gap between #1 and #2 neighbor (cosine distance); debug / low-conf gating */
   neighbor_distance_gap?: number | null;
-  /** Bandeja / overhead rerank debug (post-rerank distances in neighbors) */
-  rerank?: {
-    applied: boolean;
-    supports_overhead: boolean;
-    bandeja_contention: boolean;
-    bandeja_bonus: number;
-    serve_penalty: number;
-    top_raw_distance: number | null;
-    top_effective_distance: number | null;
-  };
   /** Set when pgvector/table missing or query failed */
   error?: string;
+  /** mediapipe_v2 | sam_v1 | blended — which vector drove k-NN query */
+  embedding_source?: "mediapipe_v2" | "sam_v1" | "blended";
+  mesh_used?: boolean;
+  mesh_confidence?: number | null;
 };
 
 export type TechniqueDetectionLabel = "sports_ball" | "racket";
@@ -482,7 +476,6 @@ export const trainSampleEmbedding = pgTable(
     id: text("id").primaryKey(),
     trainSampleId: text("trainSampleId")
       .notNull()
-      .unique()
       .references(() => trainSample.id, { onDelete: "cascade" }),
     specVersion: text("specVersion").notNull(),
     embedding: vector("embedding", { dimensions: 128 }).notNull(),
@@ -492,6 +485,10 @@ export const trainSampleEmbedding = pgTable(
     index("train_sample_embedding_hnsw_idx").using(
       "hnsw",
       table.embedding.op("vector_cosine_ops")
+    ),
+    uniqueIndex("train_sample_embedding_sample_spec_unique").on(
+      table.trainSampleId,
+      table.specVersion
     ),
   ]
 );

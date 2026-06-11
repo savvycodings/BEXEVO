@@ -125,7 +125,7 @@ test("resolveCanonicalShotFromMetrics category fallback only when top label unus
   assert.equal(r.shotName, "Net Play");
 });
 
-test("resolveCanonicalShotFromMetrics uses rerank top bandeja over Save Return fallback", () => {
+test("resolveCanonicalShotFromMetrics uses raw top neighbor without rerank nudges", () => {
   const r = resolveCanonicalShotFromMetrics({
     retrieval: {
       shot_hypothesis: {
@@ -134,7 +134,6 @@ test("resolveCanonicalShotFromMetrics uses rerank top bandeja over Save Return f
         category: "save_return",
       },
       neighbor_distance_gap: 0,
-      rerank: { applied: true, supports_overhead: true },
       neighbors: [
         {
           stroke_label: "Bandeja 1",
@@ -152,8 +151,7 @@ test("resolveCanonicalShotFromMetrics uses rerank top bandeja over Save Return f
     },
   });
   assert.equal(r.shotName, "Bandeja 1");
-  assert.equal(r.source, "rerank_neighbor");
-  assert.equal(r.category, "overhead");
+  assert.equal(r.source, "neighbor");
 });
 
 test("deriveHumanShotLabelFromMetrics uses neighbor when hypothesis confidence low", () => {

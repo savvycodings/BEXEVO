@@ -9,6 +9,11 @@ import {
   POSE_EMBEDDING_SPEC_VERSION,
 } from "./poseEmbedding";
 import {
+  MESH_EMBEDDING_SPEC_VERSION,
+  resolveRetrievalEmbedding,
+  embedTrainMeshFromExtractionMeta,
+} from "./meshEmbedding";
+import {
   adminStrokeLabelKey,
   RETRIEVAL_CONFIDENCE_THRESHOLD,
 } from "../train/trainShotDisplay";
@@ -17,8 +22,6 @@ import {
   filterTrainNeighborsForRetrieval,
   type TrainNeighborCandidate,
 } from "./trainRetrievalHygiene";
-import { rerankTrainNeighbors } from "./trainRetrievalRerank";
-
 export { buildShotHypothesis } from "./shotHypothesis";
 
 export type NeighborRow = {
@@ -46,7 +49,6 @@ export function formatRetrievalForPrompt(r: TechniqueRetrievalResult | undefined
   }
   const payload = {
     shot_hypothesis: r.shot_hypothesis,
-    rerank: r.rerank ?? null,
     neighbors: r.neighbors.slice(0, 6).map((n) => ({
       stroke_label: n.stroke_label,
       stroke_name: n.stroke_name,
@@ -61,7 +63,6 @@ Pro reference similarity (pose embedding ${r.spec_version}; lower distance = clo
 ${JSON.stringify(payload, null, 2)}
 
 When shot_hypothesis.confidence is at least ${RETRIEVAL_CONFIDENCE_THRESHOLD}, treat shot_hypothesis.stroke_label (admin trained shot name from the pro library) and category as the primary shot classification. Do not let stroke_preset override stroke_label — preset is legacy taxonomy metadata only.
-If rerank.applied is true, neighbors are re-ordered for overhead/bandeja — prefer neighbors[0].stroke_label (especially bandeja or overhead category) over save_return serve labels when pose shows an overhead arc.
 Otherwise infer the shot from the pose sequence below.
 `;
 }
@@ -90,7 +91,12 @@ export async function indexTrainSampleEmbeddingIfReady(trainSampleId: string): P
       return;
     }
     try {
-      await upsertTrainSampleEmbedding(row.id, vec);
+      await upsertTrainSampleEmbedding(row.id, vec, POSE_EMBEDDING_SPEC_VERSION);
+      const meta = row.extractionMeta as Record<string, unknown> | null | undefined;
+      const meshVec = embedTrainMeshFromExtractionMeta(meta ?? null);
+      if (meshVec) {
+        await upsertTrainSampleEmbedding(row.id, meshVec, MESH_EMBEDDING_SPEC_VERSION);
+      }
       console.log("[TrainRetrieval] auto-indexed embedding for train_sample", { trainSampleId });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -112,24 +118,25 @@ export async function indexTrainSampleEmbeddingIfReady(trainSampleId: string): P
 
 export async function upsertTrainSampleEmbedding(
   trainSampleId: string,
-  vector: number[]
+  vector: number[],
+  specVersion: string = POSE_EMBEDDING_SPEC_VERSION
 ): Promise<void> {
   const id = randomUUID();
   const literal = formatVectorSqlLiteral(vector);
   await pool.query(
     `INSERT INTO train_sample_embedding (id, "trainSampleId", "specVersion", embedding)
      VALUES ($1, $2, $3, $4::vector)
-     ON CONFLICT ("trainSampleId") DO UPDATE SET
-       "specVersion" = EXCLUDED."specVersion",
+     ON CONFLICT ("trainSampleId", "specVersion") DO UPDATE SET
        embedding = EXCLUDED.embedding,
        "createdAt" = NOW()`,
-    [id, trainSampleId, POSE_EMBEDDING_SPEC_VERSION, literal]
+    [id, trainSampleId, specVersion, literal]
   );
 }
 
 async function queryFilteredTrainCandidates(
   queryVector: number[],
-  k: number
+  k: number,
+  specVersion: string = POSE_EMBEDDING_SPEC_VERSION
 ): Promise<TrainNeighborCandidate[]> {
   const literal = formatVectorSqlLiteral(queryVector);
   const fetchLimit = Math.max(k * 6, 36);
@@ -161,7 +168,7 @@ async function queryFilteredTrainCandidates(
       AND tse."specVersion" = $4
     ORDER BY tse.embedding <=> $1::vector
     LIMIT $3`,
-    [literal, "completed", fetchLimit, POSE_EMBEDDING_SPEC_VERSION]
+    [literal, "completed", fetchLimit, specVersion]
   );
 
   const mapped: TrainNeighborCandidate[] = rows.map((r) => {
@@ -185,15 +192,11 @@ async function queryFilteredTrainCandidates(
 export async function findNearestTrainNeighbors(
   queryVector: number[],
   k: number,
-  metrics?: Record<string, unknown> | null
+  metrics?: Record<string, unknown> | null,
+  specVersion: string = POSE_EMBEDDING_SPEC_VERSION
 ): Promise<NeighborRow[]> {
-  const filtered = await queryFilteredTrainCandidates(queryVector, k);
-  const metricsObj =
-    metrics && typeof metrics === "object" ? metrics : null;
-  const { neighbors: reranked } = rerankTrainNeighbors(filtered, metricsObj);
-  return reranked
-    .slice(0, k)
-    .map(({ extraction_meta: _em, raw_distance: _rd, ...rest }) => rest);
+  const filtered = await queryFilteredTrainCandidates(queryVector, k, specVersion);
+  return filtered.slice(0, k);
 }
 
 /** Run after migrations; safe to call repeatedly (upserts). */
@@ -201,6 +204,8 @@ export async function runTrainEmbeddingBackfill(): Promise<{
   processed: number;
   skipped: number;
   errors: number;
+  samProcessed: number;
+  samSkipped: number;
 }> {
   const rows = await db.query.trainSample.findMany({
     where: (ts, { eq: _eq }) => _eq(ts.status, "completed"),
@@ -210,23 +215,40 @@ export async function runTrainEmbeddingBackfill(): Promise<{
   let skipped = 0;
   let errors = 0;
 
+  let samProcessed = 0;
+  let samSkipped = 0;
+
   for (const row of rows) {
     const seq = row.poseSequence as unknown;
     const vec = embedTrainPoseSequence(Array.isArray(seq) ? seq : null);
     if (!vec) {
       skipped++;
-      continue;
+    } else {
+      try {
+        await upsertTrainSampleEmbedding(row.id, vec, POSE_EMBEDDING_SPEC_VERSION);
+        processed++;
+      } catch (e) {
+        console.error("[TrainRetrieval] backfill row failed", row.id, e);
+        errors++;
+      }
     }
-    try {
-      await upsertTrainSampleEmbedding(row.id, vec);
-      processed++;
-    } catch (e) {
-      console.error("[TrainRetrieval] backfill row failed", row.id, e);
-      errors++;
+
+    const meta = row.extractionMeta as Record<string, unknown> | null | undefined;
+    const meshVec = embedTrainMeshFromExtractionMeta(meta ?? null);
+    if (!meshVec) {
+      samSkipped++;
+    } else {
+      try {
+        await upsertTrainSampleEmbedding(row.id, meshVec, MESH_EMBEDDING_SPEC_VERSION);
+        samProcessed++;
+      } catch (e) {
+        console.error("[TrainRetrieval] sam_v1 backfill row failed", row.id, e);
+        errors++;
+      }
     }
   }
 
-  return { processed, skipped, errors };
+  return { processed, skipped, errors, samProcessed, samSkipped };
 }
 
 export async function retrieveForTechniqueMetrics(
@@ -247,9 +269,9 @@ export async function retrieveForTechniqueMetrics(
     },
   };
 
-  let query: number[] | null;
+  let mediapipeQuery: number[] | null;
   try {
-    query = embedPoseForProRetrieval(metrics);
+    mediapipeQuery = embedPoseForProRetrieval(metrics);
   } catch (e) {
     console.warn("[TrainRetrieval] embedPoseForProRetrieval failed", e);
     return {
@@ -259,7 +281,19 @@ export async function retrieveForTechniqueMetrics(
     };
   }
 
-  if (!query) {
+  const metricsRecord =
+    metrics && typeof metrics === "object"
+      ? (metrics as Record<string, unknown>)
+      : null;
+  const resolved = resolveRetrievalEmbedding(
+    metricsRecord,
+    mediapipeQuery,
+    typeof metricsRecord?.impact_frame_resolved === "number"
+      ? metricsRecord.impact_frame_resolved
+      : undefined
+  );
+
+  if (!resolved) {
     return {
       ...base,
       query_embedding_ok: false,
@@ -267,19 +301,24 @@ export async function retrieveForTechniqueMetrics(
     };
   }
 
+  const query = resolved.vector;
+  const querySpec = resolved.query_spec_version;
+
   try {
-    const metricsRecord =
-      metrics && typeof metrics === "object"
-        ? (metrics as Record<string, unknown>)
-        : null;
-    const filtered = await queryFilteredTrainCandidates(query, k);
-    const { neighbors: reranked, rerank } = rerankTrainNeighbors(
-      filtered,
-      metricsRecord
-    );
-    const neighbors = reranked
-      .slice(0, k)
-      .map(({ extraction_meta: _em, raw_distance: _rd, ...rest }) => rest);
+    let filtered = await queryFilteredTrainCandidates(query, k, querySpec);
+    let effectiveSpec = querySpec;
+    let effectiveSource = resolved.embedding_source;
+    if (
+      filtered.length === 0 &&
+      querySpec === MESH_EMBEDDING_SPEC_VERSION &&
+      mediapipeQuery
+    ) {
+      console.log("[TrainRetrieval] no sam_v1 library neighbors — fallback to mediapipe_v2");
+      filtered = await queryFilteredTrainCandidates(mediapipeQuery, k, POSE_EMBEDDING_SPEC_VERSION);
+      effectiveSpec = POSE_EMBEDDING_SPEC_VERSION;
+      effectiveSource = "mediapipe_v2";
+    }
+    const neighbors = filtered.slice(0, k);
 
     if (neighbors.length === 0) {
       console.log(
@@ -292,7 +331,7 @@ export async function retrieveForTechniqueMetrics(
         : null;
 
     return {
-      spec_version: POSE_EMBEDDING_SPEC_VERSION,
+      spec_version: effectiveSpec,
       embedding_dim: POSE_EMBEDDING_DIM,
       query_embedding_ok: true,
       neighbors: neighbors.map((n) => ({
@@ -307,7 +346,9 @@ export async function retrieveForTechniqueMetrics(
       })),
       shot_hypothesis: buildShotHypothesis(neighbors),
       neighbor_distance_gap,
-      rerank,
+      embedding_source: effectiveSource,
+      mesh_used: resolved.mesh_used,
+      mesh_confidence: resolved.mesh_confidence,
     };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
