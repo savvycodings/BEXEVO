@@ -136,7 +136,8 @@ export async function upsertTrainSampleEmbedding(
 async function queryFilteredTrainCandidates(
   queryVector: number[],
   k: number,
-  specVersion: string = POSE_EMBEDDING_SPEC_VERSION
+  specVersion: string = POSE_EMBEDDING_SPEC_VERSION,
+  excludeTrainSampleId?: string
 ): Promise<TrainNeighborCandidate[]> {
   const literal = formatVectorSqlLiteral(queryVector);
   const fetchLimit = Math.max(k * 6, 36);
@@ -166,9 +167,10 @@ async function queryFilteredTrainCandidates(
     INNER JOIN train_video tv ON tv.id = ts."trainVideoId"
     WHERE ts.status = $2
       AND tse."specVersion" = $4
+      AND ($5::text IS NULL OR ts.id != $5)
     ORDER BY tse.embedding <=> $1::vector
     LIMIT $3`,
-    [literal, "completed", fetchLimit, specVersion]
+    [literal, "completed", fetchLimit, specVersion, excludeTrainSampleId ?? null]
   );
 
   const mapped: TrainNeighborCandidate[] = rows.map((r) => {
@@ -193,9 +195,15 @@ export async function findNearestTrainNeighbors(
   queryVector: number[],
   k: number,
   metrics?: Record<string, unknown> | null,
-  specVersion: string = POSE_EMBEDDING_SPEC_VERSION
+  specVersion: string = POSE_EMBEDDING_SPEC_VERSION,
+  excludeTrainSampleId?: string
 ): Promise<NeighborRow[]> {
-  const filtered = await queryFilteredTrainCandidates(queryVector, k, specVersion);
+  const filtered = await queryFilteredTrainCandidates(
+    queryVector,
+    k,
+    specVersion,
+    excludeTrainSampleId
+  );
   return filtered.slice(0, k);
 }
 

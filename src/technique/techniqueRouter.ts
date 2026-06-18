@@ -81,6 +81,7 @@ import {
   proReferenceFrameCandidates,
   proTimelineRatioForUserFrame,
 } from './trainRetrieval'
+import { attachEvalToMetrics } from '../adminAccuracy/evalSnapshot'
 import {
   downsamplePoseFramesForPrompt,
   MAX_POSE_FRAMES_IN_GPT_PROMPT,
@@ -1606,26 +1607,32 @@ Rules:
       feedbackText = 'AI analysis failed; only pose metrics are available.'
     }
 
-    const combinedMetrics =
+    const combinedMetricsRaw =
       aiAnalysis != null ? { ...metrics, ai_analysis: aiAnalysis } : metrics
+    const combinedMetrics = attachEvalToMetrics(
+      combinedMetricsRaw as Record<string, unknown>,
+      aiAnalysis as Record<string, unknown> | null
+    )
     const metricsForDb =
       aiAnalysis != null
         ? combinedMetrics
-        : slimMetricsForFailedPersist(combinedMetrics as Record<string, unknown>)
+        : slimMetricsForFailedPersist(combinedMetrics)
 
+    const cm = combinedMetrics as Record<string, unknown>
+    const aiSnap = cm.ai_analysis as Record<string, unknown> | undefined
+    const retSnap = cm.retrieval as Record<string, unknown> | undefined
+    const hypSnap = retSnap?.shot_hypothesis as Record<string, unknown> | undefined
     console.log('[Technique] Combined metrics before DB update', {
       analysisId,
       hasAiAnalysis: !!aiAnalysis,
       metricsPreview: {
-        total_frames: combinedMetrics?.total_frames,
-        analyzed_frames: combinedMetrics?.analyzed_frames,
-        pose_samples: Array.isArray(combinedMetrics?.pose_data)
-          ? combinedMetrics.pose_data.length
-          : 0,
-        ai_score: combinedMetrics?.ai_analysis?.score,
-        ai_rating: combinedMetrics?.ai_analysis?.rating,
-        retrieval_confidence: combinedMetrics?.retrieval?.shot_hypothesis?.confidence,
-        retrieval_shot: combinedMetrics?.retrieval?.shot_hypothesis?.stroke_label,
+        total_frames: cm.total_frames,
+        analyzed_frames: cm.analyzed_frames,
+        pose_samples: Array.isArray(cm.pose_data) ? cm.pose_data.length : 0,
+        ai_score: aiSnap?.score,
+        ai_rating: aiSnap?.rating,
+        retrieval_confidence: hypSnap?.confidence,
+        retrieval_shot: hypSnap?.stroke_label,
       },
     })
 

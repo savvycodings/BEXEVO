@@ -8,6 +8,20 @@ import { POSE_EMBEDDING_DIM } from "./poseEmbedding";
 export const MESH_EMBEDDING_SPEC_VERSION = "sam_v1";
 /** Reject garbage mesh vectors; not the same as planning-doc MediaPipe 0.7 gate. */
 export const MESH_CONFIDENCE_MIN = 0.4;
+/** Version tag written into retrieval eval snapshots when blend is used. */
+export const BLEND_FORMULA_ID = "v1";
+
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+/** Mesh share of blended query vector (remainder = MediaPipe). Default 0.4 = 40% mesh / 60% MP. */
+export function retrievalBlendMeshWeight(): number {
+  const raw = (process.env.RETRIEVAL_BLEND_MESH_WEIGHT ?? "0.4").trim();
+  const n = Number(raw);
+  return clamp01(Number.isFinite(n) ? n : 0.4);
+}
 
 const KEY_JOINTS = [
   "LEFT_SHOULDER",
@@ -152,10 +166,23 @@ export function meshVectorFromEnrichmentFrame(frame: PoseEnrichmentFrame | null)
   return null;
 }
 
+/** weightA = share of vector `a` (typically MediaPipe); `b` gets the remainder. */
 export function blendEmbeddings(a: number[], b: number[], weightA = 0.4): number[] {
-  const w = Math.max(0, Math.min(1, weightA));
+  const w = clamp01(weightA);
   const out = a.map((x, i) => w * x + (1 - w) * (b[i] ?? 0));
   return l2Normalize(out);
+}
+
+/** Blend stored v2 + sam_v1 vectors; meshWeight is mesh share (0 = v2 only, 1 = sam only). */
+export function blendStoredTrainVectors(
+  mediapipeVector: number[],
+  meshVector: number[],
+  meshWeight: number
+): number[] {
+  const mw = clamp01(meshWeight);
+  if (mw <= 0) return l2Normalize(mediapipeVector);
+  if (mw >= 1) return l2Normalize(meshVector);
+  return blendEmbeddings(mediapipeVector, meshVector, 1 - mw);
 }
 
 export function meshUsedFromMetrics(metrics: Record<string, unknown> | null | undefined): boolean {
@@ -190,11 +217,16 @@ function retrievalEmbeddingMode(): RetrievalEmbeddingMode {
   return "blended";
 }
 
+export type ResolveRetrievalEmbeddingOpts = {
+  meshWeight?: number;
+};
+
 /** Prefer sam_v1 mesh vector when quality passes floor; else mediapipe_v2; mode via RETRIEVAL_EMBEDDING_MODE. */
 export function resolveRetrievalEmbedding(
   metrics: Record<string, unknown> | null | undefined,
   mediapipeVector: number[] | null,
-  impactFrameResolved?: number
+  impactFrameResolved?: number,
+  opts?: ResolveRetrievalEmbeddingOpts
 ): ResolvedRetrievalEmbedding | null {
   const pe = parsePoseEnrichment(metrics);
   const impactFrame =
@@ -225,8 +257,9 @@ export function resolveRetrievalEmbedding(
   }
 
   if (meshOk && meshVec && mediapipeVector && mode === "blended") {
+    const meshWeight = opts?.meshWeight ?? retrievalBlendMeshWeight();
     return {
-      vector: blendEmbeddings(mediapipeVector, meshVec, 0.4),
+      vector: blendStoredTrainVectors(mediapipeVector, meshVec, meshWeight),
       embedding_source: "blended",
       query_spec_version: MESH_EMBEDDING_SPEC_VERSION,
       mesh_used: true,

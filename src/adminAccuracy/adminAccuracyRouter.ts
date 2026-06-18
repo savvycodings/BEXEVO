@@ -10,6 +10,12 @@ import {
   runAccuracyTest,
   runAllAccuracyTests,
 } from "./tests";
+import {
+  BENCH_STEP_CATALOG,
+  isBenchStepId,
+  listBenchSubmissions,
+  runBenchStep,
+} from "./retrievalBench";
 import { ACCURACY_PASS_PERCENT } from "./constants";
 
 const router = express.Router();
@@ -133,6 +139,63 @@ router.post("/run-all", async (req, res) => {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[AdminAccuracy] run-all error:", e);
     return res.status(500).json({ error: msg || "Run all failed" });
+  }
+});
+
+router.get("/bench/steps", async (req, res) => {
+  if (!assertAdminTrain(req, res)) return;
+  return res.json({ passThresholdPercent: ACCURACY_PASS_PERCENT, steps: BENCH_STEP_CATALOG });
+});
+
+router.get("/bench/submissions", async (req, res) => {
+  try {
+    if (!assertAdminTrain(req, res)) return;
+    const limit = Number(req.query.limit) || 50;
+    const search = typeof req.query.search === "string" ? req.query.search : undefined;
+    const items = await listBenchSubmissions({ limit, search });
+    return res.json({ items });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[AdminAccuracy] bench submissions error:", e);
+    return res.status(500).json({ error: msg || "Failed to load submissions" });
+  }
+});
+
+router.post("/bench/run/:stepId", async (req, res) => {
+  try {
+    if (!assertAdminTrain(req, res)) return;
+    const userId = await resolveUserId(req);
+    const { stepId } = req.params;
+    if (!stepId || !isBenchStepId(stepId)) {
+      return res.status(400).json({ error: "Unknown bench step id" });
+    }
+    const body = (req.body ?? {}) as { analysisId?: string; blendMeshWeight?: number };
+    const result = await runBenchStep(stepId, {
+      analysisId: body.analysisId,
+      blendMeshWeight: body.blendMeshWeight,
+    });
+    const runId = await persistRun(
+      `bench_${stepId}`,
+      {
+        scorePercent: result.scorePercent,
+        passed: result.passed,
+        summary: result.summary,
+        detail: {
+          stepId: result.stepId,
+          title: result.title,
+          evidence: result.evidence,
+          failures: result.failures,
+          tables: result.tables,
+          charts: result.charts,
+        },
+      },
+      userId
+    );
+    return res.json({ runId, ...result });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[AdminAccuracy] bench run error:", e);
+    return res.status(500).json({ error: msg || "Bench step failed" });
   }
 });
 
