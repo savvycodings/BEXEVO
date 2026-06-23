@@ -1,7 +1,8 @@
 import express from "express";
+import multer from "multer";
 import { fromNodeHeaders } from "better-auth/node";
 import { randomUUID } from "crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { v2 as cloudinary } from "cloudinary";
@@ -9,11 +10,14 @@ import { auth } from "../auth";
 import {
   db,
   coachReviewAnnotation,
+  coachSentVideo,
+  coachStudent,
   coachVideoReview,
   techniqueAnalysis,
   techniqueVideo,
   user,
   userNotification,
+  userProfile,
 } from "../db";
 import { sendCoachReviewReadyEmail } from "../lib/email/sendCoachReviewReadyEmail";
 import {
@@ -74,6 +78,19 @@ const COACH_REVIEW_UPLOAD_ROOT = path.join(
   "uploads",
   "coach-review"
 );
+
+const COACH_SENT_VIDEO_MAX_BYTES = 50 * 1024 * 1024;
+const TECHNIQUE_UPLOAD_ROOT = path.join(process.cwd(), "uploads", "technique");
+
+const sentVideoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: COACH_SENT_VIDEO_MAX_BYTES },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ["video/mp4", "video/quicktime"];
+    if (allowed.includes(file.mimetype)) return cb(null, true);
+    cb(new Error("Only MP4 and MOV videos up to 50MB are allowed"));
+  },
+});
 
 function parseDataImage(imageUri: string): { mime: string; base64: string } | null {
   const m = /^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i.exec(imageUri.trim());
@@ -485,6 +502,229 @@ router.post("/review/:id/submit", async (req, res) => {
   } catch (e: any) {
     console.error("[Coach] review submit error", e);
     return res.status(500).json({ error: "Failed to submit coach review" });
+  }
+});
+
+/** Coach -> student: upload a tagged video and notify the student. */
+router.post("/sent-video", sentVideoUpload.single("video"), async (req, res) => {
+  try {
+    const coachUserId = await resolveUserId(req);
+    if (!coachUserId) return res.status(401).json({ error: "Unauthorized" });
+
+    const studentUserId = String(req.body?.studentUserId || "").trim();
+    if (!studentUserId) {
+      return res.status(400).json({ error: "Missing studentUserId" });
+    }
+    if (!req.file?.buffer) {
+      return res.status(400).json({ error: "No video file" });
+    }
+
+    // Must be a coach AND linked to this student.
+    const coachProfile = await db.query.userProfile.findFirst({
+      where: (p, { eq: _eq }) => _eq(p.userId, coachUserId),
+    });
+    if (coachProfile?.coachStudentRole !== "coach") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const link = await db.query.coachStudent.findFirst({
+      where: (cs, { and: _and, eq: _eq }) =>
+        _and(
+          _eq(cs.coachUserId, coachUserId),
+          _eq(cs.studentUserId, studentUserId)
+        ),
+    });
+    if (!link) {
+      return res.status(403).json({ error: "Not linked to this student" });
+    }
+
+    if (!fs.existsSync(TECHNIQUE_UPLOAD_ROOT)) {
+      fs.mkdirSync(TECHNIQUE_UPLOAD_ROOT, { recursive: true });
+    }
+
+    const videoId = randomUUID();
+    const ext = path.extname(req.file.originalname || "") || ".mp4";
+    const filePath = path.join(TECHNIQUE_UPLOAD_ROOT, `${videoId}${ext}`);
+    await fs.promises.writeFile(filePath, req.file.buffer);
+    const publicPath = `/technique/video/${videoId}`;
+
+    await db.insert(techniqueVideo).values({
+      id: videoId,
+      userId: coachUserId,
+      cloudinaryPublicId: filePath,
+      cloudinaryUrl: publicPath,
+      secureUrl: publicPath,
+      bytes: req.file.size?.toString(),
+      format: ext.replace(".", "") || undefined,
+    });
+
+    const category = String(req.body?.category || "").trim() || null;
+    const strokePreset = String(req.body?.strokePreset || "").trim() || null;
+    const shotLabel = String(req.body?.shotLabel || "").trim() || null;
+    const skillLevel = String(req.body?.skillLevel || "").trim() || null;
+    const viewId = String(req.body?.viewId || "").trim() || null;
+    const note = String(req.body?.note || "").trim() || null;
+
+    const sentId = randomUUID();
+    const now = new Date();
+    await db.insert(coachSentVideo).values({
+      id: sentId,
+      coachUserId,
+      studentUserId,
+      techniqueVideoId: videoId,
+      category,
+      strokePreset,
+      shotLabel,
+      skillLevel,
+      viewId,
+      note,
+      createdAt: now,
+    });
+
+    const coach = await db.query.user.findFirst({
+      where: (u, { eq: _eq }) => _eq(u.id, coachUserId),
+    });
+    const coachName = coach?.name?.trim() || "Your coach";
+    const bodyParts = [shotLabel, skillLevel].filter(
+      (x): x is string => !!x && x.length > 0
+    );
+
+    await db.insert(userNotification).values({
+      id: randomUUID(),
+      userId: studentUserId,
+      kind: "coach_video_sent",
+      title: `${coachName} sent you a video`,
+      body: bodyParts.length > 0 ? bodyParts.join(" · ") : "Tap to watch it.",
+      refType: "coach_sent_video",
+      refId: sentId,
+      createdAt: now,
+    });
+
+    return res.json({ ok: true, sentVideoId: sentId });
+  } catch (e: any) {
+    if (e?.message?.includes("Only MP4 and MOV")) {
+      return res.status(400).json({ error: e.message });
+    }
+    console.error("[Coach] sent-video error", e);
+    return res.status(500).json({ error: "Failed to send video" });
+  }
+});
+
+/** Recipient (or sending coach) loads a coach-sent video. */
+router.get("/sent-video/:id", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const id = String(req.params?.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing id" });
+
+    const sent = await db.query.coachSentVideo.findFirst({
+      where: (s, { eq: _eq }) => _eq(s.id, id),
+    });
+    if (!sent) return res.status(404).json({ error: "Not found" });
+
+    const canRead =
+      sent.studentUserId === userId || sent.coachUserId === userId;
+    if (!canRead) return res.status(403).json({ error: "Forbidden" });
+
+    if (sent.studentUserId === userId && !sent.viewedAt) {
+      await db
+        .update(coachSentVideo)
+        .set({ viewedAt: new Date() })
+        .where(eq(coachSentVideo.id, sent.id));
+    }
+
+    const coach = await db.query.user.findFirst({
+      where: (u, { eq: _eq }) => _eq(u.id, sent.coachUserId),
+    });
+
+    return res.json({
+      sentVideo: {
+        id: sent.id,
+        videoPath: `/technique/video/${sent.techniqueVideoId}`,
+        coachName: coach?.name?.trim() || "Your coach",
+        category: sent.category,
+        strokePreset: sent.strokePreset,
+        shotLabel: sent.shotLabel,
+        skillLevel: sent.skillLevel,
+        viewId: sent.viewId,
+        note: sent.note,
+        createdAt: sent.createdAt,
+      },
+    });
+  } catch (e: any) {
+    console.error("[Coach] get sent-video error", e);
+    return res.status(500).json({ error: "Failed to load video" });
+  }
+});
+
+/** Coach inbox: all videos students have sent to this coach (for the Calendar tab). */
+router.get("/submissions", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const profile = await db.query.userProfile.findFirst({
+      where: (p, { eq: _eq }) => _eq(p.userId, userId),
+    });
+    if (profile?.coachStudentRole !== "coach") {
+      return res.json({ submissions: [] });
+    }
+
+    const reviews = await db.query.coachVideoReview.findMany({
+      where: (r, { eq: _eq }) => _eq(r.coachUserId, userId),
+      orderBy: (r, { desc: _desc }) => [_desc(r.createdAt)],
+    });
+    if (reviews.length === 0) return res.json({ submissions: [] });
+
+    const studentIds = Array.from(new Set(reviews.map((r) => r.studentUserId)));
+    const analysisIds = Array.from(
+      new Set(
+        reviews
+          .map((r) => r.techniqueAnalysisId)
+          .filter((id): id is string => !!id)
+      )
+    );
+
+    const students = studentIds.length
+      ? await db.query.user.findMany({
+          where: (u) => inArray(u.id, studentIds),
+        })
+      : [];
+    const studentById = new Map(students.map((s) => [s.id, s]));
+
+    const analyses = analysisIds.length
+      ? await db.query.techniqueAnalysis.findMany({
+          where: (a) => inArray(a.id, analysisIds),
+        })
+      : [];
+    const analysisById = new Map(analyses.map((a) => [a.id, a]));
+
+    const submissions = reviews.map((r) => {
+      const student = studentById.get(r.studentUserId);
+      const analysis = r.techniqueAnalysisId
+        ? analysisById.get(r.techniqueAnalysisId) ?? null
+        : null;
+      const ai = (analysis?.metrics as Record<string, unknown> | null | undefined)
+        ?.ai_analysis as Record<string, unknown> | undefined;
+      return {
+        reviewId: r.id,
+        createdAt: r.createdAt,
+        status: r.status,
+        studentUserId: r.studentUserId,
+        studentName: student?.name?.trim() || "Student",
+        studentImage: student?.image ?? null,
+        techniqueVideoId: r.techniqueVideoId,
+        techniqueAnalysisId: r.techniqueAnalysisId ?? null,
+        shotLabel: deriveShotLabelFromAnalysis(analysis),
+        score: storedAiScoreToPercent(ai),
+      };
+    });
+
+    return res.json({ submissions });
+  } catch (e: any) {
+    console.error("[Coach] submissions error", e);
+    return res.status(500).json({ error: "Failed to load submissions" });
   }
 });
 

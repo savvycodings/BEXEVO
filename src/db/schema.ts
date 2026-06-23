@@ -596,6 +596,42 @@ export const coachVideoReview = pgTable(
   ]
 );
 
+/** Videos a coach sends to a student (coach -> student outbound). */
+export const coachSentVideo = pgTable(
+  "coach_sent_video",
+  {
+    id: text("id").primaryKey(),
+    coachUserId: text("coachUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    studentUserId: text("studentUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    techniqueVideoId: text("techniqueVideoId")
+      .notNull()
+      .references(() => techniqueVideo.id, { onDelete: "cascade" }),
+    category: text("category"),
+    strokePreset: text("strokePreset"),
+    shotLabel: text("shotLabel"),
+    skillLevel: text("skillLevel"),
+    viewId: text("viewId"),
+    note: text("note"),
+    viewedAt: timestamp("viewedAt"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("coach_sent_video_student_created_idx").on(
+      table.studentUserId,
+      table.createdAt
+    ),
+    index("coach_sent_video_coach_created_idx").on(
+      table.coachUserId,
+      table.createdAt
+    ),
+    index("coach_sent_video_video_idx").on(table.techniqueVideoId),
+  ]
+);
+
 /** One row per coach-drawn/commented frame annotation. */
 export const coachReviewAnnotation = pgTable(
   "coach_review_annotation",

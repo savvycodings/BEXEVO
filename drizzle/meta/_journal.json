@@ -239,6 +239,13 @@
       "when": 1781627521080,
       "tag": "0033_hot_shadow_king",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1782000000000,
+      "tag": "0034_coach_sent_video",
+      "breakpoints": true
     }
   ]
 }
