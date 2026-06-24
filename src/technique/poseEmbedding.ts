@@ -212,6 +212,160 @@ export function embedPoseForProRetrieval(
   return landmarksToEmbeddingVector(lm);
 }
 
+// ---------------------------------------------------------------------------
+// Sequence (per-frame) embeddings — multi-probe ensemble retrieval
+// ---------------------------------------------------------------------------
+
+export type SeqPhase = "preparation" | "impact" | "follow_through";
+
+export type PoseFrameVector = {
+  seqIndex: number;
+  vector: number[];
+  /** Source video frame index (for debugging / alignment). */
+  frame: number;
+  phase: SeqPhase;
+};
+
+/** ~swing length in frames used for pose sequence probes; mirror MESH_IMPACT_WINDOW. */
+export function poseSequenceWindow(): number {
+  const raw = String(
+    process.env.POSE_SEQUENCE_WINDOW ?? process.env.MESH_IMPACT_WINDOW ?? "10"
+  ).trim();
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 1) return Math.min(60, Math.floor(n));
+  return 10;
+}
+
+/** Wide library window for the pro-library (superset of the query window) — max redundancy. */
+export function trainIndexWindow(): number {
+  const raw = String(process.env.TRAIN_INDEX_WINDOW ?? "40").trim();
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 1) return Math.min(240, Math.floor(n));
+  return 40;
+}
+
+function phaseForOffset(frame: number, impactFrame: number): SeqPhase {
+  if (frame === impactFrame) return "impact";
+  return frame < impactFrame ? "preparation" : "follow_through";
+}
+
+/**
+ * Train pro-library: a wide window of pose frames centered on the resolved impact
+ * (the TRAIN_INDEX_WINDOW frames closest to impact), each embedded independently.
+ * Falls back to the last N frames when no impact frame is recorded (admin trim ≈ contact).
+ */
+export function embedTrainPoseFrames(
+  poseSequence: PoseFrameRow[] | null | undefined,
+  opts?: { impactFrameResolved?: number | null; window?: number }
+): PoseFrameVector[] {
+  if (!Array.isArray(poseSequence) || poseSequence.length === 0) return [];
+  const withLm = poseSequence.filter(
+    (r) => r?.landmarks && typeof r.landmarks === "object"
+  );
+  if (withLm.length === 0) return [];
+  const sorted = [...withLm].sort((a, b) => frameIndexOfRow(a) - frameIndexOfRow(b));
+  const window = opts?.window ?? trainIndexWindow();
+  const impact = opts?.impactFrameResolved;
+
+  let slice: PoseFrameRow[];
+  let impactFrame: number;
+  if (typeof impact === "number" && Number.isFinite(impact)) {
+    slice = [...sorted]
+      .sort(
+        (a, b) =>
+          Math.abs(frameIndexOfRow(a) - impact) - Math.abs(frameIndexOfRow(b) - impact)
+      )
+      .slice(0, window)
+      .sort((a, b) => frameIndexOfRow(a) - frameIndexOfRow(b));
+    const closest = slice.reduce(
+      (best, r) =>
+        Math.abs(frameIndexOfRow(r) - impact) < Math.abs(frameIndexOfRow(best) - impact)
+          ? r
+          : best,
+      slice[0]!
+    );
+    impactFrame = frameIndexOfRow(closest);
+  } else {
+    slice = sorted.slice(Math.max(0, sorted.length - window));
+    impactFrame = frameIndexOfRow(slice[slice.length - 1]!);
+  }
+
+  return slice.map((row, i) => {
+    const frame = frameIndexOfRow(row);
+    return {
+      seqIndex: i,
+      vector: landmarksToEmbeddingVector(row.landmarks as FrameLandmarks),
+      frame,
+      phase: phaseForOffset(frame, impactFrame),
+    };
+  });
+}
+
+function resolveQueryImpactFrame(input: RetrievalEmbeddingInput): number | null {
+  if (
+    typeof input.impact_frame_resolved === "number" &&
+    Number.isFinite(input.impact_frame_resolved)
+  ) {
+    return Math.round(input.impact_frame_resolved);
+  }
+  const clips = input.user_clips;
+  const vdur = input.video_duration_ms;
+  const tf = input.total_frames;
+  if (clips?.length && vdur && vdur > 0 && tf && tf > 0) {
+    const fps = estimateFps(tf, vdur);
+    return impactMsToFrameIndex(clips[0]!.endMs, fps);
+  }
+  return null;
+}
+
+/**
+ * Technique analyze: a window of pose frames around the resolved impact, each embedded.
+ * Prefers dense `pose_data`; falls back to the labeled `impact_pose_sequence`.
+ */
+export function embedPoseQueryFrames(
+  input: RetrievalEmbeddingInput,
+  window = poseSequenceWindow()
+): PoseFrameVector[] {
+  const pd = input.pose_data;
+  if (pd?.length) {
+    const sorted = [...pd].sort((a, b) => a.frame - b.frame);
+    let impactFrame = resolveQueryImpactFrame(input);
+    if (impactFrame == null) {
+      impactFrame = sorted[Math.floor(sorted.length / 2)]!.frame;
+    }
+    // pick the `window` frames whose frame index is closest to impact, keep timeline order
+    const byCloseness = [...sorted].sort(
+      (a, b) => Math.abs(a.frame - impactFrame!) - Math.abs(b.frame - impactFrame!)
+    );
+    const picked = byCloseness.slice(0, window).sort((a, b) => a.frame - b.frame);
+    const impactInPicked = picked.reduce((best, p) =>
+      Math.abs(p.frame - impactFrame!) < Math.abs(best.frame - impactFrame!) ? p : best
+    , picked[0]!);
+    return picked
+      .filter((p) => p.landmarks && typeof p.landmarks === "object")
+      .map((p, i) => ({
+        seqIndex: i,
+        vector: landmarksToEmbeddingVector(p.landmarks),
+        frame: p.frame,
+        phase: phaseForOffset(p.frame, impactInPicked.frame),
+      }));
+  }
+
+  const impactSeq = input.impact_pose_sequence;
+  if (impactSeq?.length) {
+    return impactSeq
+      .filter((p) => p.landmarks && typeof p.landmarks === "object")
+      .map((p, i) => ({
+        seqIndex: i,
+        vector: landmarksToEmbeddingVector(p.landmarks),
+        frame: p.frame,
+        phase: p.phase,
+      }));
+  }
+
+  return [];
+}
+
 /** Cap pose frames sent to GPT (full `metrics.pose_data` stays for embeddings / impact math). */
 export const MAX_POSE_FRAMES_IN_GPT_PROMPT = 72;
 

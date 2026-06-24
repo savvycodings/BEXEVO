@@ -5,6 +5,7 @@ import {
   timestamp,
   jsonb,
   integer,
+  real,
   pgEnum,
   vector,
   index,
@@ -105,10 +106,18 @@ export type TechniqueRetrievalResult = {
   neighbor_distance_gap?: number | null;
   /** Set when pgvector/table missing or query failed */
   error?: string;
-  /** mediapipe_v2 | sam_v1 | blended — which vector drove k-NN query */
-  embedding_source?: "mediapipe_v2" | "sam_v1" | "blended";
+  /** mediapipe_v2 | sam_v1 | blended | ensemble — which channel(s) drove k-NN */
+  embedding_source?: "mediapipe_v2" | "sam_v1" | "blended" | "ensemble";
   mesh_used?: boolean;
   mesh_confidence?: number | null;
+  /** Pose-only channel hypothesis (sequence ensemble). */
+  pose_hypothesis?: TechniqueRetrievalResult["shot_hypothesis"] | null;
+  /** Mesh-only channel hypothesis (sequence ensemble). */
+  mesh_hypothesis?: TechniqueRetrievalResult["shot_hypothesis"] | null;
+  /** Whether pose and mesh channels agreed on stroke_label. */
+  channel_agreement?: boolean | null;
+  /** Number of query frames probed per channel. */
+  frames_used?: { pose: number; mesh: number };
 };
 
 export type TechniqueDetectionLabel = "sports_ball" | "racket";
@@ -478,6 +487,10 @@ export const trainSampleEmbedding = pgTable(
       .notNull()
       .references(() => trainSample.id, { onDelete: "cascade" }),
     specVersion: text("specVersion").notNull(),
+    /** Per-frame sequence index within (sample, spec). 0 = single-frame legacy rows. */
+    frameIndex: integer("frameIndex").notNull().default(0),
+    /** Mesh confidence for sam_v1 rows (null for pose rows). */
+    meshConfidence: real("meshConfidence"),
     embedding: vector("embedding", { dimensions: 128 }).notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
   },
@@ -486,9 +499,10 @@ export const trainSampleEmbedding = pgTable(
       "hnsw",
       table.embedding.op("vector_cosine_ops")
     ),
-    uniqueIndex("train_sample_embedding_sample_spec_unique").on(
+    uniqueIndex("train_sample_embedding_sample_spec_frame_unique").on(
       table.trainSampleId,
-      table.specVersion
+      table.specVersion,
+      table.frameIndex
     ),
   ]
 );

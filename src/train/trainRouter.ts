@@ -812,6 +812,74 @@ router.post("/embeddings/backfill", async (req, res) => {
   }
 });
 
+/**
+ * Re-run Modal extraction for existing pro-library clips (admin). Needed after pipeline
+ * changes (e.g. full-frame parity) because /embeddings/backfill only rebuilds vectors from
+ * already-stored pose/mesh — it cannot change how those were extracted. Re-extraction also
+ * re-indexes per-frame rows (triggerTrainExtraction -> indexTrainSampleEmbeddingIfReady).
+ * Body: { ids?: string[]; limit?: number }. Runs sequentially; can be slow for many clips.
+ */
+router.post("/reextract", async (req, res) => {
+  try {
+    if (!assertAdminTrain(req, res)) return;
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const body = (req.body ?? {}) as { ids?: unknown; limit?: unknown };
+    const idFilter = Array.isArray(body.ids)
+      ? new Set(body.ids.filter((x): x is string => typeof x === "string"))
+      : null;
+    const limit =
+      typeof body.limit === "number" && body.limit > 0
+        ? Math.min(1000, Math.floor(body.limit))
+        : 1000;
+
+    const rows = await db
+      .select({
+        sampleId: trainSample.id,
+        trainVideoId: trainVideo.id,
+        strokeName: trainVideo.strokeName,
+        absPath: trainVideo.cloudinaryPublicId,
+        publicPath: trainVideo.secureUrl,
+      })
+      .from(trainSample)
+      .innerJoin(trainVideo, eq(trainVideo.id, trainSample.trainVideoId));
+
+    const targets = rows
+      .filter((r) => (idFilter ? idFilter.has(r.sampleId) : true))
+      .slice(0, limit);
+
+    let processed = 0;
+    let failed = 0;
+    const failures: Array<{ sampleId: string; error: string }> = [];
+    for (const r of targets) {
+      try {
+        await triggerTrainExtraction({
+          sampleId: r.sampleId,
+          trainVideoId: r.trainVideoId,
+          strokeName: r.strokeName,
+          videoPublicPath: r.publicPath ?? `/train/video/${r.trainVideoId}`,
+          videoAbsPath: r.absPath ?? "",
+        });
+        processed++;
+      } catch (e: unknown) {
+        failed++;
+        if (failures.length < 25) {
+          failures.push({
+            sampleId: r.sampleId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+    }
+
+    return res.json({ ok: true, total: targets.length, processed, failed, failures });
+  } catch (e: any) {
+    console.error("[Train] Re-extract error:", e);
+    return res.status(500).json({ error: e?.message || "Re-extract failed" });
+  }
+});
+
 router.get("/sample/:id", async (req, res) => {
   try {
     if (!assertAdminTrain(req, res)) return;

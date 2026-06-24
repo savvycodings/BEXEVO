@@ -22,6 +22,11 @@ export type RetrievalEvalSnapshot = {
   blend_formula_id: string | null;
   llm_disagrees_retrieval: boolean;
   library_fallback: boolean;
+  /** Sequence ensemble: per-channel shot labels + agreement + probe counts. */
+  pose_shot: string | null;
+  mesh_shot: string | null;
+  channel_agreement: boolean | null;
+  frames_used: { pose: number; mesh: number } | null;
 };
 
 function llmShotFromAnalysis(aiAnalysis: Record<string, unknown> | null | undefined): string | null {
@@ -68,6 +73,16 @@ export function buildEvalSnapshot(
       ? (opts?.blendMeshWeight ?? retrievalBlendMeshWeight())
       : null;
 
+  // F10 fix: compare canonical labels, and treat the LLM's "Pro library match: X"
+  // phrasing (which echoes retrieval) as agreement instead of false-positive noise.
+  const llmEchoesRetrieval = !!llmShot && /pro library match/i.test(llmShot);
+  const llmDisagrees =
+    predicted != null &&
+    llmShot != null &&
+    !llmEchoesRetrieval &&
+    !labelsMatch(display.shotName, llmShot) &&
+    !labelsMatch(predicted, llmShot);
+
   return {
     expected_shot: opts?.expectedShot ?? null,
     predicted_shot: predicted,
@@ -85,9 +100,19 @@ export function buildEvalSnapshot(
     spec_version: specVersion,
     blend_mesh_weight: blendWeight,
     blend_formula_id: blendWeight != null ? BLEND_FORMULA_ID : null,
-    llm_disagrees_retrieval:
-      predicted != null && llmShot != null && !labelsMatch(predicted, llmShot),
+    llm_disagrees_retrieval: llmDisagrees,
     library_fallback: libraryFallback,
+    pose_shot:
+      typeof retrieval?.pose_hypothesis?.stroke_label === "string"
+        ? retrieval.pose_hypothesis.stroke_label
+        : null,
+    mesh_shot:
+      typeof retrieval?.mesh_hypothesis?.stroke_label === "string"
+        ? retrieval.mesh_hypothesis.stroke_label
+        : null,
+    channel_agreement:
+      typeof retrieval?.channel_agreement === "boolean" ? retrieval.channel_agreement : null,
+    frames_used: retrieval?.frames_used ?? null,
   };
 }
 

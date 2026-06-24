@@ -2,16 +2,20 @@ import { randomUUID } from "crypto";
 import { pool, db } from "../db";
 import type { TechniqueRetrievalResult, TrainPoseFrame } from "../db/schema";
 import {
-  embedTrainPoseSequence,
-  embedPoseForProRetrieval,
+  embedTrainPoseFrames,
+  embedPoseQueryFrames,
   formatVectorSqlLiteral,
   POSE_EMBEDDING_DIM,
   POSE_EMBEDDING_SPEC_VERSION,
+  type PoseFrameVector,
+  type RetrievalEmbeddingInput,
 } from "./poseEmbedding";
 import {
   MESH_EMBEDDING_SPEC_VERSION,
-  resolveRetrievalEmbedding,
-  embedTrainMeshFromExtractionMeta,
+  embedTrainMeshFrames,
+  embedMeshQueryFrames,
+  meshConfidenceFromMetrics,
+  type MeshFrameVector,
 } from "./meshEmbedding";
 import {
   adminStrokeLabelKey,
@@ -49,6 +53,17 @@ export function formatRetrievalForPrompt(r: TechniqueRetrievalResult | undefined
   }
   const payload = {
     shot_hypothesis: r.shot_hypothesis,
+    ensemble: {
+      embedding_source: r.embedding_source ?? null,
+      channel_agreement: r.channel_agreement ?? null,
+      frames_used: r.frames_used ?? null,
+      pose_hypothesis: r.pose_hypothesis
+        ? { stroke_label: r.pose_hypothesis.stroke_label, confidence: r.pose_hypothesis.confidence }
+        : null,
+      mesh_hypothesis: r.mesh_hypothesis
+        ? { stroke_label: r.mesh_hypothesis.stroke_label, confidence: r.mesh_hypothesis.confidence }
+        : null,
+    },
     neighbors: r.neighbors.slice(0, 6).map((n) => ({
       stroke_label: n.stroke_label,
       stroke_name: n.stroke_name,
@@ -59,7 +74,7 @@ export function formatRetrievalForPrompt(r: TechniqueRetrievalResult | undefined
     })),
   };
   return `
-Pro reference similarity (pose embedding ${r.spec_version}; lower distance = closer match to that labeled clip):
+Pro reference similarity (sequence + dual-channel ensemble ${r.spec_version}; lower distance = closer match to that labeled clip):
 ${JSON.stringify(payload, null, 2)}
 
 When shot_hypothesis.confidence is at least ${RETRIEVAL_CONFIDENCE_THRESHOLD}, treat shot_hypothesis.stroke_label (admin trained shot name from the pro library) and category as the primary shot classification. Do not let stroke_preset override stroke_label — preset is legacy taxonomy metadata only.
@@ -85,22 +100,25 @@ export async function indexTrainSampleEmbeddingIfReady(trainSampleId: string): P
       return;
     }
     const seq = row.poseSequence as unknown;
-    const vec = embedTrainPoseSequence(Array.isArray(seq) ? seq : null);
-    if (!vec) {
-      console.log("[TrainRetrieval] auto-index skipped (no poseSequence)", { trainSampleId });
-      return;
-    }
+    const meta = row.extractionMeta as Record<string, unknown> | null | undefined;
     try {
-      await upsertTrainSampleEmbedding(row.id, vec, POSE_EMBEDDING_SPEC_VERSION);
-      const meta = row.extractionMeta as Record<string, unknown> | null | undefined;
-      const meshVec = embedTrainMeshFromExtractionMeta(meta ?? null);
-      if (meshVec) {
-        await upsertTrainSampleEmbedding(row.id, meshVec, MESH_EMBEDDING_SPEC_VERSION);
+      const counts = await replaceTrainSampleEmbeddings(
+        row.id,
+        Array.isArray(seq) ? seq : null,
+        meta ?? null
+      );
+      if (counts.pose === 0 && counts.mesh === 0) {
+        console.log("[TrainRetrieval] auto-index skipped (no pose/mesh frames)", { trainSampleId });
+        return;
       }
-      console.log("[TrainRetrieval] auto-indexed embedding for train_sample", { trainSampleId });
+      console.log("[TrainRetrieval] auto-indexed per-frame embeddings for train_sample", {
+        trainSampleId,
+        pose: counts.pose,
+        mesh: counts.mesh,
+      });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn("[TrainRetrieval] auto-index upsert failed — apply migration 0011 + vector on Neon", {
+      console.warn("[TrainRetrieval] auto-index upsert failed — apply migration 0011/0035 + vector on Neon", {
         trainSampleId,
         message: msg,
       });
@@ -116,21 +134,84 @@ export async function indexTrainSampleEmbeddingIfReady(trainSampleId: string): P
   }
 }
 
+/** Single-row upsert (legacy single-frame helper, frameIndex defaults to 0). */
 export async function upsertTrainSampleEmbedding(
   trainSampleId: string,
   vector: number[],
-  specVersion: string = POSE_EMBEDDING_SPEC_VERSION
+  specVersion: string = POSE_EMBEDDING_SPEC_VERSION,
+  frameIndex = 0,
+  meshConfidence: number | null = null
 ): Promise<void> {
   const id = randomUUID();
   const literal = formatVectorSqlLiteral(vector);
   await pool.query(
-    `INSERT INTO train_sample_embedding (id, "trainSampleId", "specVersion", embedding)
-     VALUES ($1, $2, $3, $4::vector)
-     ON CONFLICT ("trainSampleId", "specVersion") DO UPDATE SET
+    `INSERT INTO train_sample_embedding (id, "trainSampleId", "specVersion", "frameIndex", "meshConfidence", embedding)
+     VALUES ($1, $2, $3, $4, $5, $6::vector)
+     ON CONFLICT ("trainSampleId", "specVersion", "frameIndex") DO UPDATE SET
        embedding = EXCLUDED.embedding,
+       "meshConfidence" = EXCLUDED."meshConfidence",
        "createdAt" = NOW()`,
-    [id, trainSampleId, specVersion, literal]
+    [id, trainSampleId, specVersion, frameIndex, meshConfidence, literal]
   );
+}
+
+/**
+ * Replace ALL embedding rows for a sample with the per-frame sequence:
+ * N pose (v2) rows + M mesh (sam_v1) rows, one per frameIndex.
+ * Count varies per sample, so we delete stale rows first then bulk insert.
+ */
+export async function replaceTrainSampleEmbeddings(
+  trainSampleId: string,
+  poseSequence: unknown,
+  extractionMeta: Record<string, unknown> | null | undefined
+): Promise<{ pose: number; mesh: number }> {
+  const impactFrameResolved =
+    extractionMeta && typeof extractionMeta.impact_frame_resolved === "number"
+      ? (extractionMeta.impact_frame_resolved as number)
+      : null;
+  const poseFrames = embedTrainPoseFrames(
+    Array.isArray(poseSequence) ? (poseSequence as Parameters<typeof embedTrainPoseFrames>[0]) : null,
+    { impactFrameResolved }
+  );
+  const meshFrames = embedTrainMeshFrames(extractionMeta ?? null);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM train_sample_embedding WHERE "trainSampleId" = $1`, [
+      trainSampleId,
+    ]);
+
+    for (const pf of poseFrames) {
+      await client.query(
+        `INSERT INTO train_sample_embedding (id, "trainSampleId", "specVersion", "frameIndex", "meshConfidence", embedding)
+         VALUES ($1, $2, $3, $4, NULL, $5::vector)`,
+        [randomUUID(), trainSampleId, POSE_EMBEDDING_SPEC_VERSION, pf.seqIndex, formatVectorSqlLiteral(pf.vector)]
+      );
+    }
+    for (const mf of meshFrames) {
+      await client.query(
+        `INSERT INTO train_sample_embedding (id, "trainSampleId", "specVersion", "frameIndex", "meshConfidence", embedding)
+         VALUES ($1, $2, $3, $4, $5, $6::vector)`,
+        [
+          randomUUID(),
+          trainSampleId,
+          MESH_EMBEDDING_SPEC_VERSION,
+          mf.seqIndex,
+          mf.meshConfidence,
+          formatVectorSqlLiteral(mf.vector),
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+    return { pose: poseFrames.length, mesh: meshFrames.length };
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 async function queryFilteredTrainCandidates(
@@ -228,39 +309,295 @@ export async function runTrainEmbeddingBackfill(): Promise<{
 
   for (const row of rows) {
     const seq = row.poseSequence as unknown;
-    const vec = embedTrainPoseSequence(Array.isArray(seq) ? seq : null);
-    if (!vec) {
-      skipped++;
-    } else {
-      try {
-        await upsertTrainSampleEmbedding(row.id, vec, POSE_EMBEDDING_SPEC_VERSION);
-        processed++;
-      } catch (e) {
-        console.error("[TrainRetrieval] backfill row failed", row.id, e);
-        errors++;
-      }
-    }
-
     const meta = row.extractionMeta as Record<string, unknown> | null | undefined;
-    const meshVec = embedTrainMeshFromExtractionMeta(meta ?? null);
-    if (!meshVec) {
-      samSkipped++;
-    } else {
-      try {
-        await upsertTrainSampleEmbedding(row.id, meshVec, MESH_EMBEDDING_SPEC_VERSION);
-        samProcessed++;
-      } catch (e) {
-        console.error("[TrainRetrieval] sam_v1 backfill row failed", row.id, e);
-        errors++;
-      }
+    try {
+      const counts = await replaceTrainSampleEmbeddings(
+        row.id,
+        Array.isArray(seq) ? seq : null,
+        meta ?? null
+      );
+      if (counts.pose > 0) processed++;
+      else skipped++;
+      if (counts.mesh > 0) samProcessed++;
+      else samSkipped++;
+    } catch (e) {
+      console.error("[TrainRetrieval] backfill row failed", row.id, e);
+      errors++;
     }
   }
 
   return { processed, skipped, errors, samProcessed, samSkipped };
 }
 
+// ---------------------------------------------------------------------------
+// Sequence + dual-channel ensemble retrieval
+// ---------------------------------------------------------------------------
+
+type EnsembleChannel = "pose" | "mesh";
+
+type EnsembleMode = "ensemble" | "mediapipe_v2" | "sam_v1";
+
+function ensembleMode(): EnsembleMode {
+  const raw = (process.env.RETRIEVAL_EMBEDDING_MODE ?? "ensemble").trim().toLowerCase();
+  if (raw === "mediapipe_v2" || raw === "v2" || raw === "mediapipe") return "mediapipe_v2";
+  if (raw === "sam_v1" || raw === "sam" || raw === "mesh") return "sam_v1";
+  // "ensemble" (new default) and legacy "blended" both run the dual-channel path.
+  return "ensemble";
+}
+
+function envWeight(name: string, def: number): number {
+  const n = Number((process.env[name] ?? "").trim());
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
+/** Distance → vote weight; shared shape with shotHypothesis.neighborWeight. */
+function distanceWeight(distance: number): number {
+  return 1 / (distance + 0.03);
+}
+
+type Probe = {
+  channel: EnsembleChannel;
+  seqIndex: number;
+  baseWeight: number;
+  candidates: TrainNeighborCandidate[];
+};
+
+type EnsembleAggregate = {
+  neighbors: NeighborRow[];
+  shot_hypothesis: TechniqueRetrievalResult["shot_hypothesis"];
+  pose_hypothesis: TechniqueRetrievalResult["shot_hypothesis"] | null;
+  mesh_hypothesis: TechniqueRetrievalResult["shot_hypothesis"] | null;
+  channel_agreement: boolean | null;
+  neighbor_distance_gap: number | null;
+};
+
+function modeValue(values: string[]): string {
+  const counts = new Map<string, number>();
+  for (const v of values) {
+    const t = v?.trim();
+    if (!t) continue;
+    counts.set(t, (counts.get(t) ?? 0) + 1);
+  }
+  let best = "";
+  let bestN = 0;
+  for (const [key, n] of counts) {
+    if (n > bestN) {
+      bestN = n;
+      best = key;
+    }
+  }
+  return best;
+}
+
+/** Best (min-distance) neighbor per train_sample across a channel's probes — input to per-channel hypothesis. */
+function bestPerSample(probes: Probe[]): TrainNeighborCandidate[] {
+  const byId = new Map<string, TrainNeighborCandidate>();
+  for (const p of probes) {
+    for (const c of p.candidates) {
+      const cur = byId.get(c.train_sample_id);
+      if (!cur || c.distance < cur.distance) byId.set(c.train_sample_id, c);
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.distance - b.distance);
+}
+
+function aggregateEnsemble(poseProbes: Probe[], meshProbes: Probe[]): EnsembleAggregate {
+  const allProbes = [...poseProbes, ...meshProbes];
+
+  const labelVotes = new Map<string, number>();
+  const perSample = new Map<
+    string,
+    { cand: TrainNeighborCandidate; weight: number; bestDistance: number }
+  >();
+
+  for (const probe of allProbes) {
+    for (const c of probe.candidates) {
+      const label = c.stroke_label.trim() || c.stroke_preset;
+      const w = probe.baseWeight * distanceWeight(c.distance);
+      labelVotes.set(label, (labelVotes.get(label) ?? 0) + w);
+
+      const cur = perSample.get(c.train_sample_id);
+      if (cur) {
+        cur.weight += w;
+        if (c.distance < cur.bestDistance) {
+          cur.bestDistance = c.distance;
+          cur.cand = c;
+        }
+      } else {
+        perSample.set(c.train_sample_id, { cand: c, weight: w, bestDistance: c.distance });
+      }
+    }
+  }
+
+  const ranked = [...perSample.values()].sort(
+    (a, b) => b.weight - a.weight || a.bestDistance - b.bestDistance
+  );
+  const neighbors: NeighborRow[] = ranked.map((r) => ({
+    train_sample_id: r.cand.train_sample_id,
+    train_video_id: r.cand.train_video_id,
+    stroke_name: r.cand.stroke_name,
+    stroke_label: r.cand.stroke_label,
+    category: r.cand.category,
+    stroke_preset: r.cand.stroke_preset,
+    skill_level: r.cand.skill_level,
+    distance: r.bestDistance,
+  }));
+
+  const sortedLabels = [...labelVotes.entries()].sort((a, b) => b[1] - a[1]);
+  const top = sortedLabels[0];
+  const second = sortedLabels[1];
+
+  let shot_hypothesis: TechniqueRetrievalResult["shot_hypothesis"];
+  if (!top) {
+    shot_hypothesis = {
+      stroke_preset: null,
+      stroke_label: null,
+      category: null,
+      skill_level: null,
+      confidence: 0,
+    };
+  } else {
+    const winners = ranked.filter(
+      (r) => (r.cand.stroke_label.trim() || r.cand.stroke_preset) === top[0]
+    );
+    const closest = winners.reduce(
+      (a, b) => (a.bestDistance < b.bestDistance ? a : b),
+      winners[0]!
+    );
+    const confidence = second
+      ? Math.max(0, Math.min(1, (top[1] - second[1]) / (top[1] + 1e-6)))
+      : Math.max(0, Math.min(1, 1 - (neighbors[0]?.distance ?? 0.45) / 0.45));
+    shot_hypothesis = {
+      stroke_label: top[0],
+      stroke_preset: closest?.cand.stroke_preset ?? null,
+      category: modeValue(winners.map((w) => w.cand.category)),
+      skill_level: modeValue(winners.map((w) => w.cand.skill_level)),
+      confidence,
+    };
+  }
+
+  const poseBest = bestPerSample(poseProbes);
+  const meshBest = bestPerSample(meshProbes);
+  const pose_hypothesis = poseBest.length ? buildShotHypothesis(poseBest) : null;
+  const mesh_hypothesis = meshBest.length ? buildShotHypothesis(meshBest) : null;
+  const channel_agreement =
+    pose_hypothesis?.stroke_label && mesh_hypothesis?.stroke_label
+      ? pose_hypothesis.stroke_label === mesh_hypothesis.stroke_label
+      : null;
+
+  const neighbor_distance_gap =
+    neighbors.length >= 2 ? neighbors[1]!.distance - neighbors[0]!.distance : null;
+
+  return {
+    neighbors,
+    shot_hypothesis,
+    pose_hypothesis,
+    mesh_hypothesis,
+    channel_agreement,
+    neighbor_distance_gap,
+  };
+}
+
+async function runChannelProbes(
+  frames: Array<{ seqIndex: number; vector: number[]; baseWeight: number }>,
+  channel: EnsembleChannel,
+  specVersion: string,
+  k: number,
+  excludeTrainSampleId?: string
+): Promise<Probe[]> {
+  const probes: Probe[] = [];
+  for (const f of frames) {
+    const candidates = await queryFilteredTrainCandidates(
+      f.vector,
+      k,
+      specVersion,
+      excludeTrainSampleId
+    ).catch((e) => {
+      console.warn("[TrainRetrieval] probe query failed", { channel, seq: f.seqIndex, e });
+      return [] as TrainNeighborCandidate[];
+    });
+    probes.push({ channel, seqIndex: f.seqIndex, baseWeight: f.baseWeight, candidates });
+  }
+  return probes;
+}
+
+/**
+ * Build the weighted query frames for each channel from a metrics record.
+ * Pose impact frames weigh more than prep/follow; mesh (impact-window) weighs highest.
+ */
+export function buildEnsembleQueryFrames(
+  input: RetrievalEmbeddingInput,
+  metricsRecord: Record<string, unknown> | null
+): {
+  pose: Array<{ seqIndex: number; vector: number[]; baseWeight: number }>;
+  mesh: Array<{ seqIndex: number; vector: number[]; baseWeight: number }>;
+} {
+  const poseImpactW = envWeight("RETRIEVAL_POSE_IMPACT_WEIGHT", 1.0);
+  const poseOtherW = envWeight("RETRIEVAL_POSE_OTHER_WEIGHT", 0.6);
+  const meshW = envWeight("RETRIEVAL_MESH_WEIGHT", 1.5);
+
+  let poseFrames: PoseFrameVector[] = [];
+  try {
+    poseFrames = embedPoseQueryFrames(input);
+  } catch (e) {
+    console.warn("[TrainRetrieval] embedPoseQueryFrames failed", e);
+  }
+  let meshFrames: MeshFrameVector[] = [];
+  try {
+    meshFrames = embedMeshQueryFrames(metricsRecord);
+  } catch (e) {
+    console.warn("[TrainRetrieval] embedMeshQueryFrames failed", e);
+  }
+
+  return {
+    pose: poseFrames.map((f) => ({
+      seqIndex: f.seqIndex,
+      vector: f.vector,
+      baseWeight: f.phase === "impact" ? poseImpactW : poseOtherW,
+    })),
+    mesh: meshFrames.map((f) => ({
+      seqIndex: f.seqIndex,
+      vector: f.vector,
+      baseWeight: meshW,
+    })),
+  };
+}
+
+export type EnsembleQueryFrame = { seqIndex: number; vector: number[]; baseWeight: number };
+
+export type EnsembleRetrievalRun = EnsembleAggregate & {
+  poseHasNeighbors: boolean;
+  meshHasNeighbors: boolean;
+};
+
+/**
+ * Core dual-channel multi-probe execution shared by live analyze and the admin bench.
+ * Each query frame runs its own k-NN; results are pooled into weighted votes.
+ * `excludeTrainSampleId` drops ALL rows of that sample (LOOCV).
+ */
+export async function runEnsembleRetrieval(
+  poseFrames: EnsembleQueryFrame[],
+  meshFrames: EnsembleQueryFrame[],
+  k = 8,
+  excludeTrainSampleId?: string
+): Promise<EnsembleRetrievalRun> {
+  const poseProbes = poseFrames.length
+    ? await runChannelProbes(poseFrames, "pose", POSE_EMBEDDING_SPEC_VERSION, k, excludeTrainSampleId)
+    : [];
+  let meshProbes = meshFrames.length
+    ? await runChannelProbes(meshFrames, "mesh", MESH_EMBEDDING_SPEC_VERSION, k, excludeTrainSampleId)
+    : [];
+
+  const poseHasNeighbors = poseProbes.some((p) => p.candidates.length > 0);
+  const meshHasNeighbors = meshProbes.some((p) => p.candidates.length > 0);
+  if (!meshHasNeighbors && meshProbes.length) meshProbes = [];
+
+  const agg = aggregateEnsemble(poseProbes, meshProbes);
+  return { ...agg, poseHasNeighbors, meshHasNeighbors };
+}
+
 export async function retrieveForTechniqueMetrics(
-  metrics: Parameters<typeof embedPoseForProRetrieval>[0],
+  metrics: RetrievalEmbeddingInput,
   k = 8
 ): Promise<TechniqueRetrievalResult> {
   const base: TechniqueRetrievalResult = {
@@ -277,91 +614,70 @@ export async function retrieveForTechniqueMetrics(
     },
   };
 
-  let mediapipeQuery: number[] | null;
-  try {
-    mediapipeQuery = embedPoseForProRetrieval(metrics);
-  } catch (e) {
-    console.warn("[TrainRetrieval] embedPoseForProRetrieval failed", e);
-    return {
-      ...base,
-      query_embedding_ok: false,
-      error: "embed_failed",
-    };
-  }
-
   const metricsRecord =
-    metrics && typeof metrics === "object"
-      ? (metrics as Record<string, unknown>)
-      : null;
-  const resolved = resolveRetrievalEmbedding(
-    metricsRecord,
-    mediapipeQuery,
-    typeof metricsRecord?.impact_frame_resolved === "number"
-      ? metricsRecord.impact_frame_resolved
-      : undefined
-  );
+    metrics && typeof metrics === "object" ? (metrics as Record<string, unknown>) : null;
 
-  if (!resolved) {
-    return {
-      ...base,
-      query_embedding_ok: false,
-      error: "no_pose_for_embedding",
-    };
+  const mode = ensembleMode();
+  const queryFrames = buildEnsembleQueryFrames(metrics, metricsRecord);
+  const usePose = mode !== "sam_v1";
+  const useMesh = mode !== "mediapipe_v2";
+  const poseQuery = usePose ? queryFrames.pose : [];
+  const meshQuery = useMesh ? queryFrames.mesh : [];
+
+  if (poseQuery.length === 0 && meshQuery.length === 0) {
+    return { ...base, query_embedding_ok: false, error: "no_pose_for_embedding" };
   }
 
-  const query = resolved.vector;
-  const querySpec = resolved.query_spec_version;
-
   try {
-    let filtered = await queryFilteredTrainCandidates(query, k, querySpec);
-    let effectiveSpec = querySpec;
-    let effectiveSource = resolved.embedding_source;
-    if (
-      filtered.length === 0 &&
-      querySpec === MESH_EMBEDDING_SPEC_VERSION &&
-      mediapipeQuery
-    ) {
-      console.log("[TrainRetrieval] no sam_v1 library neighbors — fallback to mediapipe_v2");
-      filtered = await queryFilteredTrainCandidates(mediapipeQuery, k, POSE_EMBEDDING_SPEC_VERSION);
-      effectiveSpec = POSE_EMBEDDING_SPEC_VERSION;
-      effectiveSource = "mediapipe_v2";
-    }
-    const neighbors = filtered.slice(0, k);
+    // Redundancy: if a channel is empty (no library rows / low conf), the other still answers.
+    const run = await runEnsembleRetrieval(poseQuery, meshQuery, k);
+    const { poseHasNeighbors, meshHasNeighbors } = run;
+    const agg: EnsembleAggregate = run;
 
-    if (neighbors.length === 0) {
+    if (agg.neighbors.length === 0) {
       console.log(
-        "[TrainRetrieval] no neighbors — ensure migration 0011, CREATE EXTENSION vector, and POST /train/embeddings/backfill with completed train_sample rows"
+        "[TrainRetrieval] no neighbors — ensure migration 0011/0035, CREATE EXTENSION vector, and POST /train/embeddings/backfill"
       );
     }
-    const neighbor_distance_gap =
-      neighbors.length >= 2
-        ? neighbors[1]!.distance - neighbors[0]!.distance
-        : null;
+
+    const meshUsed = meshHasNeighbors;
+    const embedding_source: TechniqueRetrievalResult["embedding_source"] =
+      poseHasNeighbors && meshUsed
+        ? "ensemble"
+        : meshUsed
+          ? "sam_v1"
+          : "mediapipe_v2";
+    const spec_version =
+      embedding_source === "mediapipe_v2"
+        ? POSE_EMBEDDING_SPEC_VERSION
+        : embedding_source === "sam_v1"
+          ? MESH_EMBEDDING_SPEC_VERSION
+          : "ensemble";
+
+    const impactFrame =
+      typeof metricsRecord?.impact_frame_resolved === "number"
+        ? (metricsRecord.impact_frame_resolved as number)
+        : undefined;
 
     return {
-      spec_version: effectiveSpec,
+      spec_version,
       embedding_dim: POSE_EMBEDDING_DIM,
       query_embedding_ok: true,
-      neighbors: neighbors.map((n) => ({
-        train_sample_id: n.train_sample_id,
-        train_video_id: n.train_video_id,
-        stroke_name: n.stroke_name,
-        stroke_label: n.stroke_label,
-        category: n.category,
-        stroke_preset: n.stroke_preset,
-        skill_level: n.skill_level,
-        distance: n.distance,
-      })),
-      shot_hypothesis: buildShotHypothesis(neighbors),
-      neighbor_distance_gap,
-      embedding_source: effectiveSource,
-      mesh_used: resolved.mesh_used,
-      mesh_confidence: resolved.mesh_confidence,
+      neighbors: agg.neighbors.slice(0, k),
+      shot_hypothesis: agg.shot_hypothesis,
+      neighbor_distance_gap: agg.neighbor_distance_gap,
+      embedding_source,
+      mesh_used: meshUsed,
+      mesh_confidence: meshConfidenceFromMetrics(metricsRecord, impactFrame),
+      pose_hypothesis: agg.pose_hypothesis,
+      mesh_hypothesis: agg.mesh_hypothesis,
+      channel_agreement: agg.channel_agreement,
+      frames_used: { pose: poseQuery.length, mesh: meshQuery.length },
     };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const code = e?.code;
-    console.warn("[TrainRetrieval] nearest query failed", { msg, code });
+    console.warn("[TrainRetrieval] ensemble query failed", { msg, code });
     return {
       ...base,
       query_embedding_ok: true,

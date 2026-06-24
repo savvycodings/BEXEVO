@@ -246,6 +246,13 @@
       "when": 1782000000000,
       "tag": "0034_coach_sent_video",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1782600000000,
+      "tag": "0035_train_embedding_per_frame",
+      "breakpoints": true
     }
   ]
 }

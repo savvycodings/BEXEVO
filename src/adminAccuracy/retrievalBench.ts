@@ -9,19 +9,18 @@ import {
 import { buildEvalSnapshot } from "./evalSnapshot";
 import { labelsMatch, percentFromRatio, passedFromScore } from "./scoring";
 import { adminStrokeLabelKey } from "../train/trainShotDisplay";
-import { buildShotHypothesis } from "../technique/shotHypothesis";
 import {
-  blendStoredTrainVectors,
-  embedTrainMeshFromExtractionMeta,
+  embedTrainMeshFrames,
   MESH_EMBEDDING_SPEC_VERSION,
   parsePoseEnrichment,
 } from "../technique/meshEmbedding";
 import {
-  embedTrainPoseSequence,
+  embedTrainPoseFrames,
   POSE_EMBEDDING_SPEC_VERSION,
 } from "../technique/poseEmbedding";
 import {
-  findNearestTrainNeighbors,
+  runEnsembleRetrieval,
+  type EnsembleQueryFrame,
   type NeighborRow,
 } from "../technique/trainRetrieval";
 
@@ -59,154 +58,105 @@ export type BenchSubmissionRow = {
   embedding_source: string | null;
 };
 
-const BLEND_WEIGHTS = [0, 0.2, 0.4, 0.5, 0.6, 1] as const;
+/** Mesh channel weights to sweep (pose channel held at defaults). 0 = pose-only, big = mesh-dominant. */
+const MESH_WEIGHT_SWEEP = [0, 0.6, 1.0, 1.5, 2.5] as const;
+
+type ChannelWeights = { poseImpact: number; poseOther: number; mesh: number };
+
+function defaultChannelWeights(): ChannelWeights {
+  const num = (name: string, def: number) => {
+    const n = Number((process.env[name] ?? "").trim());
+    return Number.isFinite(n) && n >= 0 ? n : def;
+  };
+  return {
+    poseImpact: num("RETRIEVAL_POSE_IMPACT_WEIGHT", 1.0),
+    poseOther: num("RETRIEVAL_POSE_OTHER_WEIGHT", 0.6),
+    mesh: num("RETRIEVAL_MESH_WEIGHT", 1.5),
+  };
+}
 
 type LibrarySample = {
   trainSampleId: string;
   strokeLabel: string;
-  v2Vector: number[] | null;
-  samVector: number[] | null;
+  poseSequence: unknown;
+  extractionMeta: Record<string, unknown> | null;
 };
 
-function parsePgVector(raw: unknown): number[] | null {
-  if (Array.isArray(raw) && raw.every((x) => typeof x === "number")) {
-    return raw as number[];
-  }
-  if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (Array.isArray(parsed) && parsed.every((x) => typeof x === "number")) {
-        return parsed as number[];
-      }
-    } catch {
-      const trimmed = raw.replace(/^\[|\]$/g, "").trim();
-      if (!trimmed) return null;
-      const nums = trimmed.split(",").map((s) => Number(s.trim()));
-      if (nums.every((n) => Number.isFinite(n))) return nums;
-    }
-  }
-  return null;
-}
-
 async function loadLibrarySamples(): Promise<LibrarySample[]> {
-  const { rows } = await pool.query<{
+  const { rows: raw } = await pool.query<{
     trainSampleId: string;
     strokeLabel: string | null;
     strokeName: string;
     poseSequence: unknown;
     extractionMeta: unknown;
-    v2Emb: unknown;
-    samEmb: unknown;
   }>(
     `SELECT
       ts.id AS "trainSampleId",
       tv."strokeLabel" AS "strokeLabel",
       tv."strokeName" AS "strokeName",
       ts."poseSequence" AS "poseSequence",
-      ts."extractionMeta" AS "extractionMeta",
-      v2.embedding AS "v2Emb",
-      sam.embedding AS "samEmb"
+      ts."extractionMeta" AS "extractionMeta"
     FROM train_sample ts
     INNER JOIN train_video tv ON tv.id = ts."trainVideoId"
-    LEFT JOIN train_sample_embedding v2
-      ON v2."trainSampleId" = ts.id AND v2."specVersion" = $1
-    LEFT JOIN train_sample_embedding sam
-      ON sam."trainSampleId" = ts.id AND sam."specVersion" = $2
     WHERE ts.status = 'completed'
-    ORDER BY ts."createdAt" DESC`,
-    [POSE_EMBEDDING_SPEC_VERSION, MESH_EMBEDDING_SPEC_VERSION]
+    ORDER BY ts."createdAt" DESC`
   );
 
-  return rows.map((r) => {
-    const label = adminStrokeLabelKey(r.strokeLabel, r.strokeName);
-    let v2Vector = parsePgVector(r.v2Emb);
-    let samVector = parsePgVector(r.samEmb);
-    if (!v2Vector) {
-      const seq = Array.isArray(r.poseSequence) ? r.poseSequence : null;
-      v2Vector = embedTrainPoseSequence(seq);
-    }
-    if (!samVector) {
-      const meta =
-        r.extractionMeta && typeof r.extractionMeta === "object"
-          ? (r.extractionMeta as Record<string, unknown>)
-          : null;
-      samVector = embedTrainMeshFromExtractionMeta(meta);
-    }
-    return {
-      trainSampleId: r.trainSampleId,
-      strokeLabel: label,
-      v2Vector,
-      samVector,
-    };
-  });
+  return raw.map((r) => ({
+    trainSampleId: r.trainSampleId,
+    strokeLabel: adminStrokeLabelKey(r.strokeLabel, r.strokeName),
+    poseSequence: r.poseSequence,
+    extractionMeta:
+      r.extractionMeta && typeof r.extractionMeta === "object"
+        ? (r.extractionMeta as Record<string, unknown>)
+        : null,
+  }));
 }
 
-function buildQueryVector(
+/** Reconstruct a sample's per-frame query probes (same builders used at index time). */
+function sampleQueryFrames(
   sample: LibrarySample,
-  meshWeight: number
-): { vector: number[] | null; spec: string } {
-  const mw = Math.max(0, Math.min(1, meshWeight));
-  if (mw <= 0) {
-    return { vector: sample.v2Vector, spec: POSE_EMBEDDING_SPEC_VERSION };
-  }
-  if (mw >= 1) {
-    return { vector: sample.samVector, spec: MESH_EMBEDDING_SPEC_VERSION };
-  }
-  if (!sample.v2Vector || !sample.samVector) {
-    return { vector: sample.v2Vector ?? sample.samVector, spec: sample.samVector ? MESH_EMBEDDING_SPEC_VERSION : POSE_EMBEDDING_SPEC_VERSION };
-  }
+  weights: ChannelWeights
+): { pose: EnsembleQueryFrame[]; mesh: EnsembleQueryFrame[] } {
+  const impactFrameResolved =
+    sample.extractionMeta && typeof sample.extractionMeta.impact_frame_resolved === "number"
+      ? (sample.extractionMeta.impact_frame_resolved as number)
+      : null;
+  const poseFrames = embedTrainPoseFrames(
+    Array.isArray(sample.poseSequence)
+      ? (sample.poseSequence as Parameters<typeof embedTrainPoseFrames>[0])
+      : null,
+    { impactFrameResolved }
+  );
+  const meshFrames = embedTrainMeshFrames(sample.extractionMeta);
   return {
-    vector: blendStoredTrainVectors(sample.v2Vector, sample.samVector, mw),
-    spec: MESH_EMBEDDING_SPEC_VERSION,
+    pose: poseFrames.map((f) => ({
+      seqIndex: f.seqIndex,
+      vector: f.vector,
+      baseWeight: f.phase === "impact" ? weights.poseImpact : weights.poseOther,
+    })),
+    mesh: meshFrames.map((f) => ({
+      seqIndex: f.seqIndex,
+      vector: f.vector,
+      baseWeight: weights.mesh,
+    })),
   };
 }
 
-async function neighborsForLoocv(
-  sample: LibrarySample,
-  meshWeight: number,
-  k = 8
-): Promise<{ neighbors: NeighborRow[]; libraryFallback: boolean }> {
-  const { vector, spec } = buildQueryVector(sample, meshWeight);
-  if (!vector) return { neighbors: [], libraryFallback: false };
-
-  let neighbors = await findNearestTrainNeighbors(
-    vector,
-    k,
-    null,
-    spec,
-    sample.trainSampleId
-  );
-  let libraryFallback = false;
-  if (
-    neighbors.length === 0 &&
-    spec === MESH_EMBEDDING_SPEC_VERSION &&
-    sample.v2Vector
-  ) {
-    libraryFallback = true;
-    neighbors = await findNearestTrainNeighbors(
-      sample.v2Vector,
-      k,
-      null,
-      POSE_EMBEDDING_SPEC_VERSION,
-      sample.trainSampleId
-    );
-  }
-  return { neighbors, libraryFallback };
-}
-
 function topKHit(expected: string, neighbors: NeighborRow[], k: number): boolean {
-  const slice = neighbors.slice(0, k);
-  return slice.some((n) => labelsMatch(expected, n.stroke_label));
+  return neighbors.slice(0, k).some((n) => labelsMatch(expected, n.stroke_label));
 }
 
-async function runLoocvAtWeight(
+async function runLoocvAtWeights(
   samples: LibrarySample[],
-  meshWeight: number
+  weights: ChannelWeights,
+  k = 8
 ): Promise<{
   top1Ok: number;
   top3Ok: number;
   total: number;
   fallbackCount: number;
+  agreeCount: number;
   byShot: Record<string, { total: number; top1: number; top3: number }>;
   failures: Array<Record<string, unknown>>;
 }> {
@@ -214,18 +164,22 @@ async function runLoocvAtWeight(
   let top3Ok = 0;
   let total = 0;
   let fallbackCount = 0;
+  let agreeCount = 0;
   const byShot: Record<string, { total: number; top1: number; top3: number }> = {};
   const failures: Array<Record<string, unknown>> = [];
 
   for (const sample of samples) {
-    const { vector } = buildQueryVector(sample, meshWeight);
-    if (!vector) continue;
+    const { pose, mesh } = sampleQueryFrames(sample, weights);
+    if (pose.length === 0 && mesh.length === 0) continue;
     total++;
-    const { neighbors, libraryFallback } = await neighborsForLoocv(sample, meshWeight);
-    if (libraryFallback) fallbackCount++;
 
-    const hyp = buildShotHypothesis(neighbors);
-    const predicted = hyp.stroke_label ?? neighbors[0]?.stroke_label ?? null;
+    const run = await runEnsembleRetrieval(pose, mesh, k, sample.trainSampleId);
+    const neighbors = run.neighbors;
+    // Redundancy/fallback: only one channel produced library neighbors.
+    if (run.poseHasNeighbors !== run.meshHasNeighbors) fallbackCount++;
+    if (run.channel_agreement === true) agreeCount++;
+
+    const predicted = run.shot_hypothesis.stroke_label ?? neighbors[0]?.stroke_label ?? null;
     const t1 = labelsMatch(sample.strokeLabel, predicted);
     const t3 = topKHit(sample.strokeLabel, neighbors, 3);
     if (t1) top1Ok++;
@@ -244,12 +198,11 @@ async function runLoocvAtWeight(
         used: {
           expected: sample.strokeLabel,
           predicted,
-          library_fallback: libraryFallback,
-          mesh_weight: meshWeight,
-          gap:
-            neighbors.length >= 2
-              ? neighbors[1]!.distance - neighbors[0]!.distance
-              : null,
+          pose_shot: run.pose_hypothesis?.stroke_label ?? null,
+          mesh_shot: run.mesh_hypothesis?.stroke_label ?? null,
+          channel_agreement: run.channel_agreement,
+          frames: { pose: pose.length, mesh: mesh.length },
+          gap: run.neighbor_distance_gap,
           neighbors: neighbors.slice(0, 5).map((n) => ({
             stroke_label: n.stroke_label,
             distance: Math.round(n.distance * 1000) / 1000,
@@ -259,7 +212,7 @@ async function runLoocvAtWeight(
     }
   }
 
-  return { top1Ok, top3Ok, total, fallbackCount, byShot, failures };
+  return { top1Ok, top3Ok, total, fallbackCount, agreeCount, byShot, failures };
 }
 
 function benchResult(
@@ -363,8 +316,9 @@ async function runLibraryReady(title: string): Promise<BenchStepResult> {
 
 async function runLoocvStep(title: string, meshWeight?: number): Promise<BenchStepResult> {
   const samples = await loadLibrarySamples();
-  const w = typeof meshWeight === "number" ? meshWeight : 0.4;
-  const r = await runLoocvAtWeight(samples, w);
+  const weights = defaultChannelWeights();
+  if (typeof meshWeight === "number") weights.mesh = meshWeight;
+  const r = await runLoocvAtWeights(samples, weights);
   const scorePercent = percentFromRatio(r.top1Ok, r.total);
   const byShotRows = Object.entries(r.byShot).map(([label, s]) => ({
     label,
@@ -379,13 +333,14 @@ async function runLoocvStep(title: string, meshWeight?: number): Promise<BenchSt
     scorePercent,
     r.total === 0
       ? "0 library samples"
-      : `top1 ${r.top1Ok}/${r.total} · top3 ${r.top3Ok}/${r.total} · w=${w}`,
+      : `top1 ${r.top1Ok}/${r.total} · top3 ${r.top3Ok}/${r.total} · agree ${r.agreeCount}/${r.total}`,
     {
       evidence: {
-        mesh_weight: w,
+        channel_weights: weights,
         sample_count: samples.length,
         evaluated: r.total,
-        fallback_count: r.fallbackCount,
+        single_channel_count: r.fallbackCount,
+        channel_agreement_count: r.agreeCount,
       },
       failures: r.failures,
       tables: { by_shot: byShotRows },
@@ -393,6 +348,7 @@ async function runLoocvStep(title: string, meshWeight?: number): Promise<BenchSt
         ringScores: [
           { label: "top1", value: scorePercent },
           { label: "top3", value: percentFromRatio(r.top3Ok, r.total) },
+          { label: "agree", value: percentFromRatio(r.agreeCount, r.total) },
         ],
         lineSeries: byShotRows.map((row) => ({
           label: row.label.slice(0, 12),
@@ -405,26 +361,26 @@ async function runLoocvStep(title: string, meshWeight?: number): Promise<BenchSt
 
 async function runBlendSweep(title: string): Promise<BenchStepResult> {
   const samples = await loadLibrarySamples();
+  const baseWeights = defaultChannelWeights();
   const byWeight: Array<{
     mesh_weight: number;
     label: string;
     top1_pct: number;
     top3_pct: number;
     evaluated: number;
-    fallback_pct: number;
+    agree_pct: number;
   }> = [];
 
-  for (const w of BLEND_WEIGHTS) {
-    const r = await runLoocvAtWeight(samples, w);
-    const label =
-      w <= 0 ? "mp" : w >= 1 ? "mesh" : `${Math.round(w * 100)}/${Math.round((1 - w) * 100)}`;
+  for (const mw of MESH_WEIGHT_SWEEP) {
+    const r = await runLoocvAtWeights(samples, { ...baseWeights, mesh: mw });
+    const label = mw <= 0 ? "pose-only" : `mesh×${mw}`;
     byWeight.push({
-      mesh_weight: w,
+      mesh_weight: mw,
       label,
       top1_pct: percentFromRatio(r.top1Ok, r.total),
       top3_pct: percentFromRatio(r.top3Ok, r.total),
       evaluated: r.total,
-      fallback_pct: percentFromRatio(r.fallbackCount, r.total),
+      agree_pct: percentFromRatio(r.agreeCount, r.total),
     });
   }
 
@@ -435,11 +391,9 @@ async function runBlendSweep(title: string): Promise<BenchStepResult> {
     "3_blend",
     title,
     scorePercent,
-    samples.length === 0
-      ? "0 samples"
-      : `best ${best?.label} top1=${best?.top1_pct}%`,
+    samples.length === 0 ? "0 samples" : `best ${best?.label} top1=${best?.top1_pct}%`,
     {
-      evidence: { sample_count: samples.length, weights: [...BLEND_WEIGHTS] },
+      evidence: { sample_count: samples.length, mesh_weights: [...MESH_WEIGHT_SWEEP] },
       tables: { by_weight: byWeight },
       charts: {
         lineSeries: byWeight.map((row) => ({

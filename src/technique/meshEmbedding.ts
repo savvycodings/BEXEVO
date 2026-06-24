@@ -301,3 +301,51 @@ export function embedTrainMeshFromExtractionMeta(
   if (typeof conf === "number" && conf < MESH_CONFIDENCE_MIN) return null;
   return meshVectorFromEnrichmentFrame(last);
 }
+
+// ---------------------------------------------------------------------------
+// Sequence (per-frame) mesh embeddings — multi-probe ensemble retrieval
+// ---------------------------------------------------------------------------
+
+export type MeshFrameVector = {
+  seqIndex: number;
+  vector: number[];
+  frame: number;
+  meshConfidence: number | null;
+};
+
+/** Every enrichment frame passing the confidence floor, each as its own probe vector. */
+function meshFramesFromEnrichment(pe: PoseEnrichment | null): MeshFrameVector[] {
+  const frames = pe?.frames;
+  if (!Array.isArray(frames) || frames.length === 0) return [];
+  const out: MeshFrameVector[] = [];
+  let seq = 0;
+  for (const f of frames) {
+    const conf = typeof f.mesh_confidence === "number" ? f.mesh_confidence : null;
+    if (conf != null && conf < MESH_CONFIDENCE_MIN) continue;
+    const vec = meshVectorFromEnrichmentFrame(f);
+    if (!vec) continue;
+    out.push({
+      seqIndex: seq++,
+      vector: vec,
+      frame: typeof f.frame === "number" ? f.frame : seq,
+      meshConfidence: conf,
+    });
+  }
+  return out;
+}
+
+/** Train pro-library: all mesh impact-window frames from extraction_meta.pose_enrichment. */
+export function embedTrainMeshFrames(
+  extractionMeta: Record<string, unknown> | null | undefined
+): MeshFrameVector[] {
+  const pe = parsePoseEnrichment(extractionMeta as Record<string, unknown>);
+  return meshFramesFromEnrichment(pe);
+}
+
+/** Technique analyze: all mesh impact-window frames from metrics.pose_enrichment. */
+export function embedMeshQueryFrames(
+  metrics: Record<string, unknown> | null | undefined
+): MeshFrameVector[] {
+  const pe = parsePoseEnrichment(metrics);
+  return meshFramesFromEnrichment(pe);
+}
