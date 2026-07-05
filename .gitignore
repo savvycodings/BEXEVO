@@ -1,5 +1,6 @@
 node_modules
 .env
+.env.railway
 dist
 yarn.lock
 package-lock.json

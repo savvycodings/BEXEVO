@@ -13,21 +13,22 @@ const pool = new pg.Pool({
 async function main() {
   const { rows } = await pool.query(`
     SELECT
-      id,
-      status,
-      "userId",
-      "createdAt",
-      "strokeLabel" AS hyp_label,
-      ("retrievalConfidence")::float AS hyp_conf,
-      "strokePreset" AS hyp_preset,
-      category,
-      "skillLevel",
-      "correctionContext"->'shot_and_handedness'->'shot'->>'shot_name' AS correction_shot,
-      COALESCE(jsonb_array_length("correctionContext"->'frames'), 0) AS frame_insights_n,
-      jsonb_array_length(COALESCE("correctionImages", '[]'::jsonb)) AS gemini_correction_n
-    FROM technique_analysis_overview
-    ORDER BY "createdAt" DESC
-    LIMIT 2
+      ta.id,
+      ta.status,
+      ta."userId",
+      ta."createdAt",
+      (ta.metrics #>> '{retrieval,shot_hypothesis,stroke_label}') AS hyp_label,
+      ((ta.metrics #>> '{retrieval,shot_hypothesis,confidence}')::float) AS hyp_conf,
+      (ta.metrics #>> '{retrieval,shot_hypothesis,stroke_preset}') AS hyp_preset,
+      (ta.metrics #>> '{retrieval,shot_hypothesis,category}') AS category,
+      (ta.metrics #>> '{retrieval,shot_hypothesis,skill_level}') AS skill_level,
+      (ta.metrics #>> '{correction_context,shot_and_handedness,shot,shot_name}') AS correction_shot,
+      COALESCE(jsonb_array_length(ta.metrics->'correction_context'->'frames'), 0) AS frame_insights_n,
+      jsonb_array_length(COALESCE(ta.metrics->'correction_images', '[]'::jsonb)) AS gemini_correction_n
+    FROM technique_analysis ta
+    WHERE ta.status = 'completed'
+    ORDER BY ta."createdAt" DESC
+    LIMIT 5
   `);
 
   const out = { queried_at: new Date().toISOString(), recent: rows };

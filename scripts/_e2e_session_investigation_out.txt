@@ -1,0 +1,741 @@
+﻿node.exe : (node:10064) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` 
+instead.
+At C:\Users\kyle\AppData\Roaming\npm\pnpm.ps1:24 char:5
++     & "node$exe"  "$basedir/node_modules/corepack/dist/pnpm.js" $args
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((node:10064) [D...oks()` instead.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:10064) Warning: SECURITY WARNING: The SSL modes 'prefer', 'require', and 'verify-ca' are treated as aliases for 
+'verify-full'.
+In the next major version (pg-connection-string v3.0.0 and pg v9.0.0), these modes will adopt standard libpq 
+semantics, which have weaker security guarantees.
+
+To prepare for this change:
+- If you want the current behavior, explicitly use 'sslmode=verify-full'
+- If you want libpq compatibility now, use 'uselibpqcompat=true&sslmode=require'
+
+See https://www.postgresql.org/docs/current/libpq-ssl.html for libpq SSL mode definitions.
+{
+  "queried_at": "2026-06-28T20:13:21.151Z",
+  "retrieval_mode_env": "blended",
+  "library": {
+    "frameIndex_column": true,
+    "embedding_counts": [
+      {
+        "specVersion": "sam_v1",
+        "rows": 80,
+        "samples": 2,
+        "rows_with_multi_frame": 39
+      },
+      {
+        "specVersion": "v2",
+        "rows": 80,
+        "samples": 2,
+        "rows_with_multi_frame": 39
+      }
+    ],
+    "latest_train_samples": [
+      {
+        "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+        "createdAt": "2026-06-24T10:54:27.487Z",
+        "status": "completed",
+        "frameCount": 85,
+        "totalFrames": 85,
+        "train_video_id": "ba71fd6d-eccc-40ad-9731-1efb0cc3f995",
+        "strokeLabel": "Forehand Volley",
+        "strokeName": "Forehand Volley ┬À Advanced",
+        "stride": "1",
+        "impact_frame_resolved": "49",
+        "mesh_frames": 40
+      },
+      {
+        "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+        "createdAt": "2026-06-24T10:27:49.705Z",
+        "status": "completed",
+        "frameCount": 80,
+        "totalFrames": 80,
+        "train_video_id": "c9b0f9b6-c804-4c42-8ba9-55564288c44b",
+        "strokeLabel": "Forehand Return",
+        "strokeName": "Forehand Return ┬À Advanced",
+        "stride": "1",
+        "impact_frame_resolved": "40",
+        "mesh_frames": 40
+      }
+    ],
+    "top_per_sample_frame_rows": [
+      {
+        "trainSampleId": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+        "specVersion": "v2",
+        "frame_rows": 40
+      },
+      {
+        "trainSampleId": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+        "specVersion": "sam_v1",
+        "frame_rows": 40
+      },
+      {
+        "trainSampleId": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+        "specVersion": "v2",
+        "frame_rows": 40
+      },
+      {
+        "trainSampleId": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+        "specVersion": "sam_v1",
+        "frame_rows": 40
+      }
+    ]
+  },
+  "submissions": [
+    {
+      "analysis_id": "8622a5b8-b76b-492d-b438-99e679ccb261",
+      "createdAt": "2026-06-24T11:00:27.311Z",
+      "techniqueVideoId": "75060178-aed0-4151-b70f-91dc19c8383b",
+      "userId": "ouCeCfH9k40sWheUrvkdwTxS3Skt7I3t",
+      "video": {
+        "bytes": "3227265",
+        "format": "mp4",
+        "cloudinaryPublicId": "/app/uploads/technique/75060178-aed0-4151-b70f-91dc19c8383b.mp4"
+      },
+      "user_clips": [
+        {
+          "endMs": 1701,
+          "startMs": 290
+        }
+      ],
+      "video_duration_ms": 3000,
+      "total_frames": 85,
+      "impact_frame_resolved": 16,
+      "impact_frame_source": "yolo_median",
+      "yolo_contacts": [
+        2,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "pose_enrichment_frame_count": 10,
+      "retrieval": {
+        "query_embedding_ok": true,
+        "spec_version": "ensemble",
+        "embedding_source": "ensemble",
+        "mesh_used": true,
+        "mesh_confidence": 0.964553,
+        "neighbor_distance_gap": 0.10900986194610596,
+        "shot_hypothesis": {
+          "stroke_label": "Forehand Volley",
+          "stroke_preset": "forehand_volley",
+          "category": "net_play",
+          "skill_level": "advanced",
+          "confidence": 0.8014368747747643
+        },
+        "pose_hypothesis": {
+          "stroke_label": "Forehand Volley",
+          "stroke_preset": "forehand_volley",
+          "category": "net_play",
+          "skill_level": "advanced",
+          "confidence": 0.44893666018257733
+        },
+        "mesh_hypothesis": {
+          "stroke_label": "Forehand Volley",
+          "stroke_preset": "forehand_volley",
+          "category": "net_play",
+          "skill_level": "advanced",
+          "confidence": 0.9243617812384023
+        },
+        "channel_agreement": true,
+        "frames_used": {
+          "mesh": 10,
+          "pose": 10
+        },
+        "eval": {
+          "llm_shot": "Pro library match: Forehand Volley.",
+          "mesh_shot": "Forehand Volley",
+          "pose_shot": "Forehand Volley",
+          "frames_used": {
+            "mesh": 10,
+            "pose": 10
+          },
+          "display_shot": "Forehand Volley",
+          "distance_gap": 0.10900986194610596,
+          "llm_category": "net_play",
+          "spec_version": "ensemble",
+          "expected_shot": null,
+          "predicted_shot": "Forehand Volley",
+          "mesh_confidence": 0.964553,
+          "top_k_neighbors": [
+            {
+              "distance": 0,
+              "stroke_label": "Forehand Volley",
+              "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+            },
+            {
+              "distance": 0.109,
+              "stroke_label": "Forehand Return",
+              "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+            }
+          ],
+          "blend_formula_id": null,
+          "embedding_source": "ensemble",
+          "library_fallback": false,
+          "blend_mesh_weight": null,
+          "channel_agreement": true,
+          "llm_disagrees_retrieval": false
+        },
+        "top_neighbors": [
+          {
+            "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+            "train_video_id": "ba71fd6d-eccc-40ad-9731-1efb0cc3f995",
+            "stroke_label": "Forehand Volley",
+            "stroke_preset": "forehand_volley",
+            "category": "net_play",
+            "distance": 0
+          },
+          {
+            "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+            "train_video_id": "c9b0f9b6-c804-4c42-8ba9-55564288c44b",
+            "stroke_label": "Forehand Return",
+            "stroke_preset": "forehand_return_with_lob",
+            "category": "save_return",
+            "distance": 0.109
+          }
+        ]
+      },
+      "ai_score": 81,
+      "llm_shot_context": "Pro library match: Forehand Volley.",
+      "correction_shot": null
+    },
+    {
+      "analysis_id": "f11ae30d-34a7-4665-86a8-a6e876626e3e",
+      "createdAt": "2026-06-24T11:04:00.526Z",
+      "techniqueVideoId": "a222e067-ded6-447b-b0ed-48a00a812287",
+      "userId": "ouCeCfH9k40sWheUrvkdwTxS3Skt7I3t",
+      "video": {
+        "bytes": "4865010",
+        "format": "mp4",
+        "cloudinaryPublicId": "/app/uploads/technique/a222e067-ded6-447b-b0ed-48a00a812287.mp4"
+      },
+      "user_clips": [
+        {
+          "endMs": 1736,
+          "startMs": 441
+        }
+      ],
+      "video_duration_ms": 3000,
+      "total_frames": 80,
+      "impact_frame_resolved": 27,
+      "impact_frame_source": "yolo_median",
+      "yolo_contacts": [
+        14,
+        40
+      ],
+      "pose_enrichment_frame_count": 10,
+      "retrieval": {
+        "query_embedding_ok": true,
+        "spec_version": "ensemble",
+        "embedding_source": "ensemble",
+        "mesh_used": true,
+        "mesh_confidence": 0.698927,
+        "neighbor_distance_gap": 0.10799890756607056,
+        "shot_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.915782895323288
+        },
+        "pose_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.8758039104255038
+        },
+        "mesh_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.7826069512499305
+        },
+        "channel_agreement": true,
+        "frames_used": {
+          "mesh": 10,
+          "pose": 10
+        },
+        "eval": {
+          "llm_shot": "Pro library match: Forehand Return.",
+          "mesh_shot": "Forehand Return",
+          "pose_shot": "Forehand Return",
+          "frames_used": {
+            "mesh": 10,
+            "pose": 10
+          },
+          "display_shot": "Forehand Return",
+          "distance_gap": 0.10799890756607056,
+          "llm_category": "save_return",
+          "spec_version": "ensemble",
+          "expected_shot": null,
+          "predicted_shot": "Forehand Return",
+          "mesh_confidence": 0.698927,
+          "top_k_neighbors": [
+            {
+              "distance": 0,
+              "stroke_label": "Forehand Return",
+              "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+            },
+            {
+              "distance": 0.108,
+              "stroke_label": "Forehand Volley",
+              "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+            }
+          ],
+          "blend_formula_id": null,
+          "embedding_source": "ensemble",
+          "library_fallback": false,
+          "blend_mesh_weight": null,
+          "channel_agreement": true,
+          "llm_disagrees_retrieval": false
+        },
+        "top_neighbors": [
+          {
+            "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+            "train_video_id": "c9b0f9b6-c804-4c42-8ba9-55564288c44b",
+            "stroke_label": "Forehand Return",
+            "stroke_preset": "forehand_return_with_lob",
+            "category": "save_return",
+            "distance": 0
+          },
+          {
+            "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+            "train_video_id": "ba71fd6d-eccc-40ad-9731-1efb0cc3f995",
+            "stroke_label": "Forehand Volley",
+            "stroke_preset": "forehand_volley",
+            "category": "net_play",
+            "distance": 0.108
+          }
+        ]
+      },
+      "ai_score": 72,
+      "llm_shot_context": "Pro library match: Forehand Return.",
+      "correction_shot": null
+    },
+    {
+      "analysis_id": "5adcdd76-6138-49c4-acb5-5e72a2bf1f91",
+      "createdAt": "2026-06-24T11:05:02.128Z",
+      "techniqueVideoId": "3bf94a25-6e90-4da1-bcb4-01e10ef5b4d9",
+      "userId": "ouCeCfH9k40sWheUrvkdwTxS3Skt7I3t",
+      "video": {
+        "bytes": "3227265",
+        "format": "mp4",
+        "cloudinaryPublicId": "/app/uploads/technique/3bf94a25-6e90-4da1-bcb4-01e10ef5b4d9.mp4"
+      },
+      "user_clips": [
+        {
+          "endMs": 1646,
+          "startMs": 461
+        }
+      ],
+      "video_duration_ms": 3000,
+      "total_frames": 85,
+      "impact_frame_resolved": 16,
+      "impact_frame_source": "yolo_median",
+      "yolo_contacts": [
+        2,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "pose_enrichment_frame_count": 10,
+      "retrieval": {
+        "query_embedding_ok": true,
+        "spec_version": "ensemble",
+        "embedding_source": "ensemble",
+        "mesh_used": true,
+        "mesh_confidence": 0.964553,
+        "neighbor_distance_gap": 0.10900986194610596,
+        "shot_hypothesis": {
+          "stroke_label": "Forehand Volley",
+          "stroke_preset": "forehand_volley",
+          "category": "net_play",
+          "skill_level": "advanced",
+          "confidence": 0.8014368747747643
+        },
+        "pose_hypothesis": {
+          "stroke_label": "Forehand Volley",
+          "stroke_preset": "forehand_volley",
+          "category": "net_play",
+          "skill_level": "advanced",
+          "confidence": 0.44893666018257733
+        },
+        "mesh_hypothesis": {
+          "stroke_label": "Forehand Volley",
+          "stroke_preset": "forehand_volley",
+          "category": "net_play",
+          "skill_level": "advanced",
+          "confidence": 0.9243617812384023
+        },
+        "channel_agreement": true,
+        "frames_used": {
+          "mesh": 10,
+          "pose": 10
+        },
+        "eval": {
+          "llm_shot": "Pro library match: Forehand Volley.",
+          "mesh_shot": "Forehand Volley",
+          "pose_shot": "Forehand Volley",
+          "frames_used": {
+            "mesh": 10,
+            "pose": 10
+          },
+          "display_shot": "Forehand Volley",
+          "distance_gap": 0.10900986194610596,
+          "llm_category": "net_play",
+          "spec_version": "ensemble",
+          "expected_shot": null,
+          "predicted_shot": "Forehand Volley",
+          "mesh_confidence": 0.964553,
+          "top_k_neighbors": [
+            {
+              "distance": 0,
+              "stroke_label": "Forehand Volley",
+              "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+            },
+            {
+              "distance": 0.109,
+              "stroke_label": "Forehand Return",
+              "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+            }
+          ],
+          "blend_formula_id": null,
+          "embedding_source": "ensemble",
+          "library_fallback": false,
+          "blend_mesh_weight": null,
+          "channel_agreement": true,
+          "llm_disagrees_retrieval": false
+        },
+        "top_neighbors": [
+          {
+            "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+            "train_video_id": "ba71fd6d-eccc-40ad-9731-1efb0cc3f995",
+            "stroke_label": "Forehand Volley",
+            "stroke_preset": "forehand_volley",
+            "category": "net_play",
+            "distance": 0
+          },
+          {
+            "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+            "train_video_id": "c9b0f9b6-c804-4c42-8ba9-55564288c44b",
+            "stroke_label": "Forehand Return",
+            "stroke_preset": "forehand_return_with_lob",
+            "category": "save_return",
+            "distance": 0.109
+          }
+        ]
+      },
+      "ai_score": 78,
+      "llm_shot_context": "Pro library match: Forehand Volley.",
+      "correction_shot": null
+    },
+    {
+      "analysis_id": "039a239c-662e-4423-aeab-49dd083a1720",
+      "createdAt": "2026-06-24T11:16:21.375Z",
+      "techniqueVideoId": "11971ebc-ead8-45ff-91f0-30b41b6819c3",
+      "userId": "ouCeCfH9k40sWheUrvkdwTxS3Skt7I3t",
+      "video": {
+        "bytes": "4952003",
+        "format": "mp4",
+        "cloudinaryPublicId": "/app/uploads/technique/11971ebc-ead8-45ff-91f0-30b41b6819c3.mp4"
+      },
+      "user_clips": [
+        {
+          "endMs": 1658,
+          "startMs": 438
+        }
+      ],
+      "video_duration_ms": 3000,
+      "total_frames": 160,
+      "impact_frame_resolved": 61,
+      "impact_frame_source": "yolo_median",
+      "yolo_contacts": [
+        29,
+        38,
+        41,
+        42,
+        44,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ],
+      "pose_enrichment_frame_count": 10,
+      "retrieval": {
+        "query_embedding_ok": true,
+        "spec_version": "ensemble",
+        "embedding_source": "ensemble",
+        "mesh_used": true,
+        "mesh_confidence": 0.91203,
+        "neighbor_distance_gap": 0.1789684657589835,
+        "shot_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.8131290934612632
+        },
+        "pose_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.7617543467751763
+        },
+        "mesh_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.6531719022301636
+        },
+        "channel_agreement": true,
+        "frames_used": {
+          "mesh": 10,
+          "pose": 10
+        },
+        "eval": {
+          "llm_shot": "Pro library match: Forehand Return.",
+          "mesh_shot": "Forehand Return",
+          "pose_shot": "Forehand Return",
+          "frames_used": {
+            "mesh": 10,
+            "pose": 10
+          },
+          "display_shot": "Forehand Return",
+          "distance_gap": 0.1789684657589835,
+          "llm_category": "save_return",
+          "spec_version": "ensemble",
+          "expected_shot": null,
+          "predicted_shot": "Forehand Return",
+          "mesh_confidence": 0.91203,
+          "top_k_neighbors": [
+            {
+              "distance": 0.035,
+              "stroke_label": "Forehand Return",
+              "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+            },
+            {
+              "distance": 0.214,
+              "stroke_label": "Forehand Volley",
+              "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+            }
+          ],
+          "blend_formula_id": null,
+          "embedding_source": "ensemble",
+          "library_fallback": false,
+          "blend_mesh_weight": null,
+          "channel_agreement": true,
+          "llm_disagrees_retrieval": false
+        },
+        "top_neighbors": [
+          {
+            "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+            "train_video_id": "c9b0f9b6-c804-4c42-8ba9-55564288c44b",
+            "stroke_label": "Forehand Return",
+            "stroke_preset": "forehand_return_with_lob",
+            "category": "save_return",
+            "distance": 0.0355
+          },
+          {
+            "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+            "train_video_id": "ba71fd6d-eccc-40ad-9731-1efb0cc3f995",
+            "stroke_label": "Forehand Volley",
+            "stroke_preset": "forehand_volley",
+            "category": "net_play",
+            "distance": 0.2145
+          }
+        ]
+      },
+      "ai_score": 78,
+      "llm_shot_context": "Pro library match: Forehand Return.",
+      "correction_shot": null
+    },
+    {
+      "analysis_id": "f6406c56-d94a-47a4-a21a-325bb03d42bf",
+      "createdAt": "2026-06-24T11:17:36.580Z",
+      "techniqueVideoId": "deb52091-04f7-4a93-88f9-ab8dd59b24c7",
+      "userId": "ouCeCfH9k40sWheUrvkdwTxS3Skt7I3t",
+      "video": {
+        "bytes": "4952003",
+        "format": "mp4",
+        "cloudinaryPublicId": "/app/uploads/technique/deb52091-04f7-4a93-88f9-ab8dd59b24c7.mp4"
+      },
+      "user_clips": [
+        {
+          "endMs": 1925,
+          "startMs": 426
+        }
+      ],
+      "video_duration_ms": 3000,
+      "total_frames": 160,
+      "impact_frame_resolved": 61,
+      "impact_frame_source": "yolo_median",
+      "yolo_contacts": [
+        29,
+        38,
+        41,
+        42,
+        44,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ],
+      "pose_enrichment_frame_count": 10,
+      "retrieval": {
+        "query_embedding_ok": true,
+        "spec_version": "ensemble",
+        "embedding_source": "ensemble",
+        "mesh_used": true,
+        "mesh_confidence": 0.91203,
+        "neighbor_distance_gap": 0.1789684657589835,
+        "shot_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.8131290934612632
+        },
+        "pose_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.7617543467751763
+        },
+        "mesh_hypothesis": {
+          "stroke_label": "Forehand Return",
+          "stroke_preset": "forehand_return_with_lob",
+          "category": "save_return",
+          "skill_level": "advanced",
+          "confidence": 0.6531719022301636
+        },
+        "channel_agreement": true,
+        "frames_used": {
+          "mesh": 10,
+          "pose": 10
+        },
+        "eval": {
+          "llm_shot": "Pro library match: Forehand Return.",
+          "mesh_shot": "Forehand Return",
+          "pose_shot": "Forehand Return",
+          "frames_used": {
+            "mesh": 10,
+            "pose": 10
+          },
+          "display_shot": "Forehand Return",
+          "distance_gap": 0.1789684657589835,
+          "llm_category": "save_return",
+          "spec_version": "ensemble",
+          "expected_shot": null,
+          "predicted_shot": "Forehand Return",
+          "mesh_confidence": 0.91203,
+          "top_k_neighbors": [
+            {
+              "distance": 0.035,
+              "stroke_label": "Forehand Return",
+              "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+            },
+            {
+              "distance": 0.214,
+              "stroke_label": "Forehand Volley",
+              "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+            }
+          ],
+          "blend_formula_id": null,
+          "embedding_source": "ensemble",
+          "library_fallback": false,
+          "blend_mesh_weight": null,
+          "channel_agreement": true,
+          "llm_disagrees_retrieval": false
+        },
+        "top_neighbors": [
+          {
+            "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+            "train_video_id": "c9b0f9b6-c804-4c42-8ba9-55564288c44b",
+            "stroke_label": "Forehand Return",
+            "stroke_preset": "forehand_return_with_lob",
+            "category": "save_return",
+            "distance": 0.0355
+          },
+          {
+            "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+            "train_video_id": "ba71fd6d-eccc-40ad-9731-1efb0cc3f995",
+            "stroke_label": "Forehand Volley",
+            "stroke_preset": "forehand_volley",
+            "category": "net_play",
+            "distance": 0.2145
+          }
+        ]
+      },
+      "ai_score": 76,
+      "llm_shot_context": "Pro library match: Forehand Return.",
+      "correction_shot": null
+    }
+  ],
+  "neighbor_train_samples": [
+    {
+      "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+      "strokeLabel": "Forehand Return",
+      "strokeName": "Forehand Return ┬À Advanced",
+      "createdAt": "2026-06-24T10:27:49.705Z",
+      "totalFrames": 80,
+      "stride": "1"
+    },
+    {
+      "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+      "strokeLabel": "Forehand Volley",
+      "strokeName": "Forehand Volley ┬À Advanced",
+      "createdAt": "2026-06-24T10:54:27.487Z",
+      "totalFrames": 85,
+      "stride": "1"
+    }
+  ]
+}

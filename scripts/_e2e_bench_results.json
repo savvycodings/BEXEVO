@@ -1,0 +1,240 @@
+{
+  "queried_at": "2026-06-28T20:38:11.524Z",
+  "steps": {
+    "1_library_ready": {
+      "stepId": "1_library_ready",
+      "title": "Library ready",
+      "passed": true,
+      "scorePercent": 100,
+      "summary": "80 v2 · 80 sam_v1",
+      "evidence": {
+        "v2_count": 80,
+        "sam_v1_count": 80,
+        "thin_labels": [],
+        "thresholds": {
+          "min_per_label": 2
+        }
+      },
+      "failures": [],
+      "tables": {
+        "embedding_counts": [
+          {
+            "spec": "v2",
+            "count": 80
+          },
+          {
+            "spec": "sam_v1",
+            "count": 80
+          }
+        ]
+      },
+      "charts": {
+        "ringScores": [
+          {
+            "label": "v2",
+            "value": 100
+          },
+          {
+            "label": "sam",
+            "value": 100
+          }
+        ]
+      }
+    },
+    "2_loocv": {
+      "stepId": "2_loocv",
+      "title": "LOOCV",
+      "passed": false,
+      "scorePercent": 0,
+      "summary": "top1 0/2 · top3 0/2 · agree 2/2",
+      "evidence": {
+        "channel_weights": {
+          "poseImpact": 0,
+          "poseOther": 0,
+          "mesh": 0
+        },
+        "sample_count": 2,
+        "evaluated": 2,
+        "single_channel_count": 0,
+        "channel_agreement_count": 2
+      },
+      "failures": [
+        {
+          "id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+          "reason": "top1_mismatch",
+          "used": {
+            "expected": "Forehand Volley",
+            "predicted": "Forehand Return",
+            "pose_shot": "Forehand Return",
+            "mesh_shot": "Forehand Return",
+            "channel_agreement": true,
+            "frames": {
+              "pose": 40,
+              "mesh": 40
+            },
+            "gap": null,
+            "neighbors": [
+              {
+                "stroke_label": "Forehand Return",
+                "distance": 0.073
+              }
+            ]
+          }
+        },
+        {
+          "id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+          "reason": "top1_mismatch",
+          "used": {
+            "expected": "Forehand Return",
+            "predicted": "Forehand Volley",
+            "pose_shot": "Forehand Volley",
+            "mesh_shot": "Forehand Volley",
+            "channel_agreement": true,
+            "frames": {
+              "pose": 40,
+              "mesh": 40
+            },
+            "gap": null,
+            "neighbors": [
+              {
+                "stroke_label": "Forehand Volley",
+                "distance": 0.073
+              }
+            ]
+          }
+        }
+      ],
+      "tables": {
+        "by_shot": [
+          {
+            "label": "Forehand Volley",
+            "total": 1,
+            "top1_pct": 0,
+            "top3_pct": 0
+          },
+          {
+            "label": "Forehand Return",
+            "total": 1,
+            "top1_pct": 0,
+            "top3_pct": 0
+          }
+        ]
+      },
+      "charts": {
+        "ringScores": [
+          {
+            "label": "top1",
+            "value": 0
+          },
+          {
+            "label": "top3",
+            "value": 0
+          },
+          {
+            "label": "agree",
+            "value": 100
+          }
+        ],
+        "lineSeries": [
+          {
+            "label": "Forehand Vol",
+            "value": 0
+          },
+          {
+            "label": "Forehand Ret",
+            "value": 0
+          }
+        ]
+      }
+    },
+    "5_analysis_audit": {
+      "stepId": "5_analysis_audit",
+      "title": "Analysis audit",
+      "passed": true,
+      "scorePercent": 100,
+      "summary": "Forehand Return",
+      "evidence": {
+        "analysis_id": "039a239c-662e-4423-aeab-49dd083a1720",
+        "eval": {
+          "llm_shot": "Pro library match: Forehand Return.",
+          "mesh_shot": "Forehand Return",
+          "pose_shot": "Forehand Return",
+          "frames_used": {
+            "mesh": 10,
+            "pose": 10
+          },
+          "display_shot": "Forehand Return",
+          "distance_gap": 0.1789684657589835,
+          "llm_category": "save_return",
+          "spec_version": "ensemble",
+          "expected_shot": null,
+          "predicted_shot": "Forehand Return",
+          "mesh_confidence": 0.91203,
+          "top_k_neighbors": [
+            {
+              "distance": 0.035,
+              "stroke_label": "Forehand Return",
+              "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+            },
+            {
+              "distance": 0.214,
+              "stroke_label": "Forehand Volley",
+              "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+            }
+          ],
+          "blend_formula_id": null,
+          "embedding_source": "ensemble",
+          "library_fallback": false,
+          "blend_mesh_weight": null,
+          "channel_agreement": true,
+          "llm_disagrees_retrieval": false
+        }
+      },
+      "failures": [],
+      "tables": {
+        "neighbors": [
+          {
+            "distance": 0.035,
+            "stroke_label": "Forehand Return",
+            "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+          },
+          {
+            "distance": 0.214,
+            "stroke_label": "Forehand Volley",
+            "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+          }
+        ],
+        "signals": [
+          {
+            "key": "embedding_source",
+            "value": "ensemble"
+          },
+          {
+            "key": "spec_version",
+            "value": "ensemble"
+          },
+          {
+            "key": "mesh_confidence",
+            "value": 0.91203
+          },
+          {
+            "key": "distance_gap",
+            "value": 0.1789684657589835
+          },
+          {
+            "key": "library_fallback",
+            "value": false
+          }
+        ]
+      },
+      "charts": {
+        "ringScores": [
+          {
+            "label": "mesh",
+            "value": 91
+          }
+        ]
+      }
+    }
+  }
+}

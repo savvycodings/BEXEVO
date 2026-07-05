@@ -1,0 +1,926 @@
+{
+  "queried_at": "2026-06-28T20:40:45.020Z",
+  "analysis_id": "039a239c-662e-4423-aeab-49dd083a1720",
+  "technique_upload": {
+    "analysis_id": "039a239c-662e-4423-aeab-49dd083a1720",
+    "video_bytes": "4952003",
+    "total_frames": 160,
+    "pose_data_frame_count": 160,
+    "impact_frame_resolved": 61,
+    "impact_frame_source": "yolo_median",
+    "user_clips": [
+      {
+        "endMs": 1658,
+        "startMs": 438
+      }
+    ],
+    "yolo_contact_count": 24,
+    "impact_key_landmarks": {
+      "LEFT_SHOULDER": {
+        "x": 0.441,
+        "y": 0.341,
+        "z": -0.388
+      },
+      "RIGHT_SHOULDER": {
+        "x": 0.39,
+        "y": 0.346,
+        "z": -0.12
+      },
+      "LEFT_ELBOW": {
+        "x": 0.38,
+        "y": 0.393,
+        "z": -0.474
+      },
+      "RIGHT_ELBOW": {
+        "x": 0.353,
+        "y": 0.396,
+        "z": -0.077
+      },
+      "LEFT_WRIST": {
+        "x": 0.311,
+        "y": 0.424,
+        "z": -0.539
+      },
+      "RIGHT_WRIST": {
+        "x": 0.296,
+        "y": 0.427,
+        "z": -0.18
+      },
+      "LEFT_HIP": {
+        "x": 0.502,
+        "y": 0.426,
+        "z": -0.089
+      },
+      "RIGHT_HIP": {
+        "x": 0.458,
+        "y": 0.426,
+        "z": 0.089
+      }
+    },
+    "impact_pose_sequence": [
+      {
+        "phase": "preparation",
+        "frame": 60,
+        "key_landmarks": {
+          "LEFT_SHOULDER": {
+            "x": 0.441,
+            "y": 0.34,
+            "z": -0.383
+          },
+          "RIGHT_SHOULDER": {
+            "x": 0.389,
+            "y": 0.345,
+            "z": -0.12
+          },
+          "LEFT_ELBOW": {
+            "x": 0.381,
+            "y": 0.392,
+            "z": -0.466
+          },
+          "RIGHT_ELBOW": {
+            "x": 0.351,
+            "y": 0.396,
+            "z": -0.076
+          },
+          "LEFT_WRIST": {
+            "x": 0.32,
+            "y": 0.425,
+            "z": -0.528
+          },
+          "RIGHT_WRIST": {
+            "x": 0.295,
+            "y": 0.427,
+            "z": -0.179
+          },
+          "LEFT_HIP": {
+            "x": 0.502,
+            "y": 0.426,
+            "z": -0.088
+          },
+          "RIGHT_HIP": {
+            "x": 0.458,
+            "y": 0.426,
+            "z": 0.088
+          }
+        }
+      },
+      {
+        "phase": "impact",
+        "frame": 61,
+        "key_landmarks": {
+          "LEFT_SHOULDER": {
+            "x": 0.441,
+            "y": 0.341,
+            "z": -0.388
+          },
+          "RIGHT_SHOULDER": {
+            "x": 0.39,
+            "y": 0.346,
+            "z": -0.12
+          },
+          "LEFT_ELBOW": {
+            "x": 0.38,
+            "y": 0.393,
+            "z": -0.474
+          },
+          "RIGHT_ELBOW": {
+            "x": 0.353,
+            "y": 0.396,
+            "z": -0.077
+          },
+          "LEFT_WRIST": {
+            "x": 0.311,
+            "y": 0.424,
+            "z": -0.539
+          },
+          "RIGHT_WRIST": {
+            "x": 0.296,
+            "y": 0.427,
+            "z": -0.18
+          },
+          "LEFT_HIP": {
+            "x": 0.502,
+            "y": 0.426,
+            "z": -0.089
+          },
+          "RIGHT_HIP": {
+            "x": 0.458,
+            "y": 0.426,
+            "z": 0.089
+          }
+        }
+      },
+      {
+        "phase": "follow_through",
+        "frame": 62,
+        "key_landmarks": {
+          "LEFT_SHOULDER": {
+            "x": 0.441,
+            "y": 0.343,
+            "z": -0.379
+          },
+          "RIGHT_SHOULDER": {
+            "x": 0.391,
+            "y": 0.349,
+            "z": -0.103
+          },
+          "LEFT_ELBOW": {
+            "x": 0.379,
+            "y": 0.393,
+            "z": -0.467
+          },
+          "RIGHT_ELBOW": {
+            "x": 0.355,
+            "y": 0.396,
+            "z": -0.056
+          },
+          "LEFT_WRIST": {
+            "x": 0.31,
+            "y": 0.425,
+            "z": -0.53
+          },
+          "RIGHT_WRIST": {
+            "x": 0.297,
+            "y": 0.428,
+            "z": -0.158
+          },
+          "LEFT_HIP": {
+            "x": 0.502,
+            "y": 0.427,
+            "z": -0.089
+          },
+          "RIGHT_HIP": {
+            "x": 0.46,
+            "y": 0.426,
+            "z": 0.089
+          }
+        }
+      }
+    ],
+    "pose_enrichment": {
+      "count": 10,
+      "provider": "sam3d",
+      "spec_version": "sam_v1",
+      "frames": [
+        {
+          "frame": 70,
+          "mesh_confidence": 0.912,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 71,
+          "mesh_confidence": 0.911,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 72,
+          "mesh_confidence": 0.908,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 73,
+          "mesh_confidence": 0.905,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 74,
+          "mesh_confidence": 0.901,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 75,
+          "mesh_confidence": 0.901,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 76,
+          "mesh_confidence": 0.905,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 77,
+          "mesh_confidence": 0.911,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 78,
+          "mesh_confidence": 0.917,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        },
+        {
+          "frame": 79,
+          "mesh_confidence": 0.923,
+          "has_feature_vector": true,
+          "has_landmarks_3d": 10
+        }
+      ]
+    },
+    "mesh_at_impact": null,
+    "retrieval": {
+      "embedding_source": "ensemble",
+      "frames_used": {
+        "mesh": 10,
+        "pose": 10
+      },
+      "top_neighbors": [
+        {
+          "stroke_label": "Forehand Return",
+          "distance": 0.035485684871673584,
+          "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+        },
+        {
+          "stroke_label": "Forehand Volley",
+          "distance": 0.2144541506306571,
+          "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+        }
+      ]
+    },
+    "_computed": {
+      "pose_embedding_dim": 128,
+      "mesh_proxy_from_mp_at_impact_dim": 128
+    }
+  },
+  "pro_library": {
+    "forehand_return": {
+      "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+      "stroke_label": "Forehand Return",
+      "train_video_bytes": "4865010",
+      "total_frames": 80,
+      "pose_sequence_frames": 80,
+      "impact_frame_resolved": 40,
+      "stride": 1,
+      "impact_key_landmarks": {
+        "LEFT_SHOULDER": {
+          "x": 0.505,
+          "y": 0.272,
+          "z": -0.278
+        },
+        "RIGHT_SHOULDER": {
+          "x": 0.442,
+          "y": 0.303,
+          "z": 0.1
+        },
+        "LEFT_ELBOW": {
+          "x": 0.527,
+          "y": 0.348,
+          "z": -0.472
+        },
+        "RIGHT_ELBOW": {
+          "x": 0.397,
+          "y": 0.376,
+          "z": 0.183
+        },
+        "LEFT_WRIST": {
+          "x": 0.464,
+          "y": 0.366,
+          "z": -0.669
+        },
+        "RIGHT_WRIST": {
+          "x": 0.329,
+          "y": 0.426,
+          "z": 0.07
+        },
+        "LEFT_HIP": {
+          "x": 0.557,
+          "y": 0.44,
+          "z": -0.132
+        },
+        "RIGHT_HIP": {
+          "x": 0.504,
+          "y": 0.449,
+          "z": 0.132
+        }
+      },
+      "pose_enrichment": {
+        "count": 40,
+        "provider": "sam3d",
+        "spec_version": "sam_v1",
+        "frames": [
+          {
+            "frame": 20,
+            "mesh_confidence": 0.863,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 21,
+            "mesh_confidence": 0.845,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 22,
+            "mesh_confidence": 0.829,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 23,
+            "mesh_confidence": 0.812,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 24,
+            "mesh_confidence": 0.793,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 25,
+            "mesh_confidence": 0.778,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 26,
+            "mesh_confidence": 0.769,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 27,
+            "mesh_confidence": 0.755,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 28,
+            "mesh_confidence": 0.741,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 29,
+            "mesh_confidence": 0.728,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 30,
+            "mesh_confidence": 0.717,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 31,
+            "mesh_confidence": 0.712,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 32,
+            "mesh_confidence": 0.708,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 33,
+            "mesh_confidence": 0.705,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 34,
+            "mesh_confidence": 0.702,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 35,
+            "mesh_confidence": 0.699,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 36,
+            "mesh_confidence": 0.697,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 37,
+            "mesh_confidence": 0.697,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 38,
+            "mesh_confidence": 0.706,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 39,
+            "mesh_confidence": 0.729,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 40,
+            "mesh_confidence": 0.755,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 41,
+            "mesh_confidence": 0.779,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 42,
+            "mesh_confidence": 0.8,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 43,
+            "mesh_confidence": 0.816,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 44,
+            "mesh_confidence": 0.834,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 45,
+            "mesh_confidence": 0.85,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 46,
+            "mesh_confidence": 0.865,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 47,
+            "mesh_confidence": 0.878,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 48,
+            "mesh_confidence": 0.889,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 49,
+            "mesh_confidence": 0.9,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 50,
+            "mesh_confidence": 0.91,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 51,
+            "mesh_confidence": 0.918,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 52,
+            "mesh_confidence": 0.926,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 53,
+            "mesh_confidence": 0.933,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 54,
+            "mesh_confidence": 0.939,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 55,
+            "mesh_confidence": 0.944,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 56,
+            "mesh_confidence": 0.949,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 57,
+            "mesh_confidence": 0.953,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 58,
+            "mesh_confidence": 0.957,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 59,
+            "mesh_confidence": 0.96,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          }
+        ]
+      },
+      "mesh_at_impact": {
+        "frame": 40,
+        "mesh_confidence": 0.754807,
+        "has_feature_vector": true
+      },
+      "_computed": {
+        "pose_embedding_dim": 128
+      }
+    },
+    "forehand_volley": {
+      "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+      "stroke_label": "Forehand Volley",
+      "train_video_bytes": "3227265",
+      "total_frames": 85,
+      "pose_sequence_frames": 85,
+      "impact_frame_resolved": 49,
+      "stride": 1,
+      "impact_key_landmarks": {
+        "LEFT_SHOULDER": {
+          "x": 0.609,
+          "y": 0.459,
+          "z": 0.038
+        },
+        "RIGHT_SHOULDER": {
+          "x": 0.587,
+          "y": 0.478,
+          "z": -0.56
+        },
+        "LEFT_ELBOW": {
+          "x": 0.637,
+          "y": 0.456,
+          "z": 0.486
+        },
+        "RIGHT_ELBOW": {
+          "x": 0.689,
+          "y": 0.519,
+          "z": -0.683
+        },
+        "LEFT_WRIST": {
+          "x": 0.687,
+          "y": 0.447,
+          "z": 0.813
+        },
+        "RIGHT_WRIST": {
+          "x": 0.81,
+          "y": 0.525,
+          "z": -0.689
+        },
+        "LEFT_HIP": {
+          "x": 0.583,
+          "y": 0.59,
+          "z": 0.157
+        },
+        "RIGHT_HIP": {
+          "x": 0.527,
+          "y": 0.595,
+          "z": -0.157
+        }
+      },
+      "pose_enrichment": {
+        "count": 40,
+        "provider": "sam3d",
+        "spec_version": "sam_v1",
+        "frames": [
+          {
+            "frame": 29,
+            "mesh_confidence": 0.953,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 30,
+            "mesh_confidence": 0.956,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 31,
+            "mesh_confidence": 0.959,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 32,
+            "mesh_confidence": 0.961,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 33,
+            "mesh_confidence": 0.965,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 34,
+            "mesh_confidence": 0.968,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 35,
+            "mesh_confidence": 0.971,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 36,
+            "mesh_confidence": 0.974,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 37,
+            "mesh_confidence": 0.976,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 38,
+            "mesh_confidence": 0.977,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 39,
+            "mesh_confidence": 0.965,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 40,
+            "mesh_confidence": 0.966,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 41,
+            "mesh_confidence": 0.968,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 42,
+            "mesh_confidence": 0.97,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 43,
+            "mesh_confidence": 0.969,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 44,
+            "mesh_confidence": 0.965,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 45,
+            "mesh_confidence": 0.957,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 46,
+            "mesh_confidence": 0.951,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 47,
+            "mesh_confidence": 0.933,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 48,
+            "mesh_confidence": 0.922,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 49,
+            "mesh_confidence": 0.91,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 50,
+            "mesh_confidence": 0.892,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 51,
+            "mesh_confidence": 0.873,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 52,
+            "mesh_confidence": 0.855,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 53,
+            "mesh_confidence": 0.84,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 54,
+            "mesh_confidence": 0.825,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 55,
+            "mesh_confidence": 0.811,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 56,
+            "mesh_confidence": 0.8,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 57,
+            "mesh_confidence": 0.79,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 58,
+            "mesh_confidence": 0.782,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 59,
+            "mesh_confidence": 0.773,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 60,
+            "mesh_confidence": 0.771,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 61,
+            "mesh_confidence": 0.771,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 62,
+            "mesh_confidence": 0.779,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 63,
+            "mesh_confidence": 0.788,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 64,
+            "mesh_confidence": 0.784,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 65,
+            "mesh_confidence": 0.78,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 66,
+            "mesh_confidence": 0.796,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 67,
+            "mesh_confidence": 0.811,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          },
+          {
+            "frame": 68,
+            "mesh_confidence": 0.825,
+            "has_feature_vector": true,
+            "has_landmarks_3d": 10
+          }
+        ]
+      },
+      "mesh_at_impact": {
+        "frame": 49,
+        "mesh_confidence": 0.909526,
+        "has_feature_vector": true
+      },
+      "_computed": {
+        "pose_embedding_dim": 128
+      }
+    }
+  },
+  "landmark_embedding_comparison": [
+    {
+      "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c",
+      "stroke_label": "Forehand Return",
+      "pose_cosine_distance_at_impact": 0.07513082456578235,
+      "query_impact_frame": 61,
+      "train_impact_frame": 40
+    },
+    {
+      "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f",
+      "stroke_label": "Forehand Volley",
+      "pose_cosine_distance_at_impact": 0.950432567689266,
+      "query_impact_frame": 61,
+      "train_impact_frame": 49
+    }
+  ],
+  "interpretation": {
+    "closer_pose_match": "Forehand Return",
+    "note": "Lower pose_cosine_distance = more similar MediaPipe body pose at impact. Retrieval uses 10-frame ensemble, not single impact frame alone."
+  }
+}

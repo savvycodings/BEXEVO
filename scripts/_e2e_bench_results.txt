@@ -1,0 +1,153 @@
+﻿node.exe : (node:20272) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` 
+instead.
+At C:\Users\kyle\AppData\Roaming\npm\pnpm.ps1:24 char:5
++     & "node$exe"  "$basedir/node_modules/corepack/dist/pnpm.js" $args
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((node:20272) [D...oks()` instead.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:20272) Warning: SECURITY WARNING: The SSL modes 'prefer', 'require', and 'verify-ca' are treated as aliases for 
+'verify-full'.
+In the next major version (pg-connection-string v3.0.0 and pg v9.0.0), these modes will adopt standard libpq 
+semantics, which have weaker security guarantees.
+
+To prepare for this change:
+- If you want the current behavior, explicitly use 'sslmode=verify-full'
+- If you want libpq compatibility now, use 'uselibpqcompat=true&sslmode=require'
+
+See https://www.postgresql.org/docs/current/libpq-ssl.html for libpq SSL mode definitions.
+{
+  "queried_at": "2026-06-28T20:18:04.193Z",
+  "steps": {
+    "1_library_ready": {
+      "stepId": "1_library_ready",
+      "title": "Library ready",
+      "passed": true,
+      "scorePercent": 100,
+      "summary": "80 v2 ┬À 80 sam_v1",
+      "evidence": {
+        "v2_count": 80,
+        "sam_v1_count": 80,
+        "thin_labels": [],
+        "thresholds": {
+          "min_per_label": 2
+        }
+      },
+      "failures": [],
+      "tables": {
+        "embedding_counts": [
+          {
+            "spec": "v2",
+            "count": 80
+          },
+          {
+            "spec": "sam_v1",
+            "count": 80
+          }
+        ]
+      },
+      "charts": {
+        "ringScores": [
+          {
+            "label": "v2",
+            "value": 100
+          },
+          {
+            "label": "sam",
+            "value": 100
+          }
+        ]
+      }
+    },
+    "5_analysis_audit": {
+      "stepId": "5_analysis_audit",
+      "title": "Analysis audit",
+      "passed": true,
+      "scorePercent": 100,
+      "summary": "Forehand Return",
+      "evidence": {
+        "analysis_id": "039a239c-662e-4423-aeab-49dd083a1720",
+        "eval": {
+          "llm_shot": "Pro library match: Forehand Return.",
+          "mesh_shot": "Forehand Return",
+          "pose_shot": "Forehand Return",
+          "frames_used": {
+            "mesh": 10,
+            "pose": 10
+          },
+          "display_shot": "Forehand Return",
+          "distance_gap": 0.1789684657589835,
+          "llm_category": "save_return",
+          "spec_version": "ensemble",
+          "expected_shot": null,
+          "predicted_shot": "Forehand Return",
+          "mesh_confidence": 0.91203,
+          "top_k_neighbors": [
+            {
+              "distance": 0.035,
+              "stroke_label": "Forehand Return",
+              "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+            },
+            {
+              "distance": 0.214,
+              "stroke_label": "Forehand Volley",
+              "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+            }
+          ],
+          "blend_formula_id": null,
+          "embedding_source": "ensemble",
+          "library_fallback": false,
+          "blend_mesh_weight": null,
+          "channel_agreement": true,
+          "llm_disagrees_retrieval": false
+        }
+      },
+      "failures": [],
+      "tables": {
+        "neighbors": [
+          {
+            "distance": 0.035,
+            "stroke_label": "Forehand Return",
+            "train_sample_id": "4132cf12-613e-4bad-8f81-517b39e6f29c"
+          },
+          {
+            "distance": 0.214,
+            "stroke_label": "Forehand Volley",
+            "train_sample_id": "31950f20-dfe8-49c8-a7d7-412604c48a4f"
+          }
+        ],
+        "signals": [
+          {
+            "key": "embedding_source",
+            "value": "ensemble"
+          },
+          {
+            "key": "spec_version",
+            "value": "ensemble"
+          },
+          {
+            "key": "mesh_confidence",
+            "value": 0.91203
+          },
+          {
+            "key": "distance_gap",
+            "value": 0.1789684657589835
+          },
+          {
+            "key": "library_fallback",
+            "value": false
+          }
+        ]
+      },
+      "charts": {
+        "ringScores": [
+          {
+            "label": "mesh",
+            "value": 91
+          }
+        ]
+      }
+    }
+  }
+}
