@@ -14,7 +14,7 @@ export function weeklyPeriodKey(d: Date = new Date()): string {
   return `W${utc.getUTCFullYear()}-${String(week).padStart(2, "0")}`;
 }
 
-/** Four-month season blocks: Jan–Apr, May–Aug, Sep–Dec. e.g. `S2026-2`. */
+/** Four-month seasson blocks: Jan–Apr, May–Aug, Sep–Dec. e.g. `S2026-2`. */
 export function seasonPeriodKey(d: Date = new Date()): string {
   const season = Math.floor(d.getMonth() / 4) + 1;
   return `S${d.getFullYear()}-${season}`;
