@@ -10,6 +10,7 @@ import trainRouter from './train/trainRouter'
 import profileRouter from './profile/profileRouter'
 import coachRouter from './coach/coachRouter'
 import signupVerificationRouter from './auth/signupVerificationRouter'
+import { getFromAddress, isEmailConfigured } from './lib/email/resendClient'
 import bodyParser from 'body-parser'
 import path from 'path'
 import {
@@ -34,8 +35,39 @@ app.use(cors({
     'X-Requested-With',
     'X-Admin-Train-Secret',
     'X-Xevo-Admin-Hub-Password',
+    'ngrok-skip-browser-warning',
   ],
 }))
+
+app.use(express.json())
+app.use(express.urlencoded({ extended: true }))
+
+function maskEmail(email: string): string {
+  const at = email.indexOf('@')
+  if (at <= 1) return '***'
+  return `${email.slice(0, 2)}***${email.slice(at)}`
+}
+
+function signupRequestLogger(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const startedAt = Date.now()
+  const email = typeof req.body?.email === 'string' ? maskEmail(req.body.email) : undefined
+  console.log('[SignupVerification][HTTP]', {
+    method: req.method,
+    url: req.originalUrl,
+    email,
+    hasBody: req.body != null && typeof req.body === 'object',
+  })
+  res.on('finish', () => {
+    console.log('[SignupVerification][HTTP][DONE]', {
+      method: req.method,
+      url: req.originalUrl,
+      status: res.statusCode,
+      durationMs: Date.now() - startedAt,
+      email,
+    })
+  })
+  next()
+}
 
 app.use('/api/auth', (req, _res, next) => {
   const startedAt = Date.now()
@@ -49,7 +81,7 @@ app.use('/api/auth', (req, _res, next) => {
     _res.header('Access-Control-Allow-Credentials', 'true')
     _res.header(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, Cache-Control, Accept, X-Requested-With, X-Admin-Train-Secret, X-Xevo-Admin-Hub-Password',
+      'Content-Type, Authorization, Cache-Control, Accept, X-Requested-With, X-Admin-Train-Secret, X-Xevo-Admin-Hub-Password, ngrok-skip-browser-warning',
     )
     _res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,PATCH,OPTIONS')
     _res.header('Vary', 'Origin')
@@ -82,7 +114,7 @@ app.use('/api/auth/technique', techniqueRouter)
 app.use('/api/auth/train', trainRouter)
 app.use('/api/auth/profile', profileRouter)
 app.use('/api/auth/coach', coachRouter)
-app.use('/api/auth/signup', signupVerificationRouter)
+app.use('/api/auth/signup', signupRequestLogger, signupVerificationRouter)
 
 app.all('/api/auth/*', toNodeHandler(auth))
 
@@ -130,10 +162,16 @@ app.use('/technique', techniqueRouter)
 app.use('/train', trainRouter)
 app.use('/profile', profileRouter)
 app.use('/coach', coachRouter)
-app.use('/signup', signupVerificationRouter)
+app.use('/signup', signupRequestLogger, signupVerificationRouter)
 
 app.listen(3050, () => {
   console.log('Server started on port 3050')
+  console.log('[Email] Resend configured', {
+    ready: isEmailConfigured(),
+    from: getFromAddress(),
+    hasApiKey: !!process.env.RESEND_API_KEY?.trim(),
+  })
+  console.log('[SignupVerification] Routes ready at /signup/* and /api/auth/signup/*')
   if (String(process.env.XEVO_TEXT_PROVIDER ?? '').trim().toLowerCase() === 'xevo') {
     void warnIfXevoModelMismatch()
   }

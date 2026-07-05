@@ -41,10 +41,18 @@ export async function sendSignupVerificationEmail(
   if (error) {
     console.error("[Email] signup_verification send failed", {
       to: input.to,
+      from,
       message: error.message,
+      name: error.name,
     });
     return { sent: false, error: error.message };
   }
+
+  console.log("[Email] signup_verification sent", {
+    to: input.to,
+    from,
+    emailId: data?.id,
+  });
 
   return { sent: true, emailId: data?.id };
 }

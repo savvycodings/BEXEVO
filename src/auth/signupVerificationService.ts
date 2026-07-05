@@ -74,9 +74,16 @@ export async function sendSignupVerificationCode(
 
   if (!sendResult.sent) {
     if (sendResult.skipped === "email_not_configured") {
-      console.log("[SignupVerification] DEV fallback code", { email: normalized, code });
+      console.warn("[SignupVerification] RESEND not configured — using dev fallback code", {
+        email: normalized,
+        code,
+      });
       return { ok: true };
     }
+    console.error("[SignupVerification] email send failed", {
+      email: normalized,
+      error: sendResult.error,
+    });
     return {
       ok: false,
       error: "EMAIL_SEND_FAILED",

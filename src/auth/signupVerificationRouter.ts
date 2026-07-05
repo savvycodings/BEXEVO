@@ -17,9 +17,19 @@ router.post("/send-code", async (req, res) => {
   try {
     const email = typeof req.body?.email === "string" ? req.body.email : "";
     const name = typeof req.body?.name === "string" ? req.body.name : undefined;
+    console.log("[SignupVerification] send-code request", {
+      hasEmail: !!email,
+      emailLength: email.length,
+      hasName: !!name?.trim(),
+    });
     const result = await sendSignupVerificationCode(email, name);
 
     if (!result.ok) {
+      console.warn("[SignupVerification] send-code rejected", {
+        error: result.error,
+        message: result.message,
+        retryAfterSec: result.retryAfterSec,
+      });
       const status =
         result.error === "RESEND_COOLDOWN" ? 429 : result.error === "INVALID_EMAIL" ? 400 : 502;
       return res.status(status).json({
@@ -29,6 +39,7 @@ router.post("/send-code", async (req, res) => {
       });
     }
 
+    console.log("[SignupVerification] send-code ok");
     return res.json({ ok: true, retryAfterSec: result.retryAfterSec ?? 60 });
   } catch (err) {
     console.error("[SignupVerification] send-code failed", err);
