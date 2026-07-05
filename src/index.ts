@@ -9,6 +9,7 @@ import techniqueRouter from './technique/techniqueRouter'
 import trainRouter from './train/trainRouter'
 import profileRouter from './profile/profileRouter'
 import coachRouter from './coach/coachRouter'
+import signupVerificationRouter from './auth/signupVerificationRouter'
 import bodyParser from 'body-parser'
 import path from 'path'
 import {
@@ -81,6 +82,7 @@ app.use('/api/auth/technique', techniqueRouter)
 app.use('/api/auth/train', trainRouter)
 app.use('/api/auth/profile', profileRouter)
 app.use('/api/auth/coach', coachRouter)
+app.use('/api/auth/signup', signupVerificationRouter)
 
 app.all('/api/auth/*', toNodeHandler(auth))
 
@@ -128,6 +130,7 @@ app.use('/technique', techniqueRouter)
 app.use('/train', trainRouter)
 app.use('/profile', profileRouter)
 app.use('/coach', coachRouter)
+app.use('/signup', signupVerificationRouter)
 
 app.listen(3050, () => {
   console.log('Server started on port 3050')

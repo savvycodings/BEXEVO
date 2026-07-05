@@ -15,5 +15,7 @@ export function getResendClient(): Resend | null {
 
 export function getFromAddress(): string | null {
   const from = process.env.RESEND_FROM?.trim();
-  return from || null;
+  if (from) return from;
+  if (process.env.RESEND_API_KEY?.trim()) return "Xevo <onboarding@resend.dev>";
+  return null;
 }
