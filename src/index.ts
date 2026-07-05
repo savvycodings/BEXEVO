@@ -164,8 +164,8 @@ app.use('/profile', profileRouter)
 app.use('/coach', coachRouter)
 app.use('/signup', signupRequestLogger, signupVerificationRouter)
 
-app.listen(3050, () => {
-  console.log('Server started on port 3050')
+app.listen(3050, '0.0.0.0', () => {
+  console.log('Server started on port 3050 (0.0.0.0)')
   console.log('[Email] Resend configured', {
     ready: isEmailConfigured(),
     from: getFromAddress(),
