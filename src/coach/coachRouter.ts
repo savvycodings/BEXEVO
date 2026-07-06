@@ -37,6 +37,7 @@ type CoachAnnotationRow = {
   comment: string;
   timeMs: number;
   cloudinaryUrl: string | null;
+  tone?: "good" | "wrong" | null;
 };
 
 function isSafeImageUri(value: unknown): value is string {
@@ -47,6 +48,10 @@ function isSafeImageUri(value: unknown): value is string {
   if (/^\/uploads\//i.test(s)) return true;
   if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(s)) return true;
   return false;
+}
+
+function parseAnnotationTone(value: unknown): "good" | "wrong" | null {
+  return value === "good" || value === "wrong" ? value : null;
 }
 
 function normalizeCoachAnnotations(input: unknown): CoachAnnotationRow[] {
@@ -67,8 +72,9 @@ function normalizeCoachAnnotations(input: unknown): CoachAnnotationRow[] {
         typeof r.cloudinaryUrl === "string" && /^https?:\/\//i.test(r.cloudinaryUrl.trim())
           ? r.cloudinaryUrl.trim()
           : null;
-      if (!imageUri) return null;
-      return { imageUri, comment, timeMs, cloudinaryUrl };
+      const tone = parseAnnotationTone(r.tone);
+      if (!imageUri && !comment) return null;
+      return { imageUri, comment, timeMs, cloudinaryUrl, tone };
     })
     .filter((r): r is CoachAnnotationRow => !!r);
 }
@@ -171,6 +177,10 @@ async function persistCoachAnnotationImages(
       hasCloudinaryUrl: !!row.cloudinaryUrl,
       timeMs: row.timeMs,
     });
+    if (!row.imageUri) {
+      out.push({ ...row, imageUri: "", cloudinaryUrl: row.cloudinaryUrl ?? null });
+      continue;
+    }
     const cloudinaryUrl = await uploadAnnotationToCloudinary(
       row.imageUri,
       reviewId,
@@ -335,8 +345,14 @@ router.get("/review/:id", async (req, res) => {
             cloudinaryUrl: a.cloudinaryUrl ?? null,
             comment: a.comment ?? "",
             timeMs: a.timeMs,
+            tone: null as "good" | "wrong" | null,
           }))
         : null;
+    const annotationsFromJson = normalizeCoachAnnotations(review.coachMarksJson);
+    const coachMarksForClient =
+      annotationsFromJson.length > 0
+        ? annotationsFromJson
+        : annotationsFromTable;
 
     return res.json({
       review: {
@@ -346,9 +362,7 @@ router.get("/review/:id", async (req, res) => {
         techniqueAnalysisId: analysis?.id ?? review.techniqueAnalysisId ?? null,
         videoPath: `/technique/video/${review.techniqueVideoId}`,
         coachFeedbackText: review.coachFeedbackText ?? null,
-        coachMarksJson:
-          annotationsFromTable ??
-          normalizeCoachAnnotations(review.coachMarksJson),
+        coachMarksJson: coachMarksForClient,
         submittedAt: review.submittedAt ?? null,
         aiSummary: {
           score: scorePercent,
@@ -414,7 +428,7 @@ router.post("/review/:id/submit", async (req, res) => {
     ) {
       return res
         .status(400)
-        .json({ error: "Annotation images are required. Please re-capture and submit again." });
+        .json({ error: "Annotations must include a comment or image. Please try again." });
     }
     const persistedAnnotations = await persistCoachAnnotationImages(
       id,
@@ -439,7 +453,7 @@ router.post("/review/:id/submit", async (req, res) => {
         persistedAnnotations.map((ann) => ({
           id: randomUUID(),
           reviewId: id,
-          imageUri: ann.imageUri,
+          imageUri: ann.imageUri || "",
           cloudinaryUrl: ann.cloudinaryUrl ?? null,
           comment: ann.comment || null,
           timeMs: ann.timeMs,
