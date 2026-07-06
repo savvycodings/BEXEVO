@@ -37,7 +37,7 @@ type CoachAnnotationRow = {
   comment: string;
   timeMs: number;
   cloudinaryUrl: string | null;
-  tone?: "good" | "wrong" | null;
+  tone: "good" | "wrong" | null;
 };
 
 function isSafeImageUri(value: unknown): value is string {
@@ -76,7 +76,7 @@ function normalizeCoachAnnotations(input: unknown): CoachAnnotationRow[] {
       if (!imageUri && !comment) return null;
       return { imageUri, comment, timeMs, cloudinaryUrl, tone };
     })
-    .filter((r): r is CoachAnnotationRow => !!r);
+    .filter((r): r is CoachAnnotationRow => r !== null);
 }
 
 const COACH_REVIEW_UPLOAD_ROOT = path.join(
