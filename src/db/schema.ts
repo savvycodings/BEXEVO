@@ -671,6 +671,8 @@ export const coachReviewAnnotation = pgTable(
     cloudinaryUrl: text("cloudinaryUrl"),
     comment: text("comment"),
     timeMs: integer("timeMs").notNull().default(0),
+    /** `good` or `wrong` — which comment field the coach used. */
+    tone: text("tone"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
   },
   (table) => [

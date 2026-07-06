@@ -96,6 +96,7 @@ import {
   shotClassificationFromResolved,
   RETRIEVAL_CONFIDENCE_THRESHOLD,
 } from '../train/trainShotDisplay'
+import { coachMarksForClient } from '../coach/coachAnnotations'
 import {
   attachClipLocalContactFrames,
   contactFramesForPrompt,
@@ -855,6 +856,7 @@ router.get('/activities', async (req, res) => {
         cloudinaryUrl: string | null
         comment: string
         timeMs: number
+        tone: string | null
       }>
     >()
     for (const ann of reviewAnnotationRows) {
@@ -864,6 +866,7 @@ router.get('/activities', async (req, res) => {
         cloudinaryUrl: ann.cloudinaryUrl ?? null,
         comment: ann.comment ?? '',
         timeMs: ann.timeMs,
+        tone: ann.tone ?? null,
       })
       annByReviewId.set(ann.reviewId, arr)
     }
@@ -884,7 +887,10 @@ router.get('/activities', async (req, res) => {
           id: row.id,
           status: row.status,
           coachFeedbackText: row.coachFeedbackText ?? null,
-          coachMarksJson: annByReviewId.get(row.id) ?? row.coachMarksJson ?? null,
+          coachMarksJson: coachMarksForClient(
+            row.coachMarksJson,
+            annByReviewId.get(row.id) ?? []
+          ),
           submittedAt: row.submittedAt ?? null,
         })
         continue
@@ -894,7 +900,10 @@ router.get('/activities', async (req, res) => {
           id: row.id,
           status: row.status,
           coachFeedbackText: row.coachFeedbackText ?? null,
-          coachMarksJson: annByReviewId.get(row.id) ?? row.coachMarksJson ?? null,
+          coachMarksJson: coachMarksForClient(
+            row.coachMarksJson,
+            annByReviewId.get(row.id) ?? []
+          ),
           submittedAt: row.submittedAt ?? null,
         })
       }
@@ -1757,15 +1766,16 @@ router.get('/analysis/:id', async (req, res) => {
             id: coachReview.id,
             status: coachReview.status,
             coachFeedbackText: coachReview.coachFeedbackText ?? null,
-            coachMarksJson:
-              coachReviewAnnotations.length > 0
-                ? coachReviewAnnotations.map((a) => ({
-                    imageUri: a.imageUri,
-                    cloudinaryUrl: a.cloudinaryUrl ?? null,
-                    comment: a.comment ?? '',
-                    timeMs: a.timeMs,
-                  }))
-                : coachReview.coachMarksJson ?? null,
+            coachMarksJson: coachMarksForClient(
+              coachReview.coachMarksJson,
+              coachReviewAnnotations.map((a) => ({
+                imageUri: a.imageUri,
+                cloudinaryUrl: a.cloudinaryUrl ?? null,
+                comment: a.comment ?? '',
+                timeMs: a.timeMs,
+                tone: a.tone ?? null,
+              }))
+            ),
             submittedAt: coachReview.submittedAt ?? null,
           }
         : null,

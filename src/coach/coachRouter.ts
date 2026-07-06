@@ -27,18 +27,16 @@ import {
 } from "../technique/techniqueScoreScale";
 import { deriveHumanShotLabelFromMetrics } from "../train/trainShotDisplay";
 import { onCoachReviewCompleted } from "../gamification/service";
+import {
+  type CoachAnnotationRow,
+  coachMarksForClient,
+  commentTonesForReview,
+  normalizeCoachAnnotations,
+} from "./coachAnnotations";
 
 const router = express.Router();
 router.use(express.json({ limit: "50mb" }));
 router.use(express.urlencoded({ extended: true, limit: "50mb" }));
-
-type CoachAnnotationRow = {
-  imageUri: string;
-  comment: string;
-  timeMs: number;
-  cloudinaryUrl: string | null;
-  tone: "good" | "wrong" | null;
-};
 
 function isSafeImageUri(value: unknown): value is string {
   if (typeof value !== "string") return false;
@@ -48,35 +46,6 @@ function isSafeImageUri(value: unknown): value is string {
   if (/^\/uploads\//i.test(s)) return true;
   if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(s)) return true;
   return false;
-}
-
-function parseAnnotationTone(value: unknown): "good" | "wrong" | null {
-  return value === "good" || value === "wrong" ? value : null;
-}
-
-function normalizeCoachAnnotations(input: unknown): CoachAnnotationRow[] {
-  if (!Array.isArray(input)) return [];
-  return input
-    .slice(0, 40)
-    .map((row) => {
-      const r = row as Record<string, unknown>;
-      const imageUri = isSafeImageUri(r.imageUri) ? String(r.imageUri).trim() : "";
-      const commentRaw = typeof r.comment === "string" ? r.comment.trim() : "";
-      const comment = commentRaw.slice(0, 1200);
-      const timeMsRaw = r.timeMs;
-      const timeMs =
-        typeof timeMsRaw === "number" && Number.isFinite(timeMsRaw)
-          ? Math.max(0, Math.round(timeMsRaw))
-          : 0;
-      const cloudinaryUrl =
-        typeof r.cloudinaryUrl === "string" && /^https?:\/\//i.test(r.cloudinaryUrl.trim())
-          ? r.cloudinaryUrl.trim()
-          : null;
-      const tone = parseAnnotationTone(r.tone);
-      if (!imageUri && !comment) return null;
-      return { imageUri, comment, timeMs, cloudinaryUrl, tone };
-    })
-    .filter((r): r is CoachAnnotationRow => r !== null);
 }
 
 const COACH_REVIEW_UPLOAD_ROOT = path.join(
@@ -338,21 +307,16 @@ router.get("/review/:id", async (req, res) => {
       orderBy: (a, { asc: _asc }) => [_asc(a.timeMs), _asc(a.createdAt)],
       limit: 200,
     });
-    const annotationsFromTable =
-      annRows.length > 0
-        ? annRows.map((a) => ({
-            imageUri: a.imageUri,
-            cloudinaryUrl: a.cloudinaryUrl ?? null,
-            comment: a.comment ?? "",
-            timeMs: a.timeMs,
-            tone: null as "good" | "wrong" | null,
-          }))
-        : null;
-    const annotationsFromJson = normalizeCoachAnnotations(review.coachMarksJson);
-    const coachMarksForClient =
-      annotationsFromJson.length > 0
-        ? annotationsFromJson
-        : annotationsFromTable;
+    const coachMarksForClientResponse = coachMarksForClient(
+      review.coachMarksJson,
+      annRows.map((a) => ({
+        imageUri: a.imageUri,
+        cloudinaryUrl: a.cloudinaryUrl ?? null,
+        comment: a.comment ?? "",
+        timeMs: a.timeMs,
+        tone: a.tone ?? null,
+      }))
+    );
 
     return res.json({
       review: {
@@ -362,7 +326,7 @@ router.get("/review/:id", async (req, res) => {
         techniqueAnalysisId: analysis?.id ?? review.techniqueAnalysisId ?? null,
         videoPath: `/technique/video/${review.techniqueVideoId}`,
         coachFeedbackText: review.coachFeedbackText ?? null,
-        coachMarksJson: coachMarksForClient,
+        coachMarksJson: coachMarksForClientResponse.length > 0 ? coachMarksForClientResponse : null,
         submittedAt: review.submittedAt ?? null,
         aiSummary: {
           score: scorePercent,
@@ -457,6 +421,7 @@ router.post("/review/:id/submit", async (req, res) => {
           cloudinaryUrl: ann.cloudinaryUrl ?? null,
           comment: ann.comment || null,
           timeMs: ann.timeMs,
+          tone: ann.tone ?? null,
           createdAt: now,
         }))
       );
@@ -834,7 +799,9 @@ router.get("/students/:studentUserId/uploads", async (req, res) => {
         const rating = typeof ai?.rating === "string" ? ai.rating : null;
         const shotLabel = deriveShotLabelFromAnalysis(analysis);
         const title = shotLabel?.trim() || "Technique";
-        const commentCount = commentCountByReview.get(r.id) ?? 0;
+        const annotationCount = commentCountByReview.get(r.id) ?? 0;
+        const { goodCount, badCount } = commentTonesForReview(r.coachMarksJson, annotationCount);
+        const commentCount = goodCount + badCount;
         return {
           id: r.id,
           kind: "student_upload" as const,
@@ -848,6 +815,8 @@ router.get("/students/:studentUserId/uploads", async (req, res) => {
           score: storedAiScoreToPercent(ai),
           lastScore: null as number | null,
           commentCount,
+          goodCommentCount: goodCount,
+          badCommentCount: badCount,
           rating,
           coachReviewStatus: r.status,
           createdAt: r.createdAt.toISOString(),
@@ -887,6 +856,8 @@ router.get("/students/:studentUserId/uploads", async (req, res) => {
         score: null as number | null,
         lastScore: null as number | null,
         commentCount: 0,
+        goodCommentCount: 0,
+        badCommentCount: 0,
         rating: null as string | null,
         coachReviewStatus: null as string | null,
         createdAt: s.createdAt.toISOString(),
