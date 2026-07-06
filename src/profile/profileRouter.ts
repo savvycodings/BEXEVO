@@ -23,6 +23,7 @@ import {
 } from "../technique/techniqueScoreScale";
 import gamificationRouter from "../gamification/gamificationRouter";
 import { onFriendLinked } from "../gamification/service";
+import { adminHubPasswordValid, roleAfterCoachRevoke } from "./coachRole";
 
 const router = express.Router();
 router.use(express.json());
@@ -987,6 +988,41 @@ router.post("/admin-grant-coach", async (req, res) => {
   } catch (e: any) {
     console.error("[Profile] admin-grant-coach error", e);
     return res.status(500).json({ error: "Failed to set coach role" });
+  }
+});
+
+router.post("/admin-revoke-coach", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const providedPassword = String(req.headers["x-xevo-admin-hub-password"] || "").trim();
+    if (!adminHubPasswordValid(providedPassword, ADMIN_HUB_GATE_PASSWORD)) {
+      return res.status(403).json({ error: "Invalid admin password" });
+    }
+
+    const targetUserId = String(req.body?.targetUserId || "").trim();
+    if (!targetUserId) return res.status(400).json({ error: "targetUserId is required" });
+
+    const target = await db.query.user.findFirst({
+      where: (u, { eq: _eq }) => _eq(u.id, targetUserId),
+    });
+    if (!target) return res.status(404).json({ error: "User not found" });
+
+    const currentRole = await getCoachStudentRole(targetUserId);
+    if (currentRole !== "coach") {
+      return res.status(400).json({ error: "User is not a coach" });
+    }
+
+    const studentLink = await db.query.coachStudent.findFirst({
+      where: (cs, { eq: _eq }) => _eq(cs.studentUserId, targetUserId),
+    });
+    const nextRole = roleAfterCoachRevoke(!!studentLink);
+    await setCoachStudentRole(targetUserId, nextRole);
+    return res.json({ ok: true, coachStudentRole: nextRole });
+  } catch (e: any) {
+    console.error("[Profile] admin-revoke-coach error", e);
+    return res.status(500).json({ error: "Failed to revoke coach role" });
   }
 });
 

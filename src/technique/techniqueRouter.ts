@@ -104,6 +104,7 @@ import {
   buildCorrectionFrameInsight,
   orderFrameInsights,
 } from './correctionFrameInsights'
+import { normalizePhysicalMetricsOnAnalysis, parsePhysicalMetrics } from './physicalMetrics'
 import { normalizeCorrectionsForClient } from './correctionImageStorage'
 import { poseDataForOverlayFetch } from './poseOverlay'
 import { fal } from '@fal-ai/client'
@@ -1317,6 +1318,13 @@ Respond ONLY with a single JSON object matching this exact schema:
     "tracking_stability": <integer 0-100>,
     "visibility_quality": <integer 0-100>
   },
+  "physical_metrics": {
+    "stability": <integer 0-100>,
+    "power": <integer 0-100>,
+    "agility": <integer 0-100>,
+    "reactions": <integer 0-100>,
+    "acceleration": <integer 0-100>
+  },
   "rating": "<excellent|good|needs_improvement|poor>",
   "primary_train_category": "<save_return|ground_strokes|net_play|defence_glass|overhead|tactical_specials>",
   "en": {
@@ -1380,6 +1388,12 @@ Respond ONLY with a single JSON object matching this exact schema:
 }
 
 Rules:
+- physical_metrics (required): score movement quality 0–100 using these padel-specific definitions consistently:
+  - stability: base, balance, recovery after contact
+  - power: kinetic chain, weight transfer, racket speed through contact
+  - agility: footwork adjustment, split-step, court repositioning
+  - reactions: readiness, timing to ball, first-step response
+  - acceleration: burst into position, explosive approach to ball
 - Assume the player is an intermediate-level padel player and tailor feedback to realistic improvements.
 - Write all feedback in a personal coaching voice, directly to the user (second person): use "you/your" in English and second person in Spanish.
 - Do not use third-person phrasing such as "the player", "they", or equivalent third-person constructions.
@@ -1562,6 +1576,10 @@ Rules:
         aiAnalysis.rating = techniqueRatingForScore(s)
       }
 
+      if (aiAnalysis) {
+        normalizePhysicalMetricsOnAnalysis(aiAnalysis as Record<string, unknown>)
+      }
+
       const isPadelSignal =
         aiAnalysis?.is_padel === false ||
         (typeof aiAnalysis?.sport_detected === 'string' &&
@@ -1719,6 +1737,7 @@ router.get('/analysis/:id', async (req, res) => {
           rating: typeof ai.rating === 'string' ? ai.rating : null,
           ...storedAiBreakdownToPercent(ai),
           confidence: storedAiConfidenceToPercent(ai),
+          physicalMetrics: parsePhysicalMetrics(ai.physical_metrics) ?? undefined,
         }
       : null
     const clientMetrics = metricsForClientFetch(

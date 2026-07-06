@@ -140,6 +140,16 @@ export type TechniqueDetectionSummary = {
   imgsz?: number;
 };
 
+export type TechniquePhysicalMetrics = {
+  stability: number;
+  power: number;
+  agility: number;
+  reactions: number;
+  acceleration: number;
+  source?: "llm";
+  version?: string;
+};
+
 export type TechniqueAiAnalysisV61 = {
   is_padel?: boolean;
   sport_detected?: string;
@@ -170,6 +180,7 @@ export type TechniqueAiAnalysisV61 = {
     uncertainty_plus_minus?: number;
   };
   calibration_trace?: Record<string, unknown>;
+  physical_metrics?: TechniquePhysicalMetrics;
   en?: Record<string, unknown>;
   es?: Record<string, unknown>;
   [key: string]: unknown;
