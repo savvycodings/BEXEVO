@@ -4,7 +4,7 @@ import path from "path";
 import multer from "multer";
 import { randomUUID } from "crypto";
 import { fromNodeHeaders } from "better-auth/node";
-import { and, desc, eq, gte, inArray, lt } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt } from "drizzle-orm";
 import { auth } from "../auth";
 import {
   db,
@@ -756,11 +756,12 @@ router.get("/coach-students", async (req, res) => {
       .where(inArray(user.id, studentIds));
 
     const pendingReviews = await db.query.coachVideoReview.findMany({
-      where: (r, { and: _and, eq: _eq, inArray: _inArray }) =>
+      where: (r, { and: _and, eq: _eq, inArray: _inArray, isNull: _isNull }) =>
         _and(
           _eq(r.coachUserId, coachUserId),
           _eq(r.status, "pending"),
-          _inArray(r.studentUserId, studentIds)
+          _inArray(r.studentUserId, studentIds),
+          _isNull(r.coachViewedAt)
         ),
       orderBy: (r, { desc: _desc }) => [_desc(r.createdAt)],
     });

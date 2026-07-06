@@ -282,6 +282,13 @@ router.get("/review/:id", async (req, res) => {
       review.coachUserId === userId || review.studentUserId === userId;
     if (!canRead) return res.status(403).json({ error: "Forbidden" });
 
+    if (review.coachUserId === userId && !review.coachViewedAt) {
+      await db
+        .update(coachVideoReview)
+        .set({ coachViewedAt: new Date(), updatedAt: new Date() })
+        .where(eq(coachVideoReview.id, review.id));
+    }
+
     const video = await db.query.techniqueVideo.findFirst({
       where: (v, { eq: _eq }) => _eq(v.id, review.techniqueVideoId),
     });
@@ -725,6 +732,161 @@ router.get("/submissions", async (req, res) => {
   } catch (e: any) {
     console.error("[Coach] submissions error", e);
     return res.status(500).json({ error: "Failed to load submissions" });
+  }
+});
+
+/** Student profile — uploads list for one linked student (student sends + coach-sent videos). */
+router.get("/students/:studentUserId/uploads", async (req, res) => {
+  try {
+    const coachUserId = await resolveUserId(req);
+    if (!coachUserId) return res.status(401).json({ error: "Unauthorized" });
+
+    const studentUserId = String(req.params?.studentUserId || "").trim();
+    if (!studentUserId) return res.status(400).json({ error: "Missing student id" });
+
+    const coachProfile = await db.query.userProfile.findFirst({
+      where: (p, { eq: _eq }) => _eq(p.userId, coachUserId),
+    });
+    if (coachProfile?.coachStudentRole !== "coach") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const link = await db.query.coachStudent.findFirst({
+      where: (cs, { and: _and, eq: _eq }) =>
+        _and(_eq(cs.coachUserId, coachUserId), _eq(cs.studentUserId, studentUserId)),
+    });
+    if (!link) return res.status(403).json({ error: "Forbidden" });
+
+    const reviews = await db.query.coachVideoReview.findMany({
+      where: (r, { and: _and, eq: _eq }) =>
+        _and(_eq(r.coachUserId, coachUserId), _eq(r.studentUserId, studentUserId)),
+      orderBy: (r, { desc: _desc }) => [_desc(r.createdAt)],
+    });
+
+    const videoIds = Array.from(new Set(reviews.map((r) => r.techniqueVideoId)));
+    const analysisIds = Array.from(
+      new Set(
+        reviews.map((r) => r.techniqueAnalysisId).filter((id): id is string => !!id)
+      )
+    );
+
+    const analysesById = new Map<string, typeof techniqueAnalysis.$inferSelect>();
+    const analysesByVideoId = new Map<string, typeof techniqueAnalysis.$inferSelect>();
+
+    if (analysisIds.length > 0) {
+      const rows = await db.query.techniqueAnalysis.findMany({
+        where: (a, { inArray: _inArray }) => _inArray(a.id, analysisIds),
+      });
+      for (const a of rows) {
+        analysesById.set(a.id, a);
+        analysesByVideoId.set(a.techniqueVideoId, a);
+      }
+    }
+
+    if (videoIds.length > 0) {
+      const extra = await db.query.techniqueAnalysis.findMany({
+        where: (a, { and: _and, eq: _eq, inArray: _inArray }) =>
+          _and(_eq(a.userId, studentUserId), _inArray(a.techniqueVideoId, videoIds)),
+        orderBy: (a, { desc: _desc }) => [_desc(a.createdAt)],
+      });
+      for (const a of extra) {
+        if (!analysesById.has(a.id)) analysesById.set(a.id, a);
+        if (!analysesByVideoId.has(a.techniqueVideoId)) {
+          analysesByVideoId.set(a.techniqueVideoId, a);
+        }
+      }
+    }
+
+    const reviewIds = reviews.map((r) => r.id);
+    const annotationRows =
+      reviewIds.length > 0
+        ? await db.query.coachReviewAnnotation.findMany({
+            where: (a, { inArray: _inArray }) => _inArray(a.reviewId, reviewIds),
+          })
+        : [];
+    const commentCountByReview = new Map<string, number>();
+    for (const ann of annotationRows) {
+      commentCountByReview.set(ann.reviewId, (commentCountByReview.get(ann.reviewId) ?? 0) + 1);
+    }
+
+    const studentRowsAsc = reviews
+      .map((r) => {
+        const analysis =
+          (r.techniqueAnalysisId ? analysesById.get(r.techniqueAnalysisId) : null) ??
+          analysesByVideoId.get(r.techniqueVideoId) ??
+          null;
+        const ai = (analysis?.metrics as Record<string, unknown> | null | undefined)
+          ?.ai_analysis as Record<string, unknown> | undefined;
+        const rating = typeof ai?.rating === "string" ? ai.rating : null;
+        const shotLabel = deriveShotLabelFromAnalysis(analysis);
+        const title = shotLabel?.trim() || "Technique";
+        const commentCount = commentCountByReview.get(r.id) ?? 0;
+        return {
+          id: r.id,
+          kind: "student_upload" as const,
+          reviewId: r.id,
+          sentVideoId: null as string | null,
+          techniqueVideoId: r.techniqueVideoId,
+          techniqueAnalysisId: analysis?.id ?? r.techniqueAnalysisId ?? null,
+          videoPath: `/technique/video/${r.techniqueVideoId}`,
+          title,
+          subtitle: null as string | null,
+          score: storedAiScoreToPercent(ai),
+          lastScore: null as number | null,
+          commentCount,
+          rating,
+          coachReviewStatus: r.status,
+          createdAt: r.createdAt.toISOString(),
+        };
+      })
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    let prevScore: number | null = null;
+    for (const row of studentRowsAsc) {
+      row.lastScore = prevScore;
+      if (typeof row.score === "number") prevScore = row.score;
+    }
+    const studentRows = studentRowsAsc.reverse();
+
+    const sentVideos = await db.query.coachSentVideo.findMany({
+      where: (s, { and: _and, eq: _eq }) =>
+        _and(_eq(s.coachUserId, coachUserId), _eq(s.studentUserId, studentUserId)),
+      orderBy: (s, { desc: _desc }) => [_desc(s.createdAt)],
+    });
+
+    const coachSentRows = sentVideos.map((s) => {
+      const title =
+        (typeof s.shotLabel === "string" && s.shotLabel.trim()) ||
+        (typeof s.strokePreset === "string" && s.strokePreset.trim()) ||
+        (typeof s.category === "string" && s.category.trim()) ||
+        "Technique";
+      return {
+        id: s.id,
+        kind: "coach_sent" as const,
+        reviewId: null as string | null,
+        sentVideoId: s.id,
+        techniqueVideoId: s.techniqueVideoId,
+        techniqueAnalysisId: null as string | null,
+        videoPath: `/technique/video/${s.techniqueVideoId}`,
+        title,
+        subtitle: "coach",
+        score: null as number | null,
+        lastScore: null as number | null,
+        commentCount: 0,
+        rating: null as string | null,
+        coachReviewStatus: null as string | null,
+        createdAt: s.createdAt.toISOString(),
+      };
+    });
+
+    const uploads = [...studentRows, ...coachSentRows].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+
+    return res.json({ uploads });
+  } catch (e: any) {
+    console.error("[Coach] student uploads error", e);
+    return res.status(500).json({ error: "Failed to load student uploads" });
   }
 });
 

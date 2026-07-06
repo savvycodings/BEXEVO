@@ -600,6 +600,8 @@ export const coachVideoReview = pgTable(
     coachFeedbackText: text("coachFeedbackText"),
     coachMarksJson: jsonb("coachMarksJson"),
     submittedAt: timestamp("submittedAt"),
+    /** Set when the assigned coach opens the review (clears “new video” roster badge). */
+    coachViewedAt: timestamp("coachViewedAt"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
   },
