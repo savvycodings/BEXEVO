@@ -429,6 +429,11 @@ router.post("/setup", upload.single("avatar"), async (req, res) => {
     const name = (req.body?.name || "").trim() || null;
     const username = (req.body?.username || "").trim() || null;
     const gender = (req.body?.gender || "").trim() || null;
+    const areaLocationRaw = req.body?.areaLocation;
+    const areaLocation =
+      typeof areaLocationRaw === "string" && areaLocationRaw.trim().length > 0
+        ? areaLocationRaw.trim().slice(0, 200)
+        : null;
 
     const hasRankedProfile = hasRanking === true && !!rankingOrg && !!rankingValue;
 
@@ -464,6 +469,7 @@ router.post("/setup", upload.single("avatar"), async (req, res) => {
         level,
         rankingOrg,
         rankingValue,
+        areaLocation,
         createdAt: now,
         updatedAt: now,
       })
@@ -478,6 +484,7 @@ router.post("/setup", upload.single("avatar"), async (req, res) => {
           level,
           rankingOrg,
           rankingValue,
+          areaLocation,
           updatedAt: now,
         },
       });
