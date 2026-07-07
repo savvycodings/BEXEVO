@@ -253,6 +253,13 @@
       "when": 1782600000000,
       "tag": "0035_train_embedding_per_frame",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1783380000000,
+      "tag": "0037_coach_review_annotation_tone",
+      "breakpoints": true
     }
   ]
 }
