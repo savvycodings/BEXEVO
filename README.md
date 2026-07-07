@@ -8,7 +8,7 @@ From this directory:
 pnpm install
 pnpm run dev
 ```
-s
+ss
 `pnpm run dev` runs a one-shot `tsc` build, then starts `tsc --watch` and `nodemon` together. The initial build avoids a race where `nodemon` started before `dist/index.js` existed.
 
 - **Entry:** compiled output is `dist/index.js` (see `tsconfig.json` `outDir`).
