@@ -35,6 +35,23 @@ function resolveFalKey(): string {
   return String(process.env.FAL_API_KEY || process.env.FAL_KEY || "").trim();
 }
 
+function isTransientFalNetworkError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: string; cause?: { code?: string }; message?: string };
+  const code = e.cause?.code || e.code;
+  if (
+    code === "ENOTFOUND" ||
+    code === "EAI_AGAIN" ||
+    code === "ETIMEDOUT" ||
+    code === "ECONNRESET" ||
+    code === "UND_ERR_CONNECT_TIMEOUT"
+  ) {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /fetch failed|ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i.test(msg);
+}
+
 /** Stage local train clip on fal CDN so Modal can GET bytes (ngrok often 404s server-side). */
 async function uploadTrainVideoToFalCdn(absPath: string): Promise<string> {
   const key = resolveFalKey();
@@ -49,7 +66,24 @@ async function uploadTrainVideoToFalCdn(absPath: string): Promise<string> {
         ? "video/quicktime"
         : "application/octet-stream";
   const blob = new Blob([buf], { type: contentType });
-  return fal.storage.upload(blob, { lifecycle: { expiresIn: "1d" } });
+
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fal.storage.upload(blob, { lifecycle: { expiresIn: "1d" } });
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientFalNetworkError(e) || attempt === maxAttempts) throw e;
+      const delayMs = attempt * 2000;
+      console.warn(
+        `[Train] fal.storage upload transient error; retry ${attempt}/${maxAttempts} in ${delayMs}ms`,
+        e instanceof Error ? e.message : e
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
 }
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
