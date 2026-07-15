@@ -104,7 +104,7 @@ async function main() {
          FROM train_sample ts
          JOIN train_video tv ON tv.id = ts."trainVideoId"
          WHERE ts.status = 'completed'
-           AND tv."strokeLabel" IN ('Forehand Volley', 'Backhand Drive', 'Flat Serve')
+           AND tv."strokeLabel" IN ('Forehand Volley', 'Backhand Drive', 'Forehand Return')
            AND tv."skillLevel" = 'intermediate'
          ORDER BY ts."updatedAt" DESC
          LIMIT 3`,

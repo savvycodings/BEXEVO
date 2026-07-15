@@ -58,6 +58,9 @@ const GROUP_TO_CATEGORY: Record<string, TrainCategory> = {
   overheads: "overhead",
 };
 
+/** Shot folders excluded until reshoot (see remove-train-shots.ts). */
+export const SKIPPED_SHOT_FOLDERS = new Set(["flatserve", "sliceserve"]);
+
 const SHOT_TO_META: Record<
   string,
   { strokeLabel: string; strokePreset: TrainStrokePreset }
@@ -69,8 +72,6 @@ const SHOT_TO_META: Record<
   chiquitarevez: { strokeLabel: "Chiquita revez", strokePreset: "backhand_drive" },
   forehandvolley: { strokeLabel: "Forehand Volley", strokePreset: "forehand_volley" },
   backhandvolley: { strokeLabel: "Backhand Volley 1", strokePreset: "backhand_volley" },
-  flatserve: { strokeLabel: "Flat Serve", strokePreset: "forehand_drive" },
-  sliceserve: { strokeLabel: "Slice Serve", strokePreset: "backhand_drive_with_wall" },
   forehandreturn: { strokeLabel: "Forehand Return", strokePreset: "forehand_return_with_lob" },
   backhandreturn: { strokeLabel: "Backhand Return", strokePreset: "backhand_return" },
   "bandeja(jump)": { strokeLabel: "Bandeja (jump)", strokePreset: "bandeja" },
@@ -133,6 +134,9 @@ export function mapShotsRelativePath(
   }
 
   const shotKey = normKey(shotFolder);
+  if (SKIPPED_SHOT_FOLDERS.has(shotKey)) {
+    throw new Error(`Skipped shot folder "${shotFolder}" (removed from train library until reshoot)`);
+  }
   const meta = SHOT_TO_META[shotKey] ?? SHOT_TO_META[shotFolder.toLowerCase()];
   if (!meta) {
     throw new Error(`Unknown shot folder "${shotFolder}" in ${relativePath}`);

@@ -81,6 +81,11 @@ import {
   proReferenceFrameCandidates,
   proTimelineRatioForUserFrame,
 } from './trainRetrieval'
+import {
+  computeLobSignal,
+  ballPointsFromDetections,
+  applyLobTieBreak,
+} from './ballTrajectory'
 import { attachEvalToMetrics } from '../adminAccuracy/evalSnapshot'
 import {
   downsamplePoseFramesForPrompt,
@@ -1242,8 +1247,34 @@ router.post('/analyze', async (req, res) => {
     })
 
     const retrievalT0 = Date.now()
-    const retrieval = await retrieveForTechniqueMetrics(metrics)
-    metrics = { ...metrics, retrieval }
+    const retrievalRaw = await retrieveForTechniqueMetrics(metrics)
+    const lobSignal = computeLobSignal(
+      ballPointsFromDetections(normalizedDetections),
+      {
+        impactFrame:
+          typeof metrics?.impact_frame_resolved === 'number'
+            ? metrics.impact_frame_resolved
+            : null,
+        totalFrames: metrics?.total_frames ?? null,
+      }
+    )
+    const lobTie = applyLobTieBreak(retrievalRaw, lobSignal)
+    const retrieval = lobTie.retrieval
+    metrics = {
+      ...metrics,
+      ball_trajectory: lobSignal,
+      lob_tiebreak: { applied: lobTie.applied, note: lobTie.note },
+      retrieval,
+    }
+    if (lobTie.applied) {
+      console.log('[Technique] lob tie-break applied', {
+        analysisId,
+        note: lobTie.note,
+        lob_score: lobSignal.lob_score,
+        is_lob: lobSignal.is_lob,
+        shot: retrieval.shot_hypothesis?.stroke_label,
+      })
+    }
     timer.mark('retrieval', { durationMs: Date.now() - retrievalT0 })
 
     let aiAnalysis: any = null

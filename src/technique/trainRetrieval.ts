@@ -21,7 +21,7 @@ import {
   adminStrokeLabelKey,
   RETRIEVAL_CONFIDENCE_THRESHOLD,
 } from "../train/trainShotDisplay";
-import { buildShotHypothesis } from "./shotHypothesis";
+import { buildShotHypothesis, selectShotLabel } from "./shotHypothesis";
 import {
   filterTrainNeighborsForRetrieval,
   type TrainNeighborCandidate,
@@ -346,13 +346,10 @@ function ensembleMode(): EnsembleMode {
 }
 
 function envWeight(name: string, def: number): number {
-  const n = Number((process.env[name] ?? "").trim());
+  const raw = (process.env[name] ?? "").trim();
+  if (raw === "") return def;
+  const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : def;
-}
-
-/** Distance → vote weight; shared shape with shotHypothesis.neighborWeight. */
-function distanceWeight(distance: number): number {
-  return 1 / (distance + 0.03);
 }
 
 type Probe = {
@@ -371,24 +368,6 @@ type EnsembleAggregate = {
   neighbor_distance_gap: number | null;
 };
 
-function modeValue(values: string[]): string {
-  const counts = new Map<string, number>();
-  for (const v of values) {
-    const t = v?.trim();
-    if (!t) continue;
-    counts.set(t, (counts.get(t) ?? 0) + 1);
-  }
-  let best = "";
-  let bestN = 0;
-  for (const [key, n] of counts) {
-    if (n > bestN) {
-      bestN = n;
-      best = key;
-    }
-  }
-  return best;
-}
-
 /** Best (min-distance) neighbor per train_sample across a channel's probes — input to per-channel hypothesis. */
 function bestPerSample(probes: Probe[]): TrainNeighborCandidate[] {
   const byId = new Map<string, TrainNeighborCandidate>();
@@ -404,35 +383,31 @@ function bestPerSample(probes: Probe[]): TrainNeighborCandidate[] {
 function aggregateEnsemble(poseProbes: Probe[], meshProbes: Probe[]): EnsembleAggregate {
   const allProbes = [...poseProbes, ...meshProbes];
 
-  const labelVotes = new Map<string, number>();
+  // Collapse to one row per train source (best/min distance across all probes), so that
+  // a source with many probe-frame hits or duplicate clips cannot inflate a label's vote.
   const perSample = new Map<
     string,
-    { cand: TrainNeighborCandidate; weight: number; bestDistance: number }
+    { cand: TrainNeighborCandidate; bestDistance: number; baseWeight: number }
   >();
 
   for (const probe of allProbes) {
     for (const c of probe.candidates) {
-      const label = c.stroke_label.trim() || c.stroke_preset;
-      const w = probe.baseWeight * distanceWeight(c.distance);
-      labelVotes.set(label, (labelVotes.get(label) ?? 0) + w);
-
       const cur = perSample.get(c.train_sample_id);
-      if (cur) {
-        cur.weight += w;
-        if (c.distance < cur.bestDistance) {
-          cur.bestDistance = c.distance;
-          cur.cand = c;
-        }
-      } else {
-        perSample.set(c.train_sample_id, { cand: c, weight: w, bestDistance: c.distance });
+      if (!cur || c.distance < cur.bestDistance) {
+        perSample.set(c.train_sample_id, {
+          cand: c,
+          bestDistance: c.distance,
+          baseWeight: probe.baseWeight,
+        });
       }
     }
   }
 
-  const ranked = [...perSample.values()].sort(
-    (a, b) => b.weight - a.weight || a.bestDistance - b.bestDistance
+  const sources = [...perSample.values()].sort(
+    (a, b) => a.bestDistance - b.bestDistance
   );
-  const neighbors: NeighborRow[] = ranked.map((r) => ({
+
+  const neighbors: NeighborRow[] = sources.map((r) => ({
     train_sample_id: r.cand.train_sample_id,
     train_video_id: r.cand.train_video_id,
     stroke_name: r.cand.stroke_name,
@@ -443,38 +418,16 @@ function aggregateEnsemble(poseProbes: Probe[], meshProbes: Probe[]): EnsembleAg
     distance: r.bestDistance,
   }));
 
-  const sortedLabels = [...labelVotes.entries()].sort((a, b) => b[1] - a[1]);
-  const top = sortedLabels[0];
-  const second = sortedLabels[1];
-
-  let shot_hypothesis: TechniqueRetrievalResult["shot_hypothesis"];
-  if (!top) {
-    shot_hypothesis = {
-      stroke_preset: null,
-      stroke_label: null,
-      category: null,
-      skill_level: null,
-      confidence: 0,
-    };
-  } else {
-    const winners = ranked.filter(
-      (r) => (r.cand.stroke_label.trim() || r.cand.stroke_preset) === top[0]
-    );
-    const closest = winners.reduce(
-      (a, b) => (a.bestDistance < b.bestDistance ? a : b),
-      winners[0]!
-    );
-    const confidence = second
-      ? Math.max(0, Math.min(1, (top[1] - second[1]) / (top[1] + 1e-6)))
-      : Math.max(0, Math.min(1, 1 - (neighbors[0]?.distance ?? 0.45) / 0.45));
-    shot_hypothesis = {
-      stroke_label: top[0],
-      stroke_preset: closest?.cand.stroke_preset ?? null,
-      category: modeValue(winners.map((w) => w.cand.category)),
-      skill_level: modeValue(winners.map((w) => w.cand.skill_level)),
-      confidence,
-    };
-  }
+  const shot_hypothesis = selectShotLabel(
+    sources.map((s) => ({
+      stroke_label: s.cand.stroke_label,
+      stroke_preset: s.cand.stroke_preset,
+      category: s.cand.category,
+      skill_level: s.cand.skill_level,
+      distance: s.bestDistance,
+      sourceWeight: s.baseWeight,
+    }))
+  );
 
   const poseBest = bestPerSample(poseProbes);
   const meshBest = bestPerSample(meshProbes);

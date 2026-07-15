@@ -10,14 +10,6 @@ export const RETRIEVAL_CONFIDENCE_THRESHOLD = 0.35;
 /** When label vote is weak and top-2 library poses are similarly close, avoid a forced shot name. */
 export const NEIGHBOR_DISTANCE_GAP_MIN = 0.02;
 
-function categoryDisplayName(category: string): string {
-  return category
-    .split("_")
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
 export function adminStrokeLabelKey(
   strokeLabel: string | null | undefined,
   strokeName: string
@@ -80,26 +72,12 @@ export function resolveCanonicalShotFromMetrics(
   const neighbors = Array.isArray(retrieval?.neighbors)
     ? (retrieval.neighbors as Array<Record<string, unknown>>)
     : [];
-  const storedGap = retrieval?.neighbor_distance_gap;
-  const neighborDistanceGap =
-    typeof storedGap === "number" && Number.isFinite(storedGap)
-      ? storedGap
-      : neighbors.length >= 2 &&
-          typeof neighbors[0]?.distance === "number" &&
-          typeof neighbors[1]?.distance === "number"
-        ? (neighbors[1]!.distance as number) - (neighbors[0]!.distance as number)
-        : null;
-  const ambiguousRetrieval =
-    hypConf < RETRIEVAL_CONFIDENCE_THRESHOLD &&
-    neighborDistanceGap != null &&
-    neighborDistanceGap < NEIGHBOR_DISTANCE_GAP_MIN;
-
-  if (
-    !ambiguousRetrieval &&
-    hypConf >= RETRIEVAL_CONFIDENCE_THRESHOLD &&
-    hypLabel &&
-    !looksLikeStrokePresetId(hypLabel)
-  ) {
+  // The retrieval hypothesis already applies the shared nearest-neighbor + de-duplicated
+  // vote selection (selectShotLabel in shotHypothesis.ts), so it is the single source of
+  // truth for the shot name across activities, the LLM prompt, and correction images.
+  // Trust it whenever it resolved to a real admin label (not a raw preset id), regardless
+  // of the confidence gate — the gate previously caused display/hypothesis to disagree.
+  if (hypLabel && !looksLikeStrokePresetId(hypLabel)) {
     return {
       shotName: hypLabel,
       category: typeof hyp?.category === "string" ? hyp.category : null,
@@ -109,32 +87,7 @@ export function resolveCanonicalShotFromMetrics(
     };
   }
 
-  if (ambiguousRetrieval) {
-    const top = neighbors[0];
-    const topLabel =
-      typeof top?.stroke_label === "string" ? top.stroke_label.trim() : "";
-    if (topLabel && !looksLikeStrokePresetId(topLabel)) {
-      return {
-        shotName: topLabel,
-        category: typeof top?.category === "string" ? top.category : null,
-        skillLevel: typeof top?.skill_level === "string" ? top.skill_level : null,
-        confidence: hypConf,
-        source: "neighbor",
-      };
-    }
-    const cat =
-      typeof top?.category === "string" && top.category.trim()
-        ? categoryDisplayName(top.category.trim())
-        : null;
-    return {
-      shotName: cat ?? "Technique",
-      category: typeof top?.category === "string" ? top.category : null,
-      skillLevel: typeof top?.skill_level === "string" ? top.skill_level : null,
-      confidence: hypConf,
-      source: "low_confidence_fallback",
-    };
-  }
-
+  // No usable hypothesis label (null or a raw preset id) → nearest labeled neighbor.
   for (const n of neighbors.slice(0, 3)) {
     if (typeof n.stroke_label === "string" && n.stroke_label.trim()) {
       const key = n.stroke_label.trim();
