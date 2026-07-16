@@ -103,7 +103,10 @@ export function resolveImpactFrameIndex(
     };
   }
 
-  if (spanRatio < NARROW_CLIP_SPAN_RATIO) {
+  // Contacts exist but none land inside the user clip → clip midpoint is safer than
+  // clip.endMs (which may be far from the actual hit when YOLO fired elsewhere).
+  // When YOLO saw NO ball at all, prefer clip.endMs: the UI marks the hit at endMs.
+  if (rawContacts.length > 0 && spanRatio < NARROW_CLIP_SPAN_RATIO) {
     const centerMs = Math.round((clip.startMs + clip.endMs) / 2);
     const frame = impactMsToFrameIndex(centerMs, fps);
     return {

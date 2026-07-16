@@ -15,10 +15,12 @@
  *   offset = (wrist.x - shoulderCenterX) * sign(dominantShoulder.x - shoulderCenterX)
  * which is POSITIVE when the racket hand is on the player's dominant side and NEGATIVE when it
  * has crossed to the non-dominant side — independent of whether the camera is in front of or
- * behind the player. Around impact the racket hand sits on the DOMINANT side for a BACKHAND
- * (the arm extends out to the dominant side through contact) and crosses toward center / the
- * non-dominant side for a FOREHAND. So offset > 0 → backhand, offset < 0 → forehand. This
- * convention was validated against labeled clips (both known backhands and forehands).
+ * behind the player.
+ *
+ * Decision uses the CONTACT window (impact ± a few frames), NOT the prep mean: a wrong
+ * impact fallback (e.g. clip_center when YOLO misses the ball) can put half the follow-through
+ * into "prep" and flip the sign. At contact, dominant-side wrist → backhand; crossed /
+ * non-dominant → forehand.
  */
 
 import type { TechniqueRetrievalResult } from "../db/schema";
@@ -46,9 +48,9 @@ export type StrokeSideSignal = {
   dominant_hand: DominantHand;
   dominant_hand_source: "profile" | "racket_consensus" | "geometry" | null;
   facing: "front" | "behind" | "ambiguous";
-  /** Mean body-relative wrist offset during the backswing (dominant-side positive). */
+  /** Mean body-relative wrist offset in the contact window (dominant-side positive). */
   prep_offset: number;
-  /** Mean body-relative wrist offset during the follow-through. */
+  /** Mean body-relative wrist offset during the follow-through (debug). */
   follow_offset: number;
   frames_used: number;
 };
@@ -64,9 +66,15 @@ function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
 
-/** Minimum shoulder width (fraction of frame) for facing to be trustworthy; below = side-on. */
+/**
+ * Minimum shoulder width (fraction of frame). Below this the figure is tiny/side-on and
+ * MediaPipe left/right can flip — we still compute a signal but require a stronger contact
+ * offset before calling it confident.
+ */
 const MIN_SHOULDER_WIDTH = () => envNum("STROKE_SIDE_MIN_SHOULDER_WIDTH", 0.06);
-/** Normalized |prep offset| that maps to full score. */
+/** Half-width (frames) of the contact window used for the side decision. */
+const CONTACT_RADIUS = () => Math.max(1, Math.floor(envNum("STROKE_SIDE_CONTACT_RADIUS", 2)));
+/** Normalized |contact offset| that maps to full score. */
 const OFFSET_SCALE = () => envNum("STROKE_SIDE_OFFSET_SCALE", 0.5);
 /** Minimum score to be considered confident. */
 const MIN_SCORE = () => envNum("STROKE_SIDE_MIN_SCORE", 0.35);
@@ -219,40 +227,49 @@ export function computeStrokeSideSignal(
       ? opts.impactFrame
       : null;
 
-  const isPrep = (p: PerFrame) =>
-    p.phase === "preparation" ||
-    (p.phase == null && impactFrame != null && p.frame < impactFrame);
-  const isFollow = (p: PerFrame) =>
-    p.phase === "follow_through" ||
-    (p.phase == null && impactFrame != null && p.frame > impactFrame);
-
-  let prep = analyzed.filter(isPrep);
-  let follow = analyzed.filter(isFollow);
-  // Fallbacks when phases/impact are unknown: use first/last thirds by frame order.
-  if (prep.length === 0 || follow.length === 0) {
-    const sorted = [...analyzed].sort((a, b) => a.frame - b.frame);
-    const third = Math.max(1, Math.floor(sorted.length / 3));
-    if (prep.length === 0) prep = sorted.slice(0, third);
-    if (follow.length === 0) follow = sorted.slice(-third);
-  }
-
   const mean = (xs: PerFrame[]) =>
     xs.length ? xs.reduce((s, p) => s + p.offset, 0) / xs.length : 0;
-  // Weight the frames nearest impact most (contact position is the cleanest discriminator);
-  // use the pre-impact window as the primary measure since follow-through direction is noisy.
-  const prepOffset = mean(prep);
-  const followOffset = mean(follow);
+
+  // CONTACT window is the decision cue. Prep mean is unstable when impact falls on
+  // clip_center (YOLO miss): half the follow-through gets averaged into "prep" and the
+  // sign flips. Prefer explicit impact-phase rows, else frames within ±CONTACT_RADIUS.
+  const radius = CONTACT_RADIUS();
+  let contact = analyzed.filter(
+    (p) =>
+      p.phase === "impact" ||
+      (impactFrame != null && Math.abs(p.frame - impactFrame) <= radius)
+  );
+  if (contact.length === 0 && impactFrame != null) {
+    // Closest single frame to impact when the window is sparse.
+    const closest = [...analyzed].sort(
+      (a, b) => Math.abs(a.frame - impactFrame) - Math.abs(b.frame - impactFrame)
+    )[0];
+    if (closest) contact = [closest];
+  }
+  if (contact.length === 0) {
+    // No impact known → middle third of the swing arc.
+    const sorted = [...analyzed].sort((a, b) => a.frame - b.frame);
+    const third = Math.max(1, Math.floor(sorted.length / 3));
+    contact = sorted.slice(third, Math.min(sorted.length, third * 2) || sorted.length);
+  }
+
+  const follow = analyzed.filter(
+    (p) =>
+      p.phase === "follow_through" ||
+      (impactFrame != null && p.frame > impactFrame + radius)
+  );
+
+  const contactOffset = mean(contact);
+  const followOffset = mean(follow.length ? follow : analyzed.slice(-Math.max(1, Math.floor(analyzed.length / 3))));
 
   const medShoulderWidth = median(analyzed.map((p) => p.shoulderWidth));
   const facingConsistent =
     analyzed.filter((p) => p.facingSign > 0).length === 0 ||
     analyzed.filter((p) => p.facingSign < 0).length === 0;
 
-  // Racket-hand side around impact is the discriminator: dominant side → backhand,
-  // center / crossed → forehand. (Follow-through direction proved inconsistent, so it is
-  // reported for debugging but not used in the decision.)
-  const side: "forehand" | "backhand" = prepOffset >= 0 ? "backhand" : "forehand";
-  const score = clamp01(Math.abs(prepOffset) / Math.max(OFFSET_SCALE(), 1e-6));
+  // At contact: dominant-side wrist → backhand; crossed / non-dominant → forehand.
+  const side: "forehand" | "backhand" = contactOffset >= 0 ? "backhand" : "forehand";
+  const score = clamp01(Math.abs(contactOffset) / Math.max(OFFSET_SCALE(), 1e-6));
 
   const facing: StrokeSideSignal["facing"] =
     medShoulderWidth < MIN_SHOULDER_WIDTH()
@@ -262,11 +279,12 @@ export function computeStrokeSideSignal(
         : "front";
 
   const confident =
-    medShoulderWidth >= MIN_SHOULDER_WIDTH() &&
     facingConsistent &&
     score >= MIN_SCORE() &&
-    prep.length >= 1 &&
-    analyzed.length >= 3;
+    contact.length >= 1 &&
+    analyzed.length >= 3 &&
+    // Tiny figures need a clearer contact offset before we trust the side call.
+    (medShoulderWidth >= MIN_SHOULDER_WIDTH() || score >= STRONG());
 
   return {
     available: true,
@@ -276,7 +294,7 @@ export function computeStrokeSideSignal(
     dominant_hand: dominant,
     dominant_hand_source: opts.dominantHandSource ?? null,
     facing,
-    prep_offset: Number(prepOffset.toFixed(4)),
+    prep_offset: Number(contactOffset.toFixed(4)),
     follow_offset: Number(followOffset.toFixed(4)),
     frames_used: analyzed.length,
   };

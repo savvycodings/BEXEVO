@@ -31,6 +31,18 @@ test("narrow mid-clip + contacts outside clip uses clip_center", () => {
   assert.notEqual(r.impactFrameIndex, 92);
 });
 
+test("no contacts + narrow clip uses clip_end (UI marks hit at endMs)", () => {
+  const r = resolveImpactFrameIndex({
+    clip: { startMs: 861, endMs: 2243 },
+    totalFrames: 89,
+    videoDurationMs: 3000,
+    contactFrames: [],
+  });
+  assert.equal(r.source, "clip_end");
+  const fps = 89 / (3000 / 1000);
+  assert.equal(r.impactFrameIndex, Math.round((2243 / 1000) * fps));
+});
+
 test("no contacts falls back to clip_end when clip spans most of video", () => {
   const r = resolveImpactFrameIndex({
     clip: { startMs: 200, endMs: 2900 },
