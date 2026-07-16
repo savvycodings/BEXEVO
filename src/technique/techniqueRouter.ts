@@ -86,6 +86,13 @@ import {
   ballPointsFromDetections,
   applyLobTieBreak,
 } from './ballTrajectory'
+import {
+  computeStrokeSideSignal,
+  applyStrokeSideTieBreak,
+  strokeSideFramesFromMetrics,
+  profileHandToDominant,
+  type DominantHand,
+} from './strokeSide'
 import { attachEvalToMetrics } from '../adminAccuracy/evalSnapshot'
 import {
   downsamplePoseFramesForPrompt,
@@ -1259,11 +1266,50 @@ router.post('/analyze', async (req, res) => {
       }
     )
     const lobTie = applyLobTieBreak(retrievalRaw, lobSignal)
-    const retrieval = lobTie.retrieval
+
+    // Forehand/backhand family tie-break from pose geometry, anchored on a KNOWN dominant hand
+    // (user profile first, then racket-detection consensus). The k-NN embeddings carry no
+    // reliable racket-side signal, so this corrects a hypothesis that resolved to the wrong side
+    // when a same-side neighbor is close. Abstains on degenerate/side-on poses.
+    const impactFrameForSide =
+      typeof metrics?.impact_frame_resolved === 'number'
+        ? metrics.impact_frame_resolved
+        : null
+    let dominantHand: DominantHand = null
+    let dominantHandSource: 'profile' | 'racket_consensus' | null = null
+    try {
+      const profileRow = await db.query.userProfile.findFirst({
+        where: (up, { eq: _eq }) => _eq(up.userId, userId),
+        columns: { dominantHand: true },
+      })
+      dominantHand = profileHandToDominant(profileRow?.dominantHand ?? null)
+      if (dominantHand) dominantHandSource = 'profile'
+    } catch (e) {
+      console.warn('[Technique] profile dominant-hand lookup failed', e)
+    }
+    if (!dominantHand) {
+      const consensus = computeRacketHandConsensusForFrames(
+        metrics?.pose_data ?? [],
+        (metrics?.pose_data ?? []).map((p: { frame: number }) => p.frame)
+      )
+      if (consensus === 'left-handed') dominantHand = 'left'
+      else if (consensus === 'right-handed') dominantHand = 'right'
+      if (dominantHand) dominantHandSource = 'racket_consensus'
+    }
+
+    const strokeSideSignal = computeStrokeSideSignal(
+      strokeSideFramesFromMetrics(metrics, impactFrameForSide),
+      { dominantHand, dominantHandSource, impactFrame: impactFrameForSide }
+    )
+    const sideTie = applyStrokeSideTieBreak(lobTie.retrieval, strokeSideSignal)
+
+    const retrieval = sideTie.retrieval
     metrics = {
       ...metrics,
       ball_trajectory: lobSignal,
       lob_tiebreak: { applied: lobTie.applied, note: lobTie.note },
+      stroke_side: strokeSideSignal,
+      stroke_side_tiebreak: { applied: sideTie.applied, note: sideTie.note },
       retrieval,
     }
     if (lobTie.applied) {
@@ -1272,6 +1318,20 @@ router.post('/analyze', async (req, res) => {
         note: lobTie.note,
         lob_score: lobSignal.lob_score,
         is_lob: lobSignal.is_lob,
+        shot: lobTie.retrieval.shot_hypothesis?.stroke_label,
+      })
+    }
+    if (sideTie.applied || strokeSideSignal.available) {
+      console.log('[Technique] stroke-side signal', {
+        analysisId,
+        applied: sideTie.applied,
+        note: sideTie.note,
+        side: strokeSideSignal.side,
+        score: strokeSideSignal.score,
+        confident: strokeSideSignal.confident,
+        dominant_hand: strokeSideSignal.dominant_hand,
+        dominant_hand_source: strokeSideSignal.dominant_hand_source,
+        facing: strokeSideSignal.facing,
         shot: retrieval.shot_hypothesis?.stroke_label,
       })
     }

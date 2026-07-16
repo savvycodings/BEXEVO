@@ -125,6 +125,15 @@ export function selectShotLabel(
       second != null
         ? clamp01((top - second) / (top + 1e-6))
         : clamp01(1 - dMin / 0.45);
+
+    // Degenerate near-tie guard: when the top two labels are within TIE_EPS, the neighborhood
+    // is noise and the weighted winner is fragile (tiny cross-channel weight differences can
+    // elect a label that is neither the nearest match nor either channel's pick). Fall back to
+    // the single nearest neighbor's label, which is the most defensible choice in a tie.
+    const tieEps = envNum("RETRIEVAL_TIE_EPS", 0.1);
+    if (second != null && confidence < tieEps && winnerLabel !== nearestLabel) {
+      winnerLabel = nearestLabel;
+    }
   }
 
   const winners = (byLabel.get(winnerLabel)?.members ?? []).slice();
