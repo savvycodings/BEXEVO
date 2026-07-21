@@ -684,6 +684,53 @@ export const coachReviewAnnotation = pgTable(
   ]
 );
 
+/** Coach profile gallery photos (You tab Add Photos + student coach detail carousel). */
+export const coachGalleryPhoto = pgTable(
+  "coach_gallery_photo",
+  {
+    id: text("id").primaryKey(),
+    coachUserId: text("coachUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** Absolute URL or `/uploads/coach-gallery/...` path. */
+    imageUrl: text("imageUrl").notNull(),
+    sortOrder: integer("sortOrder").notNull().default(0),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("coach_gallery_photo_coach_created_idx").on(
+      table.coachUserId,
+      table.createdAt
+    ),
+    index("coach_gallery_photo_coach_sort_idx").on(
+      table.coachUserId,
+      table.sortOrder
+    ),
+  ]
+);
+
+/** Coach You profile paragraphs (heading + body) shown under date/location. */
+export const coachProfileSection = pgTable(
+  "coach_profile_section",
+  {
+    id: text("id").primaryKey(),
+    coachUserId: text("coachUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    heading: text("heading").notNull(),
+    body: text("body").notNull(),
+    sortOrder: integer("sortOrder").notNull().default(0),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    index("coach_profile_section_coach_sort_idx").on(
+      table.coachUserId,
+      table.sortOrder
+    ),
+  ]
+);
+
 /** User feedback when regenerating correction images (for product review). */
 export const techniqueCorrectionRegenerationFeedback = pgTable(
   "technique_correction_regeneration_feedback",
