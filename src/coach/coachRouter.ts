@@ -2,13 +2,15 @@ import express from "express";
 import multer from "multer";
 import { fromNodeHeaders } from "better-auth/node";
 import { randomUUID } from "crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { v2 as cloudinary } from "cloudinary";
 import { auth } from "../auth";
 import {
   db,
+  coachGalleryPhoto,
+  coachProfileSection,
   coachReviewAnnotation,
   coachSentVideo,
   coachStudent,
@@ -56,6 +58,13 @@ const COACH_REVIEW_UPLOAD_ROOT = path.join(
 
 const COACH_SENT_VIDEO_MAX_BYTES = 50 * 1024 * 1024;
 const TECHNIQUE_UPLOAD_ROOT = path.join(process.cwd(), "uploads", "technique");
+const COACH_GALLERY_UPLOAD_ROOT = path.join(
+  process.cwd(),
+  "uploads",
+  "coach-gallery"
+);
+const COACH_GALLERY_MAX_BYTES = 8 * 1024 * 1024;
+const COACH_GALLERY_MAX_FILES = 8;
 
 const sentVideoUpload = multer({
   storage: multer.memoryStorage(),
@@ -66,6 +75,29 @@ const sentVideoUpload = multer({
     cb(new Error("Only MP4 and MOV videos up to 50MB are allowed"));
   },
 });
+
+const galleryUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: COACH_GALLERY_MAX_BYTES, files: COACH_GALLERY_MAX_FILES },
+  fileFilter: (_req, file, cb) => {
+    if (String(file.mimetype || "").toLowerCase().startsWith("image/")) {
+      return cb(null, true);
+    }
+    cb(new Error("Only image files are allowed"));
+  },
+});
+
+function galleryExtForMime(mime: string, originalName?: string): string {
+  const fromName = path.extname(originalName || "").toLowerCase();
+  if (fromName === ".png" || fromName === ".jpg" || fromName === ".jpeg" || fromName === ".webp") {
+    return fromName === ".jpeg" ? ".jpg" : fromName;
+  }
+  const low = mime.toLowerCase();
+  if (low.includes("png")) return ".png";
+  if (low.includes("webp")) return ".webp";
+  if (low.includes("jpeg") || low.includes("jpg")) return ".jpg";
+  return ".jpg";
+}
 
 function parseDataImage(imageUri: string): { mime: string; base64: string } | null {
   const m = /^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i.exec(imageUri.trim());
@@ -872,6 +904,210 @@ router.get("/students/:studentUserId/uploads", async (req, res) => {
   } catch (e: any) {
     console.error("[Coach] student uploads error", e);
     return res.status(500).json({ error: "Failed to load student uploads" });
+  }
+});
+
+/** List gallery photos for a coach (student coach detail + coach You tab). */
+router.get("/gallery/:coachUserId", async (req, res) => {
+  try {
+    const requesterId = await resolveUserId(req);
+    if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
+
+    const coachUserId = String(req.params.coachUserId || "").trim();
+    if (!coachUserId) return res.status(400).json({ error: "Missing coachUserId" });
+
+    const rows = await db
+      .select({
+        id: coachGalleryPhoto.id,
+        coachUserId: coachGalleryPhoto.coachUserId,
+        imageUrl: coachGalleryPhoto.imageUrl,
+        sortOrder: coachGalleryPhoto.sortOrder,
+        createdAt: coachGalleryPhoto.createdAt,
+      })
+      .from(coachGalleryPhoto)
+      .where(eq(coachGalleryPhoto.coachUserId, coachUserId))
+      .orderBy(asc(coachGalleryPhoto.sortOrder), asc(coachGalleryPhoto.createdAt));
+
+    return res.json({
+      photos: rows.map((r) => ({
+        id: r.id,
+        coachUserId: r.coachUserId,
+        imageUrl: r.imageUrl,
+        sortOrder: r.sortOrder,
+        createdAt: r.createdAt.toISOString(),
+      })),
+    });
+  } catch (e: any) {
+    console.error("[Coach] gallery list error", e);
+    return res.status(500).json({ error: "Failed to load gallery" });
+  }
+});
+
+/** Upload one or more gallery photos (coach You tab Add Photos). */
+router.post("/gallery", (req, res) => {
+  galleryUpload.array("photos", COACH_GALLERY_MAX_FILES)(req, res, async (err: unknown) => {
+    if (err) {
+      const msg = err instanceof Error ? err.message : "Invalid upload";
+      return res.status(400).json({ error: msg });
+    }
+
+    try {
+      const userId = await resolveUserId(req);
+      if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+      const files = Array.isArray(req.files) ? (req.files as Express.Multer.File[]) : [];
+      if (files.length === 0) {
+        return res.status(400).json({ error: "No photo files" });
+      }
+
+      if (!fs.existsSync(COACH_GALLERY_UPLOAD_ROOT)) {
+        fs.mkdirSync(COACH_GALLERY_UPLOAD_ROOT, { recursive: true });
+      }
+
+      const existing = await db
+        .select({ sortOrder: coachGalleryPhoto.sortOrder })
+        .from(coachGalleryPhoto)
+        .where(eq(coachGalleryPhoto.coachUserId, userId))
+        .orderBy(asc(coachGalleryPhoto.sortOrder));
+      let nextSort =
+        existing.length > 0
+          ? Math.max(...existing.map((r) => r.sortOrder)) + 1
+          : 0;
+
+      const inserted: Array<{
+        id: string;
+        coachUserId: string;
+        imageUrl: string;
+        sortOrder: number;
+        createdAt: string;
+      }> = [];
+
+      for (const file of files) {
+        if (!file?.buffer?.length) continue;
+        const ext = galleryExtForMime(file.mimetype || "", file.originalname);
+        const fileName = `${userId}-${randomUUID()}${ext}`;
+        const absPath = path.join(COACH_GALLERY_UPLOAD_ROOT, fileName);
+        await fs.promises.writeFile(absPath, file.buffer);
+        const imageUrl = `/uploads/coach-gallery/${fileName}`;
+        const id = randomUUID();
+        const sortOrder = nextSort++;
+        const now = new Date();
+        await db.insert(coachGalleryPhoto).values({
+          id,
+          coachUserId: userId,
+          imageUrl,
+          sortOrder,
+          createdAt: now,
+        });
+        inserted.push({
+          id,
+          coachUserId: userId,
+          imageUrl,
+          sortOrder,
+          createdAt: now.toISOString(),
+        });
+      }
+
+      if (inserted.length === 0) {
+        return res.status(400).json({ error: "No valid photo files" });
+      }
+
+      return res.json({ ok: true, photos: inserted });
+    } catch (e: any) {
+      console.error("[Coach] gallery upload error", e);
+      return res.status(500).json({ error: "Failed to upload gallery photos" });
+    }
+  });
+});
+
+/** List profile sections (heading + body) for a coach. */
+router.get("/profile-sections/:coachUserId", async (req, res) => {
+  try {
+    const requesterId = await resolveUserId(req);
+    if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
+
+    const coachUserId = String(req.params.coachUserId || "").trim();
+    if (!coachUserId) return res.status(400).json({ error: "Missing coachUserId" });
+
+    const rows = await db
+      .select({
+        id: coachProfileSection.id,
+        coachUserId: coachProfileSection.coachUserId,
+        heading: coachProfileSection.heading,
+        body: coachProfileSection.body,
+        sortOrder: coachProfileSection.sortOrder,
+        createdAt: coachProfileSection.createdAt,
+        updatedAt: coachProfileSection.updatedAt,
+      })
+      .from(coachProfileSection)
+      .where(eq(coachProfileSection.coachUserId, coachUserId))
+      .orderBy(asc(coachProfileSection.sortOrder), asc(coachProfileSection.createdAt));
+
+    return res.json({
+      sections: rows.map((r) => ({
+        id: r.id,
+        coachUserId: r.coachUserId,
+        heading: r.heading,
+        body: r.body,
+        sortOrder: r.sortOrder,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+      })),
+    });
+  } catch (e: any) {
+    console.error("[Coach] profile sections list error", e);
+    return res.status(500).json({ error: "Failed to load profile sections" });
+  }
+});
+
+/** Create a profile section (coach You tab). */
+router.post("/profile-sections", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const heading = String(req.body?.heading ?? "").trim().slice(0, 120);
+    const body = String(req.body?.body ?? "").trim().slice(0, 8000);
+    if (!heading) return res.status(400).json({ error: "Heading is required" });
+    if (!body) return res.status(400).json({ error: "Text is required" });
+
+    const existing = await db
+      .select({ sortOrder: coachProfileSection.sortOrder })
+      .from(coachProfileSection)
+      .where(eq(coachProfileSection.coachUserId, userId))
+      .orderBy(asc(coachProfileSection.sortOrder));
+    const sortOrder =
+      existing.length > 0
+        ? Math.max(...existing.map((r) => r.sortOrder)) + 1
+        : 0;
+
+    const id = randomUUID();
+    const now = new Date();
+    await db.insert(coachProfileSection).values({
+      id,
+      coachUserId: userId,
+      heading,
+      body,
+      sortOrder,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return res.json({
+      ok: true,
+      section: {
+        id,
+        coachUserId: userId,
+        heading,
+        body,
+        sortOrder,
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      },
+    });
+  } catch (e: any) {
+    console.error("[Coach] profile section create error", e);
+    return res.status(500).json({ error: "Failed to save profile section" });
   }
 });
 
