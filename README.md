@@ -4,7 +4,7 @@
 
 From this directory:
 
-```bash
+```bashs
 pnpm install
 pnpm run dev
 ```
