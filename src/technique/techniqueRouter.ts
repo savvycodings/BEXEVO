@@ -1976,7 +1976,19 @@ function poseDataWithinUserClips(
   return filtered.length > 0 ? filtered : poseData
 }
 
-/** Evenly sample pose frames across the clip (spread of the motion). */
+/** Total wall-clock width (ms) of the correction still window around impact. Default 1s. */
+function correctionImpactWindowMs(): number {
+  const raw = String(process.env.CORRECTION_IMPACT_WINDOW_MS ?? '1000').trim()
+  const n = Number(raw)
+  if (Number.isFinite(n) && n >= 200) return Math.min(Math.floor(n), 4000)
+  return 1000
+}
+
+/**
+ * Pick correction stills near ball contact — not spread across the whole trim.
+ * Pool is clip-filtered when possible, then restricted to ±(window/2) of impact
+ * (default 1s total width). Within that window we take the frames closest to impact.
+ */
 function selectPoseFramesForCorrections(
   poseData: PoseFrameRow[],
   maxFrames: number,
@@ -1984,6 +1996,7 @@ function selectPoseFramesForCorrections(
     userClips?: ClipMsRange[]
     videoDurationMs?: number
     totalFrames?: number
+    impactFrame?: number | null
   }
 ): PoseFrameRow[] {
   let pool = poseData
@@ -2001,26 +2014,61 @@ function selectPoseFramesForCorrections(
   }
   const sorted = [...pool].sort((a, b) => a.frame - b.frame)
   const n = sorted.length
+  if (n === 0) return []
   if (n <= maxFrames) return sorted
-  if (maxFrames <= 1) return [sorted[Math.min(n - 1, Math.floor(n / 2))]]
+  if (maxFrames <= 1) {
+    const impact =
+      typeof opts?.impactFrame === 'number' && Number.isFinite(opts.impactFrame)
+        ? opts.impactFrame
+        : sorted[Math.floor(n / 2)]!.frame
+    return [
+      sorted.reduce((best, p) =>
+        Math.abs(p.frame - impact) < Math.abs(best.frame - impact) ? p : best
+      ),
+    ]
+  }
+
+  const impactFrame =
+    typeof opts?.impactFrame === 'number' && Number.isFinite(opts.impactFrame)
+      ? Math.round(opts.impactFrame)
+      : sorted[Math.floor(n / 2)]!.frame
+
+  const totalFrames = Math.max(1, opts?.totalFrames ?? sorted[n - 1]!.frame + 1)
+  const durationMs =
+    typeof opts?.videoDurationMs === 'number' && opts.videoDurationMs > 0
+      ? opts.videoDurationMs
+      : null
+  const fps = durationMs != null ? estimateFps(totalFrames, durationMs) : 30
+  const halfWindowFrames = Math.max(
+    1,
+    Math.round((fps * (correctionImpactWindowMs() / 1000)) / 2)
+  )
+
+  let window = sorted.filter(
+    (p) => Math.abs(p.frame - impactFrame) <= halfWindowFrames
+  )
+  // No pose samples inside the contact window → fall back to nearest overall.
+  if (window.length === 0) {
+    window = [...sorted].sort(
+      (a, b) =>
+        Math.abs(a.frame - impactFrame) - Math.abs(b.frame - impactFrame)
+    )
+  }
+
+  const closest = [...window].sort(
+    (a, b) =>
+      Math.abs(a.frame - impactFrame) - Math.abs(b.frame - impactFrame) ||
+      a.frame - b.frame
+  )
   const picked: PoseFrameRow[] = []
   const seen = new Set<number>()
-  for (let k = 0; k < maxFrames; k++) {
-    const i = Math.round((k / (maxFrames - 1)) * (n - 1))
-    const p = sorted[i]
-    if (!seen.has(p.frame)) {
-      seen.add(p.frame)
-      picked.push(p)
-    }
+  for (const p of closest) {
+    if (picked.length >= maxFrames) break
+    if (seen.has(p.frame)) continue
+    seen.add(p.frame)
+    picked.push(p)
   }
-  let idx = 0
-  while (picked.length < maxFrames && idx < n) {
-    const p = sorted[idx++]
-    if (!seen.has(p.frame)) {
-      seen.add(p.frame)
-      picked.push(p)
-    }
-  }
+  // Chronological thumbs for the carousel (impact-near set only).
   return picked.sort((a, b) => a.frame - b.frame)
 }
 
@@ -2317,6 +2365,11 @@ router.post('/correction-images', async (req, res) => {
     let poseSequence = metrics?.impact_pose_sequence as
       | LabeledPoseFrame[]
       | undefined
+    let impactFrameResolved: number | null =
+      typeof metrics?.impact_frame_resolved === 'number' &&
+      Number.isFinite(metrics.impact_frame_resolved)
+        ? Math.round(metrics.impact_frame_resolved)
+        : null
     const durationForRebuild = resolveVideoDurationMsForImpact(
       typeof metrics?.video_duration_ms === 'number'
         ? metrics.video_duration_ms
@@ -2335,6 +2388,18 @@ router.post('/correction-images', async (req, res) => {
       )
       if (impactApplied?.impact_pose_sequence?.length) {
         poseSequence = impactApplied.impact_pose_sequence
+      }
+      if (
+        typeof impactApplied?.impact_frame_resolved === 'number' &&
+        Number.isFinite(impactApplied.impact_frame_resolved)
+      ) {
+        impactFrameResolved = Math.round(impactApplied.impact_frame_resolved)
+      }
+    }
+    if (impactFrameResolved == null) {
+      const phaseImpact = poseSequence?.find((p) => p.phase === 'impact')?.frame
+      if (typeof phaseImpact === 'number' && Number.isFinite(phaseImpact)) {
+        impactFrameResolved = Math.round(phaseImpact)
       }
     }
 
@@ -2366,6 +2431,7 @@ router.post('/correction-images', async (req, res) => {
                 : undefined,
             totalFrames:
               typeof metrics?.total_frames === 'number' ? metrics.total_frames : 0,
+            impactFrame: impactFrameResolved,
           })
 
     if (requestedFrames.length === 0) {
@@ -2379,7 +2445,9 @@ router.post('/correction-images', async (req, res) => {
       (f) => !cachedByFrame.has(f.frame)
     )
 
-    const impactFrameNum = poseSequence?.find((p) => p.phase === 'impact')?.frame
+    const impactFrameNum =
+      impactFrameResolved ??
+      poseSequence?.find((p) => p.phase === 'impact')?.frame
     if (impactFrameNum != null && framesToGenerate.length > 1) {
       framesToGenerate.sort(
         (a, b) =>
@@ -3012,29 +3080,14 @@ router.post('/correction-test-frames', async (req, res) => {
       return res.status(404).json({ error: 'Video file missing from disk' })
     }
 
-    const requestedFrames = selectPoseFramesForCorrections(
-      poseData,
-      maxCorrectionImageFrames(),
-      {
-        userClips: Array.isArray(metrics?.user_clips)
-          ? (metrics.user_clips as ClipMsRange[])
-          : undefined,
-        videoDurationMs:
-          typeof metrics?.video_duration_ms === 'number'
-            ? metrics.video_duration_ms
-            : undefined,
-        totalFrames:
-          typeof metrics?.total_frames === 'number' ? metrics.total_frames : 0,
-      }
-    )
-
-    if (requestedFrames.length === 0) {
-      return res.status(400).json({ error: 'No matching frames found' })
-    }
-
     let poseSequence = metrics?.impact_pose_sequence as
       | LabeledPoseFrame[]
       | undefined
+    let impactFrameResolved: number | null =
+      typeof metrics?.impact_frame_resolved === 'number' &&
+      Number.isFinite(metrics.impact_frame_resolved)
+        ? Math.round(metrics.impact_frame_resolved)
+        : null
     const durationForRebuild = resolveVideoDurationMsForImpact(
       typeof metrics?.video_duration_ms === 'number'
         ? metrics.video_duration_ms
@@ -3054,10 +3107,45 @@ router.post('/correction-test-frames', async (req, res) => {
       if (impactApplied?.impact_pose_sequence?.length) {
         poseSequence = impactApplied.impact_pose_sequence
       }
+      if (
+        typeof impactApplied?.impact_frame_resolved === 'number' &&
+        Number.isFinite(impactApplied.impact_frame_resolved)
+      ) {
+        impactFrameResolved = Math.round(impactApplied.impact_frame_resolved)
+      }
+    }
+    if (impactFrameResolved == null) {
+      const phaseImpact = poseSequence?.find((p) => p.phase === 'impact')?.frame
+      if (typeof phaseImpact === 'number' && Number.isFinite(phaseImpact)) {
+        impactFrameResolved = Math.round(phaseImpact)
+      }
+    }
+
+    const requestedFrames = selectPoseFramesForCorrections(
+      poseData,
+      maxCorrectionImageFrames(),
+      {
+        userClips: Array.isArray(metrics?.user_clips)
+          ? (metrics.user_clips as ClipMsRange[])
+          : undefined,
+        videoDurationMs:
+          typeof metrics?.video_duration_ms === 'number'
+            ? metrics.video_duration_ms
+            : undefined,
+        totalFrames:
+          typeof metrics?.total_frames === 'number' ? metrics.total_frames : 0,
+        impactFrame: impactFrameResolved,
+      }
+    )
+
+    if (requestedFrames.length === 0) {
+      return res.status(400).json({ error: 'No matching frames found' })
     }
 
     const framesToExtract = [...requestedFrames]
-    const impactFrameNum = poseSequence?.find((p) => p.phase === 'impact')?.frame
+    const impactFrameNum =
+      impactFrameResolved ??
+      poseSequence?.find((p) => p.phase === 'impact')?.frame
     if (impactFrameNum != null && framesToExtract.length > 1) {
       framesToExtract.sort(
         (a, b) =>
