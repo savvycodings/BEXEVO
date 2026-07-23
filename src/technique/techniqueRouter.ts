@@ -1301,7 +1301,13 @@ router.post('/analyze', async (req, res) => {
       strokeSideFramesFromMetrics(metrics, impactFrameForSide),
       { dominantHand, dominantHandSource, impactFrame: impactFrameForSide }
     )
-    const sideTie = applyStrokeSideTieBreak(lobTie.retrieval, strokeSideSignal)
+    const impactFrameSource =
+      typeof metrics?.impact_frame_source === 'string'
+        ? metrics.impact_frame_source
+        : null
+    const sideTie = applyStrokeSideTieBreak(lobTie.retrieval, strokeSideSignal, {
+      impactFrameSource,
+    })
 
     const retrieval = sideTie.retrieval
     metrics = {

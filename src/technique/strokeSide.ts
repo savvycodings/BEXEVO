@@ -19,8 +19,11 @@
  *
  * Decision uses the CONTACT window (impact ± a few frames), NOT the prep mean: a wrong
  * impact fallback (e.g. clip_center when YOLO misses the ball) can put half the follow-through
- * into "prep" and flip the sign. At contact, dominant-side wrist → backhand; crossed /
- * non-dominant → forehand.
+ * into "prep" and flip the sign. At contact, dominant-side wrist → forehand; crossed /
+ * non-dominant → backhand (standard contact biomechanics).
+ *
+ * When impact is only a clip fallback (`clip_center` / `clip_end`), the tie-break abstains
+ * unless the contact score clears a higher bar — geometry must not overrule agreeing k-NN.
  */
 
 import type { TechniqueRetrievalResult } from "../db/schema";
@@ -80,8 +83,20 @@ const OFFSET_SCALE = () => envNum("STROKE_SIDE_OFFSET_SCALE", 0.5);
 const MIN_SCORE = () => envNum("STROKE_SIDE_MIN_SCORE", 0.35);
 /** Score at/above which the tie-break may re-rank the family. */
 const STRONG = () => envNum("STROKE_SIDE_STRONG", 0.5);
+/**
+ * Higher bar when impact is clip_center/clip_end (YOLO miss). Default 0.85 — effectively
+ * abstains on typical mid-strength signals so a bad contact window cannot flip the family.
+ */
+const STRONG_WEAK_IMPACT = () => envNum("STROKE_SIDE_STRONG_WEAK_IMPACT", 0.85);
 /** A competing-family neighbor may be promoted only if within this cosine window of the top. */
 const PROMOTE_WINDOW = () => envNum("STROKE_SIDE_PROMOTE_WINDOW", 0.08);
+
+const WEAK_IMPACT_SOURCES = new Set(["clip_center", "clip_end"]);
+
+export function isWeakImpactSource(source: string | null | undefined): boolean {
+  const s = (source ?? "").toString().trim().toLowerCase();
+  return WEAK_IMPACT_SOURCES.has(s);
+}
 
 /**
  * Build the swing window for the side signal. Prefers the dense `pose_data` frames within
@@ -267,8 +282,8 @@ export function computeStrokeSideSignal(
     analyzed.filter((p) => p.facingSign > 0).length === 0 ||
     analyzed.filter((p) => p.facingSign < 0).length === 0;
 
-  // At contact: dominant-side wrist → backhand; crossed / non-dominant → forehand.
-  const side: "forehand" | "backhand" = contactOffset >= 0 ? "backhand" : "forehand";
+  // At contact: dominant-side wrist → forehand; crossed / non-dominant → backhand.
+  const side: "forehand" | "backhand" = contactOffset >= 0 ? "forehand" : "backhand";
   const score = clamp01(Math.abs(contactOffset) / Math.max(OFFSET_SCALE(), 1e-6));
 
   const facing: StrokeSideSignal["facing"] =
@@ -332,26 +347,44 @@ export type StrokeSideTieBreak = {
  * current hypothesis is a forehand/backhand label of the OPPOSITE side and a same-side neighbor
  * sits within PROMOTE_WINDOW of the top match. Never invents a label that is not already a near
  * neighbor, and never touches neutral (overhead/serve/bandeja) hypotheses.
+ *
+ * When `impactFrameSource` is `clip_center` or `clip_end`, require STRONG_WEAK_IMPACT instead
+ * of STRONG so a fallback contact window cannot overrule agreeing pose/mesh.
  */
 export function applyStrokeSideTieBreak(
   retrieval: TechniqueRetrievalResult,
-  signal: StrokeSideSignal
+  signal: StrokeSideSignal,
+  opts?: { impactFrameSource?: string | null }
 ): StrokeSideTieBreak {
   const enabled =
     (process.env.STROKE_SIDE_TIEBREAK_ENABLED ?? "true").trim().toLowerCase() !==
     "false";
   const neighbors = retrieval.neighbors ?? [];
   const hyp = retrieval.shot_hypothesis;
+  const weakImpact = isWeakImpactSource(opts?.impactFrameSource);
+  const strongFloor = weakImpact ? STRONG_WEAK_IMPACT() : STRONG();
   if (
     !enabled ||
     !signal.available ||
     !signal.confident ||
-    signal.score < STRONG() ||
+    signal.score < strongFloor ||
     !signal.side ||
     neighbors.length === 0 ||
     !hyp
   ) {
-    return { retrieval, applied: false, note: !enabled ? "disabled" : "no_signal_or_neighbors" };
+    if (!enabled) {
+      return { retrieval, applied: false, note: "disabled" };
+    }
+    if (
+      signal.available &&
+      signal.confident &&
+      signal.side &&
+      weakImpact &&
+      signal.score < strongFloor
+    ) {
+      return { retrieval, applied: false, note: "weak_impact_abstain" };
+    }
+    return { retrieval, applied: false, note: "no_signal_or_neighbors" };
   }
 
   const hypFamily = labelSideFamily(hyp.stroke_label, hyp.stroke_preset);
