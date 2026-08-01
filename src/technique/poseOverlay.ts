@@ -1,7 +1,11 @@
 import { downsamplePoseFramesForPrompt } from './poseEmbedding'
 
-/** Max pose samples returned for client video overlay (racket/ball boxes + skeleton). */
-export const MAX_POSE_OVERLAY_FRAMES = 200
+/** Max pose samples returned for client video overlay (racket/ball boxes + skeleton).
+ * 900 ≈ 30s @ 30fps so typical analyze clips stay full density; longer uploads downsample. */
+export const MAX_POSE_OVERLAY_FRAMES = 900
+
+/** Analyze Step-2 clips are ~3s; never thin those even if sample count exceeds the soft cap. */
+export const SHORT_CLIP_FULL_DENSITY_MS = 5000
 
 export function slimPoseRowForOverlay(row: unknown): Record<string, unknown> | null {
   if (!row || typeof row !== 'object') return null
@@ -32,13 +36,21 @@ export function slimPoseRowForOverlay(row: unknown): Record<string, unknown> | n
 
 export function poseDataForOverlayFetch(
   poseRaw: unknown,
-  maxFrames = MAX_POSE_OVERLAY_FRAMES
+  maxFrames = MAX_POSE_OVERLAY_FRAMES,
+  opts?: { videoDurationMs?: number | null }
 ): Record<string, unknown>[] {
   if (!Array.isArray(poseRaw) || poseRaw.length === 0) return []
-  const sampled = downsamplePoseFramesForPrompt(
-    poseRaw as Array<{ frame: number }>,
-    maxFrames
-  )
+  const durationMs =
+    typeof opts?.videoDurationMs === 'number' && opts.videoDurationMs > 0
+      ? opts.videoDurationMs
+      : null
+  // Short analyze clips: return every stored pose row (Modal is already every-frame).
+  const keepFull =
+    poseRaw.length <= maxFrames ||
+    (durationMs != null && durationMs <= SHORT_CLIP_FULL_DENSITY_MS)
+  const sampled = keepFull
+    ? (poseRaw as Array<{ frame: number }>)
+    : downsamplePoseFramesForPrompt(poseRaw as Array<{ frame: number }>, maxFrames)
   const out: Record<string, unknown>[] = []
   for (const row of sampled) {
     const slim = slimPoseRowForOverlay(row)

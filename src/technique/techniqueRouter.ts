@@ -93,6 +93,10 @@ import {
   profileHandToDominant,
   type DominantHand,
 } from './strokeSide'
+import {
+  computeBiomechanicsSummary,
+  formatBiomechanicsForPrompt,
+} from './biomechanicsSummary'
 import { attachEvalToMetrics } from '../adminAccuracy/evalSnapshot'
 import {
   downsamplePoseFramesForPrompt,
@@ -134,13 +138,20 @@ function buildCompactAnalyzeRetryPrompt(
 ): string {
   const frames = poseFrames.slice(0, 4)
   const retrieval = metrics.retrieval as Record<string, unknown> | undefined
+  const biomech = metrics.biomechanics_summary as
+    | Parameters<typeof formatBiomechanicsForPrompt>[0]
+    | undefined
   return [
     'Output ONLY one JSON object for padel technique analysis. The first character must be {.',
-    'Required keys include: is_padel, score, rating, technique_score, outcome_score, tactics_score, confidence_score, en, es, shot_context, primary_train_category.',
+    'Required keys include: is_padel, score, rating, technique_score, outcome_score, tactics_score, confidence_score, physical_metrics, en, es, shot_context, primary_train_category.',
+    'Narrative depth: each strengths/technical_errors/actionable_corrections item is 1-2 coaching sentences linking one of stability|power|agility|reactions|acceleration and a phase (preparation|impact|follow-through|recovery) when evidence exists. diagnosis names strongest physical quality and main physical focus and describes movement — never names shot type (no net shot/volley/bandeja/smash/etc.; shot type only in shot_context). When Measured motion quality.cite_ok is true, EVERY diagnosis and each bullet MUST include at least one concrete figure from that block (ms, approx degrees/deltas, or wrist body-lengths/s). Wrap 1-2 key 2-3 word cues per bullet/diagnosis ONLY as [[like this]] — never use markdown **bold** or *italics*. No km/h, coordinates, or raw JSON dumps in text.',
+    formatBiomechanicsForPrompt(biomech),
     `retrieval: ${JSON.stringify(retrieval?.shot_hypothesis ?? null)}`,
     `detection_summary: ${JSON.stringify(metrics.detection_summary ?? null)}`,
     `pose_frames (${frames.length} samples): ${JSON.stringify(frames)}`,
-  ].join('\n')
+  ]
+    .filter((line) => line && String(line).trim().length > 0)
+    .join('\n')
 }
 
 function isTransientPgError(err: unknown): boolean {
@@ -1343,6 +1354,12 @@ router.post('/analyze', async (req, res) => {
     }
     timer.mark('retrieval', { durationMs: Date.now() - retrievalT0 })
 
+    const biomechanicsSummary = computeBiomechanicsSummary(metrics as Record<string, unknown>)
+    metrics = {
+      ...metrics,
+      biomechanics_summary: biomechanicsSummary,
+    }
+
     let aiAnalysis: any = null
     let feedbackText: string | null = null
 
@@ -1367,11 +1384,13 @@ ${buildCanonicalShotAnalyzeHint(metrics as Record<string, unknown>)}
 
 ${buildDetectionPromptBlock(metrics?.detection_summary ?? null)}
 
+${formatBiomechanicsForPrompt(biomechanicsSummary)}
+
 Here is the pose data from several frames of the video (x,y coordinates are normalized 0-1, where 0,0 is top-left):
 
 ${poseSummary}
 
-First, identify the type of shot (forehand, backhand, volley, bandeja, vibora, smash, etc.) based on context, contact point, and player positioning on court.
+First, identify the type of shot for shot_context / primary_train_category only (forehand, backhand, volley, bandeja, vibora, smash, etc.) based on context, contact point, and player positioning. Do not repeat that shot name in diagnosis or coaching bullets — those describe movement quality only.
 
 Track the player's movement from preparation -> execution -> follow-through -> recovery, ensuring the entire body is analyzed, including:
 - Both arms (racket arm and support arm)
@@ -1407,6 +1426,15 @@ Provide feedback in 3 sections:
 Avoid generic fitness or biomechanics language.
 Use padel coaching terminology only and keep feedback clear, practical, and applicable in real match play.
 
+Narrative depth (required for en and es):
+- Each strengths, technical_errors, and actionable_corrections item must be 1-2 coaching sentences (not a short fragment).
+- When evidence supports it, name exactly one physical dimension using these app labels: stability, power, agility, reactions, acceleration — and anchor the cue to a phase: preparation, impact, follow-through, or recovery.
+- diagnosis (2-4 sentences) must briefly call out your strongest physical quality and the main physical focus area so the paragraph matches the physical metrics radar. Describe how you moved (balance, contact, racket path, weight transfer) — not which named shot it was.
+- Do NOT name or classify the shot type in diagnosis, strengths, technical_errors, actionable_corrections, observations, or recommendations. Forbidden in those fields: net shot, volley, bandeja, víbora, vibora, smash, bajada, lob, chiquita, serve, return, drive, groundstroke, overhead, "you hit a …", "this was a …", or saying it was / was not a specific stroke. Shot identity belongs only in shot_context and primary_train_category (the app already shows the voted shot elsewhere).
+- When Measured motion quality.cite_ok is true, EVERY one of diagnosis, each strengths item, each technical_errors item, and each actionable_corrections item MUST include at least one concrete figure from that block (ms, approximate degrees / deltas, or wrist body-lengths/s). Prefer prep_to_impact_ms, torso_sep_delta_deg, elbow_delta_deg / elbow_impact_deg, wrist_peak_body_per_s, contact_window_ms when non-null. Do not invent km/h, metres, or scores not present there.
+- Do not dump raw landmark coordinates, formulas, or the full metrics JSON into user-facing text. physical_metrics radar scores stay in their JSON fields.
+- Highlight cues: wrap 1-2 key phrases per bullet and in diagnosis with double brackets ONLY, each phrase 2-3 words, e.g. [[split step]], [[weight transfer]], [[racket face]]. Same markers in Spanish text. Never use markdown **bold**, *italics*, or other markup. Do not invent metric names outside the five keys above.
+
 Respond ONLY with a single JSON object matching this exact schema:
 {
   "is_padel": true,
@@ -1434,20 +1462,20 @@ Respond ONLY with a single JSON object matching this exact schema:
   "rating": "<excellent|good|needs_improvement|poor>",
   "primary_train_category": "<save_return|ground_strokes|net_play|defence_glass|overhead|tactical_specials>",
   "en": {
-    "diagnosis": "2-4 sentence summary in English, directly addressing the user as 'you'...",
-    "shot_context": "One sentence about shot type and context.",
+    "diagnosis": "2-4 sentences on how you moved (physical quality + focus + [[cues]]); do not name the shot type...",
+    "shot_context": "One sentence about shot type and context (ONLY place that may name the stroke).",
     "strengths": [
-      "You did this padel-specific strength well",
-      "Padel-specific strength 2",
-      "Padel-specific strength 3"
+      "1-2 sentences on movement quality linked to one physical metric and a phase, with [[key cue]] — no shot-type name",
+      "Movement strength 2",
+      "Movement strength 3"
     ],
     "technical_errors": [
-      "You made this technical error in padel context",
+      "1-2 sentences on a technical issue linked to one physical metric and a phase, with [[key cue]] — no shot-type name",
       "Technical error 2",
       "Technical error 3"
     ],
     "actionable_corrections": [
-      "Next time, you should apply this simple coaching cue",
+      "1-2 sentences: simple coaching cue linked to one physical metric and a phase, with [[key cue]] — no shot-type name",
       "Simple coaching cue 2",
       "Simple coaching cue 3"
     ],
@@ -1463,20 +1491,20 @@ Respond ONLY with a single JSON object matching this exact schema:
     ]
   },
   "es": {
-    "diagnosis": "Resumen de 2-4 frases en español, dirigiéndote al usuario en segunda persona...",
-    "shot_context": "Una frase sobre tipo de golpe y contexto.",
+    "diagnosis": "2-4 frases sobre cómo te moviste (cualidad física + foco + [[claves]]); sin nombrar el tipo de golpe...",
+    "shot_context": "Una frase sobre tipo de golpe y contexto (ÚNICO campo que puede nombrar el golpe).",
     "strengths": [
-      "Fortaleza 1",
+      "1-2 frases sobre calidad de movimiento vinculada a una métrica y fase, con [[clave]] — sin tipo de golpe",
       "Fortaleza 2",
       "Fortaleza 3"
     ],
     "technical_errors": [
-      "Error técnico 1",
+      "1-2 frases sobre un error técnico vinculado a una métrica y fase, con [[clave]] — sin tipo de golpe",
       "Error técnico 2",
       "Error técnico 3"
     ],
     "actionable_corrections": [
-      "Corrección accionable 1",
+      "1-2 frases: corrección accionable vinculada a una métrica y fase, con [[clave]] — sin tipo de golpe",
       "Corrección accionable 2",
       "Corrección accionable 3"
     ],
@@ -1500,17 +1528,20 @@ Rules:
   - agility: footwork adjustment, split-step, court repositioning
   - reactions: readiness, timing to ball, first-step response
   - acceleration: burst into position, explosive approach to ball
+- In narrative text, only refer to those five physical dimensions (never invent stamina, endurance, or other metric names). Prefer the English labels even inside Spanish coaching sentences when naming the radar dimension, or the natural Spanish coaching equivalent of the same five.
 - Assume the player is an intermediate-level padel player and tailor feedback to realistic improvements.
 - Write all feedback in a personal coaching voice, directly to the user (second person): use "you/your" in English and second person in Spanish.
 - Do not use third-person phrasing such as "the player", "they", or equivalent third-person constructions.
 - Do not mention handedness or which side the user plays: never say or imply left-handed, right-handed, left hand, right hand, left arm, right arm, dominant hand, or non-dominant hand in any user-facing text (all "en" and "es" fields including diagnosis, shot_context, strengths, technical_errors, actionable_corrections, observations, recommendations). Use neutral coaching terms only, such as racket arm, support arm, forehand or backhand, your swing, or contact side.
 - Never use em dashes in any output text.
+- Highlight markers must use exactly [[phrase]] with 2-3 words inside. Forbidden in all en/es text: **, __, *, markdown bold/italic, HTML tags.
 - First decide whether this is genuinely a Padel action context based on movement patterns.
-- Shot labeling discipline:
+- Shot labeling discipline (shot_context / primary_train_category only — never in diagnosis or coaching bullets):
   - Do not call a shot "smash" or "overhead" unless evidence is clear across multiple frames.
   - Clear overhead evidence means contact phase with hitting arm and racket above shoulder/head level plus overhead extension pattern.
   - If evidence is mixed or weak, choose the closest non-overhead shot or "unknown", and lower confidence.
 - In "shot_context", include a confidence tag in text: low, medium, or high.
+- Technique Rating (diagnosis) and all coaching bullets must stay shot-agnostic: talk about what the body/racket did, not which named stroke it was.
 - If NOT padel (e.g., soccer, gym, generic running, unrelated movement), set:
   - "is_padel": false
   - "sport_detected": "<best guess>"
@@ -1902,17 +1933,29 @@ router.get('/analysis/:id/pose-overlay', async (req, res) => {
       return res.status(404).json({ error: 'Analysis not found' })
     }
     const metricsObj = (analysis.metrics ?? {}) as Record<string, unknown>
-    const pose_data = poseDataForOverlayFetch(metricsObj.pose_data)
+    const videoDurationMs =
+      typeof metricsObj.video_duration_ms === 'number' ? metricsObj.video_duration_ms : null
+    const pose_data = poseDataForOverlayFetch(metricsObj.pose_data, undefined, {
+      videoDurationMs,
+    })
+    const pose_data_total_samples = Array.isArray(metricsObj.pose_data)
+      ? metricsObj.pose_data.length
+      : 0
+    console.log('[Technique] pose-overlay', {
+      analysisId: id,
+      returned: pose_data.length,
+      totalSamples: pose_data_total_samples,
+      totalFrames: metricsObj.total_frames ?? null,
+      videoDurationMs,
+    })
     return res.json({
       analysisId: id,
       pose_data,
       total_frames: metricsObj.total_frames ?? null,
       analyzed_frames: metricsObj.analyzed_frames ?? null,
-      video_duration_ms: metricsObj.video_duration_ms ?? null,
+      video_duration_ms: videoDurationMs,
       detection_summary: metricsObj.detection_summary ?? null,
-      pose_data_total_samples: Array.isArray(metricsObj.pose_data)
-        ? metricsObj.pose_data.length
-        : 0,
+      pose_data_total_samples,
     })
   } catch (e: any) {
     console.error('[Technique] Pose-overlay fetch error:', e)

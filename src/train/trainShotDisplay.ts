@@ -10,17 +10,32 @@ export const RETRIEVAL_CONFIDENCE_THRESHOLD = 0.35;
 /** When label vote is weak and top-2 library poses are similarly close, avoid a forced shot name. */
 export const NEIGHBOR_DISTANCE_GAP_MIN = 0.02;
 
+/**
+ * Drop train-library clip indices from admin labels ("Bandeja 1" → "Bandeja").
+ * Keeps the shot family name for UI, voting, and coaching text.
+ */
+export function stripTrainClipIndexSuffix(label: string): string {
+  const t = label.trim();
+  if (!t) return t;
+  // "Bandeja 1", "Bandeja #2", "Bandeja-3", "Bandeja_4"
+  const stripped = t
+    .replace(/\s*[#._-]\s*\d+\s*$/i, "")
+    .replace(/\s+\d+\s*$/i, "")
+    .trim();
+  return stripped || t;
+}
+
 export function adminStrokeLabelKey(
   strokeLabel: string | null | undefined,
   strokeName: string
 ): string {
   const fromCol = (strokeLabel ?? "").trim();
-  if (fromCol) return fromCol;
+  if (fromCol) return stripTrainClipIndexSuffix(fromCol);
   const parts = strokeName.split(" · ");
   if (parts.length >= 2 && TRAIN_LEVEL_SUFFIXES.has(parts[parts.length - 1] ?? "")) {
-    return parts.slice(0, -1).join(" · ").trim();
+    return stripTrainClipIndexSuffix(parts.slice(0, -1).join(" · ").trim());
   }
-  return strokeName.trim();
+  return stripTrainClipIndexSuffix(strokeName.trim());
 }
 
 function looksLikeStrokePresetId(s: string): boolean {
@@ -79,7 +94,7 @@ export function resolveCanonicalShotFromMetrics(
   // of the confidence gate — the gate previously caused display/hypothesis to disagree.
   if (hypLabel && !looksLikeStrokePresetId(hypLabel)) {
     return {
-      shotName: hypLabel,
+      shotName: stripTrainClipIndexSuffix(hypLabel),
       category: typeof hyp?.category === "string" ? hyp.category : null,
       skillLevel: typeof hyp?.skill_level === "string" ? hyp.skill_level : null,
       confidence: hypConf,
@@ -90,7 +105,7 @@ export function resolveCanonicalShotFromMetrics(
   // No usable hypothesis label (null or a raw preset id) → nearest labeled neighbor.
   for (const n of neighbors.slice(0, 3)) {
     if (typeof n.stroke_label === "string" && n.stroke_label.trim()) {
-      const key = n.stroke_label.trim();
+      const key = stripTrainClipIndexSuffix(n.stroke_label.trim());
       if (!looksLikeStrokePresetId(key)) {
         return {
           shotName: key,
