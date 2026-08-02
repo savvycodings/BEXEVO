@@ -16,6 +16,7 @@ import {
   listBenchSubmissions,
   runBenchStep,
 } from "./retrievalBench";
+import { getBenchMatchPreview } from "./matchPreview";
 import { ACCURACY_PASS_PERCENT } from "./constants";
 
 const router = express.Router();
@@ -158,6 +159,26 @@ router.get("/bench/submissions", async (req, res) => {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[AdminAccuracy] bench submissions error:", e);
     return res.status(500).json({ error: msg || "Failed to load submissions" });
+  }
+});
+
+/** User clip + skeleton and top pro-library match + skeleton for admin visual QA. */
+router.get("/bench/match-preview/:analysisId", async (req, res) => {
+  try {
+    if (!assertAdminTrain(req, res)) return;
+    const { analysisId } = req.params;
+    if (!analysisId?.trim()) {
+      return res.status(400).json({ error: "analysisId required" });
+    }
+    const preview = await getBenchMatchPreview(analysisId.trim());
+    if (!preview) {
+      return res.status(404).json({ error: "Analysis not found" });
+    }
+    return res.json(preview);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[AdminAccuracy] match-preview error:", e);
+    return res.status(500).json({ error: msg || "Failed to load match preview" });
   }
 });
 
