@@ -82,6 +82,12 @@ import {
   proTimelineRatioForUserFrame,
 } from './trainRetrieval'
 import {
+  buildSideReadings,
+  computeSideMobilityAngles,
+  midClipFrameIndex,
+  nearestPoseRowByFrame,
+} from './bodyMobilityAngles'
+import {
   computeLobSignal,
   ballPointsFromDetections,
   applyLobTieBreak,
@@ -122,6 +128,7 @@ import {
   orderFrameInsights,
 } from './correctionFrameInsights'
 import { normalizePhysicalMetricsOnAnalysis, parsePhysicalMetrics } from './physicalMetrics'
+import { sanitizeAiAnalysisNarrativePlaceholders } from './sanitizeAiAnalysisNarrative'
 import { normalizeCorrectionsForClient } from './correctionImageStorage'
 import { poseDataForOverlayFetch } from './poseOverlay'
 import { fal } from '@fal-ai/client'
@@ -144,7 +151,9 @@ function buildCompactAnalyzeRetryPrompt(
   return [
     'Output ONLY one JSON object for padel technique analysis. The first character must be {.',
     'Required keys include: is_padel, score, rating, technique_score, outcome_score, tactics_score, confidence_score, physical_metrics, en, es, shot_context, primary_train_category.',
-    'Narrative depth: each strengths/technical_errors/actionable_corrections item is 1-2 coaching sentences linking one of stability|power|agility|reactions|acceleration and a phase (preparation|impact|follow-through|recovery) when evidence exists. diagnosis names strongest physical quality and main physical focus and describes movement — never names shot type (no net shot/volley/bandeja/smash/etc.; shot type only in shot_context). When Measured motion quality.cite_ok is true, EVERY diagnosis and each bullet MUST include at least one concrete figure from that block (ms, approx degrees/deltas, or wrist body-lengths/s). Wrap 1-2 key 2-3 word cues per bullet/diagnosis ONLY as [[like this]] — never use markdown **bold** or *italics*. No km/h, coordinates, or raw JSON dumps in text.',
+    'Narrative depth: each strengths/technical_errors/actionable_corrections item is 1-2 concrete padel coaching sentences from pose + retrieval evidence (balance, contact, racket path, footwork, weight transfer) — never empty praise like "your agility was excellent". Do NOT require naming radar keys (stability/power/agility/reactions/acceleration) in narrative; those scores belong only in physical_metrics JSON. diagnosis describes how you moved with specific cues — never names shot type (no net shot/volley/bandeja/smash/etc.; shot type only in shot_context). When Measured motion quality.cite_ok is true, EVERY diagnosis and each bullet MUST include at least one concrete figure from that block (ms, approx degrees/deltas, or wrist body-lengths/s). Wrap 1-2 key 2-3 word cues per bullet/diagnosis ONLY as [[like this]] — never use markdown **bold** or *italics*. No km/h, coordinates, or raw JSON dumps in text.',
+    'The "es" object must be natural Spanish — never paste English into "es" fields.',
+    'Never output Legacy fallback / Recomendación legacy / Observación legacy placeholder strings; recommendations and observations must be real coaching sentences with [[cues]].',
     formatBiomechanicsForPrompt(biomech),
     `retrieval: ${JSON.stringify(retrieval?.shot_hypothesis ?? null)}`,
     `detection_summary: ${JSON.stringify(metrics.detection_summary ?? null)}`,
@@ -185,7 +194,7 @@ async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts =
   throw last
 }
 
-/** Stage local upload on fal CsDN so Modal can GET real bytes (ngrok often 404s server-side). */
+/** Stage local upload on fal CDN so Modal can GET real bytes (ngrok often 404s server-side). */
 async function uploadLocalVideoToFalCdn(absPath: string): Promise<string> {
   const key = resolveFalKey()
   if (!key) throw new Error('FAL_KEY or FAL_API_KEY is not set')
@@ -200,6 +209,33 @@ async function uploadLocalVideoToFalCdn(absPath: string): Promise<string> {
         : 'application/octet-stream'
   const blob = new Blob([buf], { type: contentType })
   return fal.storage.upload(blob, { lifecycle: { expiresIn: '1d' } })
+}
+
+function falStagingFailureMessage(e: unknown): {
+  error: string
+  detail: string
+  feedbackText: string
+} {
+  const detail = e instanceof Error ? e.message : String(e)
+  const cause =
+    e instanceof Error && e.cause && typeof e.cause === 'object'
+      ? (e.cause as { code?: string; hostname?: string; message?: string })
+      : null
+  const code = cause?.code ?? (typeof (e as { code?: string })?.code === 'string' ? (e as { code: string }).code : '')
+  const blob = `${detail} ${cause?.message ?? ''} ${cause?.hostname ?? ''} ${code}`
+  if (/ENOTFOUND|getaddrinfo/i.test(blob) || code === 'ENOTFOUND') {
+    const msg =
+      'Could not reach fal.ai to stage the video (DNS lookup failed for rest.fal.ai). Check this machine’s internet/DNS/VPN, then retry.'
+    return { error: msg, detail, feedbackText: msg }
+  }
+  if (/ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed/i.test(blob) || code === 'ECONNREFUSED' || code === 'ETIMEDOUT') {
+    const msg =
+      'Could not reach fal.ai to stage the video (network error). Check server internet connectivity and retry.'
+    return { error: msg, detail, feedbackText: msg }
+  }
+  const msg =
+    'Could not stage video for Modal analysis. Check FAL_KEY and server network access to rest.fal.ai.'
+  return { error: msg, detail, feedbackText: msg }
 }
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024
@@ -824,6 +860,73 @@ router.get('/users/:userId/recent-videos', async (req, res) => {
   }
 })
 
+/**
+ * Last N completed analyses with full physical_metrics for dual radar / history bars.
+ * Ordered newest-first; client may reverse for left→right bars.
+ */
+router.get('/physical-history', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+    const limitRaw = Number(req.query.limit)
+    const limit = Math.min(20, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 10))
+
+    const analyses = await db
+      .select({
+        id: techniqueAnalysis.id,
+        createdAt: techniqueAnalysis.createdAt,
+        status: techniqueAnalysis.status,
+        metrics: techniqueAnalysis.metrics,
+      })
+      .from(techniqueAnalysis)
+      .where(eq(techniqueAnalysis.userId, userId))
+      .orderBy(desc(techniqueAnalysis.createdAt))
+      .limit(Math.max(limit * 4, 40))
+
+    const items: Array<{
+      analysisId: string
+      createdAt: string
+      score: number | null
+      physicalMetrics: {
+        stability: number
+        power: number
+        agility: number
+        reactions: number
+        acceleration: number
+      }
+    }> = []
+
+    for (const row of analyses) {
+      if (row.status !== 'completed') continue
+      const metricsObj = (row.metrics ?? {}) as Record<string, unknown>
+      const ai = metricsObj.ai_analysis as Record<string, unknown> | undefined
+      if (!ai) continue
+      const pm = parsePhysicalMetrics(ai.physical_metrics)
+      if (!pm) continue
+      items.push({
+        analysisId: row.id,
+        createdAt: row.createdAt.toISOString(),
+        score: storedAiScoreToPercent(ai),
+        physicalMetrics: {
+          stability: pm.stability,
+          power: pm.power,
+          agility: pm.agility,
+          reactions: pm.reactions,
+          acceleration: pm.acceleration,
+        },
+      })
+      if (items.length >= limit) break
+    }
+
+    return res.json({ items })
+  } catch (e: any) {
+    console.error('[Technique] physical-history error:', e)
+    return res.status(500).json({ error: e.message || 'Failed to load physical history' })
+  }
+})
+
 /** List technique analyses for the signed-in user (for Activities calendar). */
 router.get('/activities', async (req, res) => {
   try {
@@ -1089,17 +1192,17 @@ router.post('/analyze', async (req, res) => {
         timer.mark('fal_staging', { durationMs: Date.now() - falT0 })
       } catch (e) {
         console.error('[Technique] fal.storage upload failed', e)
+        const falFail = falStagingFailureMessage(e)
         await db
           .update(techniqueAnalysis)
           .set({
             status: 'failed',
-            feedbackText:
-              'Could not stage video for analysis. Check FAL_KEY and server logs.',
+            feedbackText: falFail.feedbackText,
           })
           .where(eq(techniqueAnalysis.id, analysisId))
         return res.status(500).json({
-          error: 'Could not stage video for Modal analysis',
-          detail: e instanceof Error ? e.message : String(e),
+          error: falFail.error,
+          detail: falFail.detail,
         })
       }
     }
@@ -1288,13 +1391,37 @@ router.post('/analyze', async (req, res) => {
         : null
     let dominantHand: DominantHand = null
     let dominantHandSource: 'profile' | 'racket_consensus' | null = null
+    let playerAnthro: {
+      heightCm: number | null
+      weightKg: number | null
+      birthDate: string | null
+    } = { heightCm: null, weightKg: null, birthDate: null }
     try {
       const profileRow = await db.query.userProfile.findFirst({
         where: (up, { eq: _eq }) => _eq(up.userId, userId),
-        columns: { dominantHand: true },
+        columns: {
+          dominantHand: true,
+          heightCm: true,
+          weightKg: true,
+          birthDate: true,
+        },
       })
       dominantHand = profileHandToDominant(profileRow?.dominantHand ?? null)
       if (dominantHand) dominantHandSource = 'profile'
+      playerAnthro = {
+        heightCm:
+          typeof profileRow?.heightCm === 'number' && Number.isFinite(profileRow.heightCm)
+            ? profileRow.heightCm
+            : null,
+        weightKg:
+          typeof profileRow?.weightKg === 'number' && Number.isFinite(profileRow.weightKg)
+            ? profileRow.weightKg
+            : null,
+        birthDate:
+          typeof profileRow?.birthDate === 'string' && profileRow.birthDate.length > 0
+            ? profileRow.birthDate
+            : null,
+      }
     } catch (e) {
       console.warn('[Technique] profile dominant-hand lookup failed', e)
     }
@@ -1354,7 +1481,10 @@ router.post('/analyze', async (req, res) => {
     }
     timer.mark('retrieval', { durationMs: Date.now() - retrievalT0 })
 
-    const biomechanicsSummary = computeBiomechanicsSummary(metrics as Record<string, unknown>)
+    const biomechanicsSummary = computeBiomechanicsSummary(
+      metrics as Record<string, unknown>,
+      playerAnthro
+    )
     metrics = {
       ...metrics,
       biomechanics_summary: biomechanicsSummary,
@@ -1427,13 +1557,14 @@ Avoid generic fitness or biomechanics language.
 Use padel coaching terminology only and keep feedback clear, practical, and applicable in real match play.
 
 Narrative depth (required for en and es):
-- Each strengths, technical_errors, and actionable_corrections item must be 1-2 coaching sentences (not a short fragment).
-- When evidence supports it, name exactly one physical dimension using these app labels: stability, power, agility, reactions, acceleration — and anchor the cue to a phase: preparation, impact, follow-through, or recovery.
-- diagnosis (2-4 sentences) must briefly call out your strongest physical quality and the main physical focus area so the paragraph matches the physical metrics radar. Describe how you moved (balance, contact, racket path, weight transfer) — not which named shot it was.
+- Each strengths, technical_errors, and actionable_corrections item must be 1-2 concrete padel coaching sentences (not a short fragment) grounded in pose evidence and pro-library / retrieval context when available.
+- Describe what the body and racket actually did (balance, contact point, racket path, footwork, weight transfer, recovery). Anchor to a phase when helpful: preparation, impact, follow-through, or recovery.
+- Do NOT write empty metric praise (forbidden patterns: "your agility was excellent", "stability was good", "power is strong" with no concrete cue). Radar dimension scores live ONLY in physical_metrics JSON — narrative must not invent or parrot those labels as the substance of coaching.
+- diagnosis (2-4 sentences) must describe how you moved with specific coaching points and [[cues]] — not which named shot it was, and not a restatement of physical_metrics numbers.
 - Do NOT name or classify the shot type in diagnosis, strengths, technical_errors, actionable_corrections, observations, or recommendations. Forbidden in those fields: net shot, volley, bandeja, víbora, vibora, smash, bajada, lob, chiquita, serve, return, drive, groundstroke, overhead, "you hit a …", "this was a …", or saying it was / was not a specific stroke. Shot identity belongs only in shot_context and primary_train_category (the app already shows the voted shot elsewhere).
 - When Measured motion quality.cite_ok is true, EVERY one of diagnosis, each strengths item, each technical_errors item, and each actionable_corrections item MUST include at least one concrete figure from that block (ms, approximate degrees / deltas, or wrist body-lengths/s). Prefer prep_to_impact_ms, torso_sep_delta_deg, elbow_delta_deg / elbow_impact_deg, wrist_peak_body_per_s, contact_window_ms when non-null. Do not invent km/h, metres, or scores not present there.
-- Do not dump raw landmark coordinates, formulas, or the full metrics JSON into user-facing text. physical_metrics radar scores stay in their JSON fields.
-- Highlight cues: wrap 1-2 key phrases per bullet and in diagnosis with double brackets ONLY, each phrase 2-3 words, e.g. [[split step]], [[weight transfer]], [[racket face]]. Same markers in Spanish text. Never use markdown **bold**, *italics*, or other markup. Do not invent metric names outside the five keys above.
+- Do not dump raw landmark coordinates, formulas, or the full metrics JSON into user-facing text. physical_metrics radar scores stay in their JSON fields only.
+- Highlight cues: wrap 1-2 key phrases per bullet and in diagnosis with double brackets ONLY, each phrase 2-3 words, e.g. [[split step]], [[weight transfer]], [[racket face]]. Same markers in Spanish text. Never use markdown **bold**, *italics*, or other markup.
 
 Respond ONLY with a single JSON object matching this exact schema:
 {
@@ -1462,79 +1593,81 @@ Respond ONLY with a single JSON object matching this exact schema:
   "rating": "<excellent|good|needs_improvement|poor>",
   "primary_train_category": "<save_return|ground_strokes|net_play|defence_glass|overhead|tactical_specials>",
   "en": {
-    "diagnosis": "2-4 sentences on how you moved (physical quality + focus + [[cues]]); do not name the shot type...",
+    "diagnosis": "2-4 sentences on how you moved with specific [[cues]]; do not name the shot type...",
     "shot_context": "One sentence about shot type and context (ONLY place that may name the stroke).",
     "strengths": [
-      "1-2 sentences on movement quality linked to one physical metric and a phase, with [[key cue]] — no shot-type name",
-      "Movement strength 2",
-      "Movement strength 3"
+      "You kept a [[stable base]] through contact and transferred weight cleanly into the swing.",
+      "Your [[split step]] timed well and you recovered quickly toward the center.",
+      "Racket face stayed [[square at contact]] with a controlled follow-through."
     ],
     "technical_errors": [
-      "1-2 sentences on a technical issue linked to one physical metric and a phase, with [[key cue]] — no shot-type name",
-      "Technical error 2",
-      "Technical error 3"
+      "You opened the [[racket face]] early, which dumped the ball short.",
+      "Your contact point was late and too close to the body on impact.",
+      "Recovery steps crossed instead of a clean [[ready position]] reset."
     ],
     "actionable_corrections": [
-      "1-2 sentences: simple coaching cue linked to one physical metric and a phase, with [[key cue]] — no shot-type name",
-      "Simple coaching cue 2",
-      "Simple coaching cue 3"
+      "Hold [[racket face]] closed a beat longer through contact.",
+      "Take one [[adjustment step]] earlier so contact stays out in front.",
+      "Land and reset into [[ready position]] before the next ball."
     ],
     "observations": [
-      "You did this movement detail well",
-      "Legacy fallback observation 2",
-      "Legacy fallback observation 3"
+      "Your [[split step]] landed early enough to set the base before the ball arrived.",
+      "Weight stayed centered through contact instead of falling away from the hit.",
+      "Follow-through finished high with a controlled [[racket path]]."
     ],
     "recommendations": [
-      "You can improve this point in your next attempt",
-      "Legacy fallback recommendation 2",
-      "Legacy fallback recommendation 3"
+      "Practice short [[compact swing]] feeds that keep the racket path short into contact.",
+      "Drill [[split step]] timing so you land balanced before every ball.",
+      "Shadow the finish into a quiet [[ready position]] after each swing."
     ]
   },
   "es": {
-    "diagnosis": "2-4 frases sobre cómo te moviste (cualidad física + foco + [[claves]]); sin nombrar el tipo de golpe...",
+    "diagnosis": "2-4 frases sobre cómo te moviste con [[claves]] concretas; sin nombrar el tipo de golpe...",
     "shot_context": "Una frase sobre tipo de golpe y contexto (ÚNICO campo que puede nombrar el golpe).",
     "strengths": [
-      "1-2 frases sobre calidad de movimiento vinculada a una métrica y fase, con [[clave]] — sin tipo de golpe",
-      "Fortaleza 2",
-      "Fortaleza 3"
+      "Mantienes una [[base estable]] en el contacto y transfieres el peso con limpieza.",
+      "Tu [[split step]] llega a tiempo y recuperas rápido hacia el centro.",
+      "La pala queda [[cuadrada al impacto]] con un follow-through controlado."
     ],
     "technical_errors": [
-      "1-2 frases sobre un error técnico vinculado a una métrica y fase, con [[clave]] — sin tipo de golpe",
-      "Error técnico 2",
-      "Error técnico 3"
+      "Abres la [[cara de pala]] demasiado pronto y la bola se queda corta.",
+      "El punto de contacto llega tarde y demasiado cerca del cuerpo.",
+      "Los pasos de recuperación se cruzan en vez de volver a [[posición de listo]]."
     ],
     "actionable_corrections": [
-      "1-2 frases: corrección accionable vinculada a una métrica y fase, con [[clave]] — sin tipo de golpe",
-      "Corrección accionable 2",
-      "Corrección accionable 3"
+      "Mantén la [[cara de pala]] cerrada un instante más en el contacto.",
+      "Da un [[paso de ajuste]] antes para pegar más por delante.",
+      "Aterriza y vuelve a [[posición de listo]] antes de la siguiente bola."
     ],
     "observations": [
-      "Fallback 1",
-      "Fallback 2",
-      "Fallback 3"
+      "Tu [[split step]] llega a tiempo para asentar la base antes de la bola.",
+      "El peso se mantiene centrado en el contacto sin caer hacia atrás.",
+      "El follow-through termina alto con una [[trayectoria de pala]] controlada."
     ],
     "recommendations": [
-      "Fallback 1",
-      "Fallback 2",
-      "Fallback 3"
+      "Practica feeds de [[swing compacto]] que acorten la trayectoria de pala al impacto.",
+      "Entrena el timing del [[split step]] para aterrizar equilibrado antes de cada bola.",
+      "Sombrea el final del golpe hasta una [[posición de listo]] estable."
     ]
   }
 }
 
 Rules:
-- physical_metrics (required): score movement quality 0–100 using these padel-specific definitions consistently:
+- physical_metrics (required): score movement quality 0–100 in JSON only using these padel-specific definitions consistently:
   - stability: base, balance, recovery after contact
   - power: kinetic chain, weight transfer, racket speed through contact
   - agility: footwork adjustment, split-step, court repositioning
   - reactions: readiness, timing to ball, first-step response
   - acceleration: burst into position, explosive approach to ball
-- In narrative text, only refer to those five physical dimensions (never invent stamina, endurance, or other metric names). Prefer the English labels even inside Spanish coaching sentences when naming the radar dimension, or the natural Spanish coaching equivalent of the same five.
+- Do not invent stamina, endurance, or other radar metric names. Prefer coaching language in narrative (footwork, balance, timing) over parroting the five JSON keys.
 - Assume the player is an intermediate-level padel player and tailor feedback to realistic improvements.
 - Write all feedback in a personal coaching voice, directly to the user (second person): use "you/your" in English and second person in Spanish.
+- The "es" object must be natural Spanish coaching copy — never paste English into "es" fields. Keep "en" and "es" as parallel translations of the same coaching points.
 - Do not use third-person phrasing such as "the player", "they", or equivalent third-person constructions.
 - Do not mention handedness or which side the user plays: never say or imply left-handed, right-handed, left hand, right hand, left arm, right arm, dominant hand, or non-dominant hand in any user-facing text (all "en" and "es" fields including diagnosis, shot_context, strengths, technical_errors, actionable_corrections, observations, recommendations). Use neutral coaching terms only, such as racket arm, support arm, forehand or backhand, your swing, or contact side.
 - Never use em dashes in any output text.
 - Highlight markers must use exactly [[phrase]] with 2-3 words inside. Forbidden in all en/es text: **, __, *, markdown bold/italic, HTML tags.
+- Never output placeholder or template strings such as "Legacy fallback recommendation", "Legacy fallback observation", "Recomendación legacy", "Observación legacy", "recommendation 1", or numbered stub lines. recommendations and observations must be real coaching sentences with [[cues]], same quality as actionable_corrections.
 - First decide whether this is genuinely a Padel action context based on movement patterns.
 - Shot labeling discipline (shot_context / primary_train_category only — never in diagnosis or coaching bullets):
   - Do not call a shot "smash" or "overhead" unless evidence is clear across multiple frames.
@@ -1714,6 +1847,7 @@ Rules:
       }
 
       if (aiAnalysis) {
+        sanitizeAiAnalysisNarrativePlaceholders(aiAnalysis as Record<string, unknown>)
         normalizePhysicalMetricsOnAnalysis(aiAnalysis as Record<string, unknown>)
       }
 
@@ -1960,6 +2094,112 @@ router.get('/analysis/:id/pose-overlay', async (req, res) => {
   } catch (e: any) {
     console.error('[Technique] Pose-overlay fetch error:', e)
     return res.status(500).json({ error: 'Failed to fetch pose overlay' })
+  }
+})
+
+/**
+ * Mid-clip You vs Ideal joint angles (Head/Shoulder/Wrist/Knee × L/R)
+ * Ideal from top retrieval neighbor poseSequence via timeline alignment.
+ */
+router.get('/analysis/:id/body-mobility', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+    const { id } = req.params
+    if (!id) {
+      return res.status(400).json({ error: 'Missing analysis id' })
+    }
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) =>
+        and(_eq(ta.id, id), _eq(ta.userId, userId)),
+    })
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' })
+    }
+
+    const metricsObj = (analysis.metrics ?? {}) as Record<string, unknown>
+    const poseRaw = metricsObj.pose_data
+    const poseRows = Array.isArray(poseRaw)
+      ? (poseRaw as Array<{
+          frame: number
+          landmarks?: Record<string, { x: number; y: number; visibility?: number }>
+        }>)
+      : []
+
+    const maxPoseFrame = poseRows.length
+      ? Math.max(...poseRows.map((p) => (typeof p.frame === 'number' ? p.frame : 0)))
+      : 0
+    const totalFrames =
+      typeof metricsObj.total_frames === 'number' && metricsObj.total_frames > 0
+        ? metricsObj.total_frames
+        : maxPoseFrame + 1
+
+    const midFrame = midClipFrameIndex(totalFrames)
+    const userRow = nearestPoseRowByFrame(poseRows, midFrame)
+    const userLm = (userRow?.landmarks ?? null) as
+      | Record<string, { x: number; y: number; visibility?: number } | undefined>
+      | null
+
+    const retrievalBlock = metricsObj.retrieval as
+      | {
+          neighbors?: Array<{
+            train_sample_id: string
+            stroke_name?: string
+            stroke_label?: string
+            stroke_preset?: string
+          }>
+        }
+      | undefined
+    const topNeighbor = retrievalBlock?.neighbors?.[0]
+
+    let idealLm: Record<string, { x: number; y: number; visibility?: number } | undefined> | null =
+      null
+    let idealSource: { trainSampleId: string; strokeLabel: string } | null = null
+
+    if (topNeighbor?.train_sample_id) {
+      const proSeq = await getTrainSamplePoseSequence(topNeighbor.train_sample_id)
+      if (proSeq?.length) {
+        const userFrameIdx =
+          typeof userRow?.frame === 'number' ? userRow.frame : midFrame
+        const proFrame = pickAlignedProPoseFrame(userFrameIdx, totalFrames, proSeq)
+        if (proFrame?.landmarks && typeof proFrame.landmarks === 'object') {
+          idealLm = proFrame.landmarks as Record<
+            string,
+            { x: number; y: number; visibility?: number } | undefined
+          >
+          const label =
+            (typeof topNeighbor.stroke_label === 'string' && topNeighbor.stroke_label.trim()) ||
+            (typeof topNeighbor.stroke_name === 'string' && topNeighbor.stroke_name.trim()) ||
+            (typeof topNeighbor.stroke_preset === 'string' && topNeighbor.stroke_preset.trim()) ||
+            'pro reference'
+          idealSource = {
+            trainSampleId: topNeighbor.train_sample_id,
+            strokeLabel: label,
+          }
+        }
+      }
+    }
+
+    const youLeft = computeSideMobilityAngles(userLm, 'LEFT')
+    const youRight = computeSideMobilityAngles(userLm, 'RIGHT')
+    const idealLeft = idealLm ? computeSideMobilityAngles(idealLm, 'LEFT') : null
+    const idealRight = idealLm ? computeSideMobilityAngles(idealLm, 'RIGHT') : null
+
+    return res.json({
+      analysisId: id,
+      frame: typeof userRow?.frame === 'number' ? userRow.frame : midFrame,
+      totalFrames,
+      side: {
+        LEFT: buildSideReadings(youLeft, idealLeft),
+        RIGHT: buildSideReadings(youRight, idealRight),
+      },
+      idealSource,
+    })
+  } catch (e: any) {
+    console.error('[Technique] body-mobility error:', e)
+    return res.status(500).json({ error: e.message || 'Failed to load body mobility' })
   }
 })
 

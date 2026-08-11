@@ -1,4 +1,17 @@
 import { estimateFps } from "./impactPoseContext";
+import {
+  ageBandFromYears,
+  ageCoachingNote,
+  ageYearsFromBirthDate,
+  bodySpeedToMps,
+  estimateSwingEnergyJ,
+  mpsToKmh,
+  parseCourtCalibration,
+  resolveMetersPerTorsoUnit,
+  type AgeBand,
+  type CameraCalibrationStatus,
+  type PlayerAnthropometrics,
+} from "./anthropometricScale";
 
 type Pt = { x: number; y: number; visibility?: number };
 
@@ -10,8 +23,8 @@ type PoseRow = {
 };
 
 export type BiomechanicsSummary = {
-  version: "v1.1";
-  calibration: "uncalibrated_monocular";
+  version: "v1.2";
+  calibration: CameraCalibrationStatus;
   timing: {
     fps: number;
     impact_frame: number | null;
@@ -34,12 +47,29 @@ export type BiomechanicsSummary = {
     scale: "torso_units";
     wrist_peak_body_per_s: number | null;
     wrist_path_prep_to_impact_body: number | null;
+    /** Estimated absolute peak when height or court scale is available. */
+    wrist_peak_mps_est?: number | null;
+    wrist_peak_kmh_est?: number | null;
+    absolute_method?: "court_scale" | "height_torso_fraction" | null;
+    absolute_uncertainty_pct?: number | null;
   };
   contact: {
     yolo_contact_count: number;
     contact_window_ms: number | null;
     ball_height_vs_hip: "above_hip" | "near_hip" | "below_hip" | "unknown";
     lob_rise: number | null;
+  };
+  /** Present when weight + absolute wrist speed allow a labelled energy estimate. */
+  energy_est?: {
+    method: string;
+    racket_ke_j_est: number | null;
+    note: string;
+  };
+  player_context?: {
+    height_cm: number | null;
+    weight_kg: number | null;
+    age_years: number | null;
+    age_band: AgeBand | null;
   };
   quality: {
     pose_frames: number;
@@ -199,9 +229,13 @@ function contactWindowFrames(
 
 /**
  * Compact measured motion summary for the analyze LLM + client Motion evidence UI.
- * Units are honest monocular proxies: ms, degrees (2D), body-lengths/s — never km/h.
+ * Units are honest monocular proxies: ms, degrees (2D), body-lengths/s.
+ * Optional absolute estimates (m/s, km/h, J) only when profile/court scale exists — always labelled.
  */
-export function computeBiomechanicsSummary(metrics: Record<string, unknown>): BiomechanicsSummary {
+export function computeBiomechanicsSummary(
+  metrics: Record<string, unknown>,
+  anthro?: PlayerAnthropometrics | null
+): BiomechanicsSummary {
   const poseRaw = Array.isArray(metrics.pose_data) ? (metrics.pose_data as PoseRow[]) : [];
   const pose = [...poseRaw]
     .filter((r) => r && typeof r.frame === "number" && r.landmarks)
@@ -342,9 +376,25 @@ export function computeBiomechanicsSummary(metrics: Record<string, unknown>): Bi
       wristPeakBodyPerS != null ||
       torsoSepDelta != null);
 
-  return {
-    version: "v1.1",
-    calibration: "uncalibrated_monocular",
+  const heightCm =
+    anthro?.heightCm != null && Number.isFinite(anthro.heightCm) ? anthro.heightCm : null;
+  const weightKg =
+    anthro?.weightKg != null && Number.isFinite(anthro.weightKg) ? anthro.weightKg : null;
+  const ageYears = ageYearsFromBirthDate(anthro?.birthDate ?? null);
+  const ageBand = ageBandFromYears(ageYears);
+
+  const court = parseCourtCalibration(metrics);
+  const scaleAbs = resolveMetersPerTorsoUnit({ heightCm, court });
+  const wristPeakMps = bodySpeedToMps(wristPeakBodyPerS, scaleAbs.metersPerTorso);
+  const wristPeakKmh = mpsToKmh(wristPeakMps);
+  const energy = estimateSwingEnergyJ({
+    wristPeakMps,
+    weightKg,
+  });
+
+  const summary: BiomechanicsSummary = {
+    version: "v1.2",
+    calibration: scaleAbs.status,
     timing: {
       fps: round1(fps),
       impact_frame: impactFrame,
@@ -369,6 +419,10 @@ export function computeBiomechanicsSummary(metrics: Record<string, unknown>): Bi
       scale: "torso_units",
       wrist_peak_body_per_s: wristPeakBodyPerS,
       wrist_path_prep_to_impact_body: wristPathBody,
+      wrist_peak_mps_est: wristPeakMps,
+      wrist_peak_kmh_est: wristPeakKmh,
+      absolute_method: scaleAbs.method,
+      absolute_uncertainty_pct: scaleAbs.uncertaintyPct,
     },
     contact: {
       yolo_contact_count: contactFrames.length,
@@ -383,19 +437,49 @@ export function computeBiomechanicsSummary(metrics: Record<string, unknown>): Bi
       cite_ok: citeOk,
     },
   };
+
+  if (heightCm != null || weightKg != null || ageYears != null) {
+    summary.player_context = {
+      height_cm: heightCm,
+      weight_kg: weightKg,
+      age_years: ageYears,
+      age_band: ageBand,
+    };
+  }
+
+  if (energy.racket_ke_j_est != null) {
+    summary.energy_est = {
+      method: energy.method,
+      racket_ke_j_est: energy.racket_ke_j_est,
+      note: energy.note,
+    };
+  }
+
+  return summary;
 }
 
 /** Prompt block: measured motion the model must cite when quality.cite_ok. */
 export function formatBiomechanicsForPrompt(summary: BiomechanicsSummary | null | undefined): string {
   if (!summary) return "";
+  const ageNote = ageCoachingNote(summary.player_context?.age_band ?? null);
   const lines = [
-    "Measured motion (from MediaPipe pose + YOLO; monocular proxies — never invent km/h or metres):",
+    "Measured motion (from MediaPipe pose + YOLO; monocular proxies):",
     JSON.stringify(summary),
     "Citation rules:",
     "- When quality.cite_ok is true, EVERY one of diagnosis, each strengths item, each technical_errors item, and each actionable_corrections item MUST include at least one concrete figure from this block (ms, approximate degrees / deltas, or wrist body-lengths/s).",
     "- Prefer prep_to_impact_ms (+ frames_prep_to_impact), torso_sep_delta_deg, elbow_delta_deg / elbow_impact_deg, wrist_peak_body_per_s, contact_window_ms when non-null.",
-    "- Label angles as approximate pose readings; speeds as body-lengths per second (torso scale), not km/h.",
+    "- Primary speed unit is body-lengths per second (torso scale). If wrist_peak_mps_est / wrist_peak_kmh_est are present, you MAY cite them only as estimated absolute speed with uncertainty — never as exact court-calibrated truth unless calibration is court_calibrated.",
+    "- If energy_est.racket_ke_j_est is present, cite only as estimated energy (J), never as measured force-plate power.",
+    "- Do not invent km/h, m/s, metres, or joules that are absent from this block.",
     "- Do not dump raw landmark coordinates or the full JSON into user-facing text.",
   ];
+  if (ageNote) {
+    lines.push(`Player context: ${ageNote}`);
+  }
+  if (summary.player_context?.height_cm != null) {
+    lines.push(
+      `Player stature ${summary.player_context.height_cm} cm is available for contact-height language (still cite measured figures).`
+    );
+  }
   return lines.join("\n");
 }

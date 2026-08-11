@@ -274,6 +274,13 @@
       "when": 1784501000000,
       "tag": "0039_coach_profile_section",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1784600000000,
+      "tag": "0040_user_profile_anthropometrics",
+      "breakpoints": true
     }
   ]
 }

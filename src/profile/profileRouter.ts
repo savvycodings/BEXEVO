@@ -308,6 +308,37 @@ function formatBirthDisplay(iso: string | null | undefined): string | null {
   return `${d} ${month} ${y}`;
 }
 
+/** Accept cm as number/string; null clears; undefined means leave unchanged (caller decides). */
+function parseHeightCm(raw: unknown): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (raw === null || raw === "") return { ok: true, value: null };
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  if (!Number.isFinite(n)) return { ok: false, error: "heightCm must be a number or null." };
+  if (n < 100 || n > 250) return { ok: false, error: "heightCm must be between 100 and 250." };
+  return { ok: true, value: Math.round(n * 10) / 10 };
+}
+
+function parseWeightKg(raw: unknown): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (raw === null || raw === "") return { ok: true, value: null };
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  if (!Number.isFinite(n)) return { ok: false, error: "weightKg must be a number or null." };
+  if (n < 30 || n > 250) return { ok: false, error: "weightKg must be between 30 and 250." };
+  return { ok: true, value: Math.round(n * 10) / 10 };
+}
+
+function parseRequiredHeightCm(raw: unknown): { ok: true; value: number } | { ok: false; error: string } {
+  const parsed = parseHeightCm(raw);
+  if (!parsed.ok) return parsed;
+  if (parsed.value == null) return { ok: false, error: "heightCm is required." };
+  return { ok: true, value: parsed.value };
+}
+
+function parseRequiredWeightKg(raw: unknown): { ok: true; value: number } | { ok: false; error: string } {
+  const parsed = parseWeightKg(raw);
+  if (!parsed.ok) return parsed;
+  if (parsed.value == null) return { ok: false, error: "weightKg is required." };
+  return { ok: true, value: parsed.value };
+}
+
 function playerHeadline(profile: {
   hasRanking?: boolean | null;
   rankingOrg?: string | null;
@@ -436,6 +467,13 @@ router.post("/setup", upload.single("avatar"), async (req, res) => {
         ? areaLocationRaw.trim().slice(0, 200)
         : null;
 
+    const heightParsed = parseRequiredHeightCm(req.body?.heightCm);
+    if (!heightParsed.ok) return res.status(400).json({ error: heightParsed.error });
+    const weightParsed = parseRequiredWeightKg(req.body?.weightKg);
+    if (!weightParsed.ok) return res.status(400).json({ error: weightParsed.error });
+    const heightCm = heightParsed.value;
+    const weightKg = weightParsed.value;
+
     const hasRankedProfile = hasRanking === true && !!rankingOrg && !!rankingValue;
 
     if (!courtSide || (!level && !hasRankedProfile)) {
@@ -471,6 +509,8 @@ router.post("/setup", upload.single("avatar"), async (req, res) => {
         rankingOrg,
         rankingValue,
         areaLocation,
+        heightCm,
+        weightKg,
         createdAt: now,
         updatedAt: now,
       })
@@ -486,6 +526,8 @@ router.post("/setup", upload.single("avatar"), async (req, res) => {
           rankingOrg,
           rankingValue,
           areaLocation,
+          heightCm,
+          weightKg,
           updatedAt: now,
         },
       });
@@ -582,6 +624,20 @@ router.post("/basic", async (req, res) => {
       birthDate = existingProfile?.birthDate ?? null;
     }
 
+    let heightCm: number | null = existingProfile?.heightCm ?? null;
+    if (Object.prototype.hasOwnProperty.call(body, "heightCm")) {
+      const hp = parseRequiredHeightCm(body.heightCm);
+      if (!hp.ok) return res.status(400).json({ error: hp.error });
+      heightCm = hp.value;
+    }
+
+    let weightKg: number | null = existingProfile?.weightKg ?? null;
+    if (Object.prototype.hasOwnProperty.call(body, "weightKg")) {
+      const wp = parseRequiredWeightKg(body.weightKg);
+      if (!wp.ok) return res.status(400).json({ error: wp.error });
+      weightKg = wp.value;
+    }
+
     const includeEmail = Object.prototype.hasOwnProperty.call(body, "email");
     let emailUpdate: string | null | undefined;
     if (includeEmail) {
@@ -601,6 +657,8 @@ router.post("/basic", async (req, res) => {
         areaLocation,
         phone,
         birthDate,
+        heightCm,
+        weightKg,
         createdAt: now,
         updatedAt: now,
       })
@@ -612,6 +670,8 @@ router.post("/basic", async (req, res) => {
           areaLocation,
           phone,
           birthDate,
+          heightCm,
+          weightKg,
           updatedAt: now,
         },
       });

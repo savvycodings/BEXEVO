@@ -207,6 +207,15 @@ export type TechniqueAnalysisMetrics = {
   retrieval?: TechniqueRetrievalResult;
   /** YOLO object detection summary (full frame rows are stored in technique_detection_frame). */
   detection_summary?: TechniqueDetectionSummary;
+  /**
+   * Optional court/camera scale for absolute metres.
+   * When present with meters_per_torso_unit, biomechanics uses `court_calibrated` absolute speeds.
+   * Height-based estimates are used when this is absent.
+   */
+  court_calibration?: {
+    meters_per_torso_unit?: number | null;
+    status?: "court_calibrated" | string | null;
+  };
   ai_analysis?: TechniqueAiAnalysisV61 | null;
   correction_images?: TechniqueCorrectionImage[];
   correction_context?: TechniqueCorrectionContext;
@@ -280,6 +289,10 @@ export const userProfile = pgTable("user_profile", {
   areaLocation: text("areaLocation"),
   /** ISO `YYYY-MM-DD` from profile settings (optional). */
   birthDate: text("birthDate"),
+  /** Stature in centimetres (optional; used for estimated absolute motion scale). */
+  heightCm: real("heightCm"),
+  /** Body mass in kilograms (optional; used for labelled energy estimates). */
+  weightKg: real("weightKg"),
   coachStudentRole: text("coachStudentRole").default("none"),
   gender: text("gender"),
   dominantHand: text("dominantHand"),
