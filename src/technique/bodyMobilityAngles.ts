@@ -113,6 +113,38 @@ export function computeSideMobilityAngles(
   };
 }
 
+const HEAD_COLLAPSED_MAX_DEG = 12;
+const HEAD_USABLE_MIN_DEG = 25;
+
+function isCollapsedHead(deg: number | null): boolean {
+  return deg == null || deg <= HEAD_COLLAPSED_MAX_DEG;
+}
+
+function isUsableHead(deg: number | null): boolean {
+  return deg != null && deg >= HEAD_USABLE_MIN_DEG;
+}
+
+/**
+ * Far-side EAR–NOSE–SHOULDER often collapses to ~0° in 2D. One head:
+ * if exactly one side is collapsed and the other is usable, copy the usable angle.
+ */
+export function reconcileHeadAngles(
+  left: SideMobilityAngles,
+  right: SideMobilityAngles
+): { left: SideMobilityAngles; right: SideMobilityAngles } {
+  const lCollapsed = isCollapsedHead(left.head);
+  const rCollapsed = isCollapsedHead(right.head);
+  const lUsable = isUsableHead(left.head);
+  const rUsable = isUsableHead(right.head);
+  if (lCollapsed && rUsable && !rCollapsed) {
+    return { left: { ...left, head: right.head }, right };
+  }
+  if (rCollapsed && lUsable && !lCollapsed) {
+    return { left, right: { ...right, head: left.head } };
+  }
+  return { left, right };
+}
+
 export function mobilityMatchPct(you: number | null, ideal: number | null): number | null {
   if (you == null || ideal == null) return null;
   const delta = Math.abs(you - ideal);

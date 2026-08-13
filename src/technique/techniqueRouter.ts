@@ -86,6 +86,7 @@ import {
   computeSideMobilityAngles,
   midClipFrameIndex,
   nearestPoseRowByFrame,
+  reconcileHeadAngles,
 } from './bodyMobilityAngles'
 import {
   computeLobSignal,
@@ -2182,10 +2183,19 @@ router.get('/analysis/:id/body-mobility', async (req, res) => {
       }
     }
 
-    const youLeft = computeSideMobilityAngles(userLm, 'LEFT')
-    const youRight = computeSideMobilityAngles(userLm, 'RIGHT')
-    const idealLeft = idealLm ? computeSideMobilityAngles(idealLm, 'LEFT') : null
-    const idealRight = idealLm ? computeSideMobilityAngles(idealLm, 'RIGHT') : null
+    const youLeftRaw = computeSideMobilityAngles(userLm, 'LEFT')
+    const youRightRaw = computeSideMobilityAngles(userLm, 'RIGHT')
+    const youHead = reconcileHeadAngles(youLeftRaw, youRightRaw)
+    const youLeft = youHead.left
+    const youRight = youHead.right
+    const idealLeftRaw = idealLm ? computeSideMobilityAngles(idealLm, 'LEFT') : null
+    const idealRightRaw = idealLm ? computeSideMobilityAngles(idealLm, 'RIGHT') : null
+    const idealHead =
+      idealLeftRaw && idealRightRaw
+        ? reconcileHeadAngles(idealLeftRaw, idealRightRaw)
+        : null
+    const idealLeft = idealHead?.left ?? idealLeftRaw
+    const idealRight = idealHead?.right ?? idealRightRaw
 
     return res.json({
       analysisId: id,
