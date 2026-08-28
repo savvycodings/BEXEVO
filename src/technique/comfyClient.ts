@@ -53,6 +53,50 @@ export async function comfyUploadImage(
   };
 }
 
+/** POST /upload/image also accepts video files into Comfy `input/` for LoadVideo. */
+export async function comfyUploadVideo(
+  baseUrl: string,
+  buffer: Buffer,
+  filename: string
+): Promise<ComfyUploadedImage> {
+  const base = trimBaseUrl(baseUrl);
+  const form = new FormData();
+  form.append(
+    "image",
+    new Blob([new Uint8Array(buffer)], { type: "video/mp4" }),
+    filename
+  );
+  form.append("type", "input");
+  form.append("overwrite", "true");
+  const uploadUrl = `${base}/upload/image`;
+  const res = await fetch(uploadUrl, {
+    method: "POST",
+    headers: withNgrokHeaders(uploadUrl),
+    body: form,
+  });
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    throw new Error(`ComfyUI video upload: invalid JSON (${res.status}): ${text.slice(0, 200)}`);
+  }
+  if (!res.ok) {
+    throw new Error(
+      `ComfyUI video upload failed ${res.status}: ${(data.detail as string) || text.slice(0, 300)}`
+    );
+  }
+  const name = typeof data.name === "string" ? data.name : "";
+  if (!name) {
+    throw new Error(`ComfyUI video upload: missing name in response: ${text.slice(0, 300)}`);
+  }
+  return {
+    name,
+    subfolder: typeof data.subfolder === "string" ? data.subfolder : "",
+    type: typeof data.type === "string" ? data.type : "input",
+  };
+}
+
 export type ComfyQueueResult = { prompt_id: string; number?: number };
 
 export async function comfyQueuePrompt(
@@ -108,13 +152,57 @@ export async function comfyQueuePrompt(
   };
 }
 
+type ComfyFileRef = { filename: string; subfolder?: string; type?: string };
+
 type HistoryEntry = {
   status?: { completed?: boolean; status_str?: string };
   outputs?: Record<
     string,
-    { images?: Array<{ filename: string; subfolder?: string; type?: string }> }
+    {
+      images?: Array<ComfyFileRef>;
+      gifs?: Array<ComfyFileRef>;
+      videos?: Array<ComfyFileRef>;
+    }
   >;
 };
+
+export type ComfyOutputFile = { filename: string; subfolder: string; type: string };
+
+function toOutputFile(ref: ComfyFileRef): ComfyOutputFile {
+  return {
+    filename: ref.filename,
+    subfolder: typeof ref.subfolder === "string" ? ref.subfolder : "",
+    type: typeof ref.type === "string" ? ref.type : "output",
+  };
+}
+
+async function fetchHistoryEntry(
+  base: string,
+  promptId: string
+): Promise<HistoryEntry | undefined> {
+  let entry: HistoryEntry | undefined;
+  const directUrl = `${base}/history/${encodeURIComponent(promptId)}`;
+  const direct = await fetch(directUrl, { headers: withNgrokHeaders(directUrl) });
+  if (direct.ok) {
+    const raw = await direct.text();
+    const parsed = parseHistoryPayload(raw);
+    if (parsed[promptId]) {
+      entry = parsed[promptId];
+    } else if (parsed.status || parsed.outputs) {
+      entry = parsed as unknown as HistoryEntry;
+    }
+  }
+  if (!entry) {
+    const allUrl = `${base}/history`;
+    const all = await fetch(allUrl, { headers: withNgrokHeaders(allUrl) });
+    if (all.ok) {
+      const raw = await all.text();
+      const parsed = parseHistoryPayload(raw);
+      entry = parsed[promptId];
+    }
+  }
+  return entry;
+}
 
 function parseHistoryPayload(text: string): Record<string, HistoryEntry> {
   try {
@@ -185,6 +273,71 @@ export async function comfyWaitForOutputImage(
   }
 
   throw new Error(`ComfyUI: timeout waiting for prompt ${promptId} (${timeoutMs}ms)`);
+}
+
+/**
+ * Poll until prompt_id completes or timeout.
+ * SaveVideo often lands under `images` (WAN smoke); also accept `videos` / `gifs`.
+ */
+export async function comfyWaitForOutputMedia(
+  baseUrl: string,
+  promptId: string,
+  options?: { timeoutMs?: number; pollMs?: number }
+): Promise<ComfyOutputFile> {
+  const base = trimBaseUrl(baseUrl);
+  const timeoutMs = options?.timeoutMs ?? 420_000;
+  const pollMs = options?.pollMs ?? 750;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const entry = await fetchHistoryEntry(base, promptId);
+    const statusStr =
+      entry?.status && typeof (entry.status as { status_str?: string }).status_str === "string"
+        ? (entry.status as { status_str: string }).status_str
+        : "";
+    if (statusStr === "error" || statusStr === "failed") {
+      throw new Error(
+        `ComfyUI run failed for ${promptId}: ${JSON.stringify(entry?.status).slice(0, 400)}`
+      );
+    }
+
+    if (entry?.outputs) {
+      const buckets: Array<"videos" | "gifs" | "images"> = ["videos", "gifs", "images"];
+      for (const key of buckets) {
+        for (const nodeOut of Object.values(entry.outputs)) {
+          const item = nodeOut?.[key]?.[0];
+          if (item?.filename) return toOutputFile(item);
+        }
+      }
+    }
+
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+
+  throw new Error(`ComfyUI: timeout waiting for prompt ${promptId} (${timeoutMs}ms)`);
+}
+
+export async function comfyViewToBuffer(
+  baseUrl: string,
+  filename: string,
+  subfolder: string,
+  type: string
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const base = trimBaseUrl(baseUrl);
+  const q = new URLSearchParams({
+    filename,
+    type,
+    subfolder,
+  });
+  const viewUrl = `${base}/view?${q.toString()}`;
+  const res = await fetch(viewUrl, { headers: withNgrokHeaders(viewUrl) });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`ComfyUI /view failed ${res.status}: ${t.slice(0, 200)}`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const contentType = res.headers.get("content-type") || "application/octet-stream";
+  return { buffer, contentType };
 }
 
 export async function comfyImageToDataUri(

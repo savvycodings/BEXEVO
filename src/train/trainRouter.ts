@@ -147,7 +147,7 @@ function trainRouteDbError(e: unknown, fallback: string): string {
 const router = express.Router();
 router.use(express.json({ limit: "2mb" }));
 router.use(express.urlencoded({ extended: true }));
-type TrainViewProfile = "front" | "side" | "behind";
+type TrainViewProfile = "front" | "diagonal" | "side" | "behind";
 
 // fal.ai LoRA dataset + training routes (admin header required)
 router.use("/fal-lora", falLoraRouter);
@@ -203,7 +203,7 @@ function parseViewProfile(raw: unknown): TrainViewProfile | null {
   const v = String(raw ?? "")
     .trim()
     .toLowerCase();
-  if (v === "front" || v === "side" || v === "behind") return v;
+  if (v === "front" || v === "diagonal" || v === "side" || v === "behind") return v;
   return null;
 }
 
@@ -469,7 +469,7 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       console.log("[Train] Upload rejected: invalid viewProfile", {
         raw: req.body?.viewProfile,
       });
-      return res.status(400).json({ error: "viewProfile must be one of front, side, behind" });
+      return res.status(400).json({ error: "viewProfile must be one of front, diagonal, side, behind" });
     }
 
     if (!req.file?.buffer) {

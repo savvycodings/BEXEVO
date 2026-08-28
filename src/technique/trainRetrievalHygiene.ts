@@ -9,6 +9,7 @@ export type TrainNeighborCandidate = {
   stroke_preset: string;
   skill_level: string;
   distance: number;
+  view_profile?: string | null;
   extraction_meta?: {
     normalized_label?: {
       canonical_stroke?: string;

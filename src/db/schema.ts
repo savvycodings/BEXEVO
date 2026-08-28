@@ -391,6 +391,7 @@ export const techniqueVideo = pgTable("technique_video", {
 
 export const trainViewProfileEnum = pgEnum("train_view_profile", [
   "front",
+  "diagonal",
   "side",
   "behind",
 ]);

@@ -3,7 +3,7 @@ export function withNgrokHeaders(
   url: string,
   headers: Record<string, string> = {}
 ): Record<string, string> {
-  if (/ngrok-free\.(dev|app)/i.test(url)) {
+  if (/ngrok(-free)?\.(dev|app)/i.test(url)) {
     return { ...headers, "ngrok-skip-browser-warning": "69420" };
   }
   return headers;

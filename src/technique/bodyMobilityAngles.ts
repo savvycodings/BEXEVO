@@ -114,19 +114,16 @@ export function computeSideMobilityAngles(
 }
 
 const HEAD_COLLAPSED_MAX_DEG = 12;
-const HEAD_USABLE_MIN_DEG = 25;
 
 function isCollapsedHead(deg: number | null): boolean {
   return deg == null || deg <= HEAD_COLLAPSED_MAX_DEG;
 }
 
-function isUsableHead(deg: number | null): boolean {
-  return deg != null && deg >= HEAD_USABLE_MIN_DEG;
-}
-
 /**
- * Far-side EAR–NOSE–SHOULDER often collapses to ~0° in 2D. One head:
- * if exactly one side is collapsed and the other is usable, copy the usable angle.
+ * Far-side EAR–NOSE–SHOULDER often collapses to ~0° in 2D.
+ * Always publish one shared head angle on both sides: prefer any non-collapsed
+ * value (drop the old ≥25° gate that left mid-range “correct” vs 0° mismatched).
+ * When both are usable, keep the larger angle.
  */
 export function reconcileHeadAngles(
   left: SideMobilityAngles,
@@ -134,15 +131,23 @@ export function reconcileHeadAngles(
 ): { left: SideMobilityAngles; right: SideMobilityAngles } {
   const lCollapsed = isCollapsedHead(left.head);
   const rCollapsed = isCollapsedHead(right.head);
-  const lUsable = isUsableHead(left.head);
-  const rUsable = isUsableHead(right.head);
-  if (lCollapsed && rUsable && !rCollapsed) {
-    return { left: { ...left, head: right.head }, right };
+
+  let chosen: number | null = null;
+  if (!lCollapsed && !rCollapsed) {
+    chosen = Math.max(left.head!, right.head!);
+  } else if (lCollapsed && !rCollapsed) {
+    chosen = right.head;
+  } else if (rCollapsed && !lCollapsed) {
+    chosen = left.head;
+  } else {
+    chosen = left.head ?? right.head;
   }
-  if (rCollapsed && lUsable && !lCollapsed) {
-    return { left, right: { ...right, head: left.head } };
-  }
-  return { left, right };
+
+  if (chosen == null) return { left, right };
+  return {
+    left: { ...left, head: chosen },
+    right: { ...right, head: chosen },
+  };
 }
 
 export function mobilityMatchPct(you: number | null, ideal: number | null): number | null {

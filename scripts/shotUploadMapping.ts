@@ -30,7 +30,7 @@ export type TrainStrokePreset =
   | "side_wall_forehand"
   | "bandeja";
 
-export type ViewProfile = "front" | "side" | "behind";
+export type ViewProfile = "front" | "diagonal" | "side" | "behind";
 
 export type ShotManifestEntry = {
   filePath: string;
@@ -43,7 +43,7 @@ export type ShotManifestEntry = {
   strokeLabel: string;
   skillLevel: "beginner" | "intermediate" | "advanced";
   viewProfile: ViewProfile;
-  /** True when 45°/Diagonal folder mapped to `side` (API has no diagonal enum). */
+  /** True when folder was a 45°/Diagonal camera (now stored as viewProfile=diagonal). */
   diagonalMappedToSide: boolean;
   sizeBytes: number;
 };
@@ -96,7 +96,7 @@ function parseViewProfile(cameraFolder: string): {
   if (c.includes("side")) {
     return { viewProfile: "side", diagonalMappedToSide: false };
   }
-  // 45°, Diagonal, garbled encoding — API only supports front|side|behind; use side.
+  // 45°, Diagonal, garbled encoding → diagonal (between front and side).
   if (
     c.includes("45") ||
     c.includes("diagonal") ||
@@ -104,7 +104,7 @@ function parseViewProfile(cameraFolder: string): {
     c === "" ||
     /[^\x20-\x7e]/.test(cameraFolder)
   ) {
-    return { viewProfile: "side", diagonalMappedToSide: true };
+    return { viewProfile: "diagonal", diagonalMappedToSide: true };
   }
   return { viewProfile: "side", diagonalMappedToSide: false };
 }

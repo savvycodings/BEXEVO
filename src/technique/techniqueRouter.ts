@@ -45,7 +45,25 @@ import {
   type CorrectionResult,
   type ShotAndHandedness,
 } from './correctionPrompt'
+import {
+  alignedProLandmarksForUserFrames,
+  controlOverlaysForWindow,
+  FUN_CONTROL_LENGTH,
+  renderOpenPoseMp4,
+  sampleImpactWindowFrameIndices,
+  type PoseYoloRow,
+} from './openPoseVideo'
 import { generateCorrectedImageComfy, isComfyCorrectionConfigured } from './comfyCorrection'
+import { generateCorrectedVideoComfy, generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured } from './comfyVideo'
+import {
+  generateCorrectedVideoGemini,
+  isGeminiVideoConfigured,
+  resolveVideoProvider,
+} from './geminiVideo'
+import {
+  parseCachedCorrectionVideo,
+  persistCorrectionVideo,
+} from './correctionVideoStorage'
 import { runChat, chatContent } from '../lib/chatProvider'
 import {
   llmContentHasJsonObject,
@@ -2251,6 +2269,41 @@ router.get('/analysis/:id/correction-images', async (req, res) => {
   }
 })
 
+/** Cached WAN I2V clip (URLs, not bytes) — fetch separately from analysis poll. */
+router.get('/analysis/:id/correction-videos', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+    const { id } = req.params
+    if (!id) {
+      return res.status(400).json({ error: 'Missing analysis id' })
+    }
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) =>
+        and(_eq(ta.id, id), _eq(ta.userId, userId)),
+    })
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' })
+    }
+    const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
+    const cached = parseCachedCorrectionVideo(metrics.correction_videos_comfy)
+    return res.json({
+      analysisId: id,
+      frame: cached?.frame ?? null,
+      startImage: cached?.startImage ?? null,
+      video: cached?.video ?? null,
+      poseVideo: cached?.poseVideo ?? null,
+      correction_videos_comfy: cached,
+      correction_context_videos_comfy: metrics.correction_context_videos_comfy ?? null,
+    })
+  } catch (e: any) {
+    console.error('[Technique] Correction-videos fetch error:', e)
+    return res.status(500).json({ error: 'Failed to fetch correction video' })
+  }
+})
+
 /** Gemini image generation is heavy; parallel calls often fail with "fetch failed" / 429 — run sequentially. */
 const MAX_CONCURRENT_FRAMES = 1
 type PoseFrameRow = { frame: number; landmarks: FrameLandmarks }
@@ -3326,6 +3379,328 @@ router.post('/correction-images', async (req, res) => {
   } catch (e: any) {
     console.error('[Technique] Correction-images error:', e)
     return res.status(500).json({ error: 'Failed to generate correction images' })
+  }
+})
+
+router.post('/correction-videos', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+    if (!isVideoGenerationConfigured()) {
+      return res.status(503).json({
+        error:
+          'Video generation is not configured. Set XEVO_VIDEO_PROVIDER=gemini with GEMINI_API_KEY, or COMFYUI_BASE_URL + COMFYUI_FUN_CONTROL_WORKFLOW_PATH (or COMFYUI_VIDEO_WORKFLOW_PATH for TI2V).',
+      })
+    }
+
+    const { analysisId, forceRegenerate } = req.body as {
+      analysisId?: string
+      forceRegenerate?: boolean
+    }
+    if (!analysisId) {
+      return res.status(400).json({ error: 'Missing analysisId' })
+    }
+
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) =>
+        and(_eq(ta.id, analysisId), _eq(ta.userId, userId)),
+    })
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' })
+    }
+    if (analysis.status !== 'completed') {
+      return res.status(400).json({ error: 'Analysis is not completed yet' })
+    }
+
+    const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
+    const skipCache = forceRegenerate === true
+    const cached = parseCachedCorrectionVideo(metrics.correction_videos_comfy)
+    if (!skipCache && cached) {
+      console.log('[Technique] Returning cached correction video', { analysisId })
+      return res.json({
+        frame: cached.frame,
+        startImage: cached.startImage,
+        video: cached.video,
+      })
+    }
+
+    const poseData: PoseFrameRow[] = Array.isArray(metrics.pose_data)
+      ? (metrics.pose_data as PoseFrameRow[])
+      : []
+    if (poseData.length === 0) {
+      return res.status(400).json({ error: 'No pose data available' })
+    }
+
+    let impactFrameResolved: number | null =
+      typeof metrics.impact_frame_resolved === 'number' &&
+      Number.isFinite(metrics.impact_frame_resolved)
+        ? Math.round(metrics.impact_frame_resolved)
+        : null
+    const durationForRebuild = resolveVideoDurationMsForImpact(
+      typeof metrics.video_duration_ms === 'number' ? metrics.video_duration_ms : undefined,
+      typeof metrics.total_frames === 'number' ? metrics.total_frames : 0,
+      poseData
+    )
+    if (Array.isArray(metrics.user_clips) && durationForRebuild) {
+      const impactApplied = applyUserClipImpactToMetrics(
+        { ...metrics, pose_data: poseData },
+        metrics.user_clips as ClipMsRange[],
+        durationForRebuild
+      )
+      if (
+        typeof impactApplied?.impact_frame_resolved === 'number' &&
+        Number.isFinite(impactApplied.impact_frame_resolved)
+      ) {
+        impactFrameResolved = Math.round(impactApplied.impact_frame_resolved)
+      }
+    }
+    if (impactFrameResolved == null) {
+      const poseSequence = metrics.impact_pose_sequence as LabeledPoseFrame[] | undefined
+      const phaseImpact = poseSequence?.find((p) => p.phase === 'impact')?.frame
+      if (typeof phaseImpact === 'number' && Number.isFinite(phaseImpact)) {
+        impactFrameResolved = Math.round(phaseImpact)
+      }
+    }
+
+    const picked = selectPoseFramesForCorrections(poseData, 1, {
+      userClips: Array.isArray(metrics.user_clips)
+        ? (metrics.user_clips as ClipMsRange[])
+        : undefined,
+      videoDurationMs:
+        typeof metrics.video_duration_ms === 'number' ? metrics.video_duration_ms : undefined,
+      totalFrames: typeof metrics.total_frames === 'number' ? metrics.total_frames : 0,
+      impactFrame: impactFrameResolved,
+    })
+    const frameRow = picked[0]
+    if (!frameRow) {
+      return res.status(400).json({ error: 'No matching frames found' })
+    }
+
+    const video = await db.query.techniqueVideo.findFirst({
+      where: (tv, { eq: _eq }) => _eq(tv.id, analysis.techniqueVideoId),
+    })
+    if (!video?.cloudinaryPublicId) {
+      return res.status(404).json({ error: 'Video file not found' })
+    }
+    const videoPath = resolveVideoPath(video.cloudinaryPublicId)
+    if (!fs.existsSync(videoPath)) {
+      return res.status(404).json({ error: 'Video file missing from disk' })
+    }
+
+    const shotName = resolveCanonicalShotFromMetrics(metrics).shotName
+    const profileRow = await db.query.userProfile.findFirst({
+      where: (up, { eq: _eq }) => _eq(up.userId, userId),
+      columns: { dominantHand: true },
+    })
+    const handedness = profileTextToDominantHand(profileRow?.dominantHand ?? null) || 'unknown'
+
+    console.log('[Technique] Generating correction video', {
+      analysisId,
+      frame: frameRow.frame,
+      shotName,
+      handedness,
+    })
+
+    const frameBuffer = await extractFrame(videoPath, frameRow.frame)
+    const totalFrames =
+      typeof metrics.total_frames === 'number' && metrics.total_frames > 0
+        ? metrics.total_frames
+        : Math.max(
+            frameRow.frame + 1,
+            poseData.length ? Math.max(...poseData.map((p) => p.frame)) + 1 : 1
+          )
+    const videoDurationMs =
+      typeof metrics.video_duration_ms === 'number' ? metrics.video_duration_ms : undefined
+
+    const retrievalBlock = metrics.retrieval as
+      | {
+          neighbors?: Array<{ train_sample_id?: string }>
+        }
+      | undefined
+    const topNeighbor = retrievalBlock?.neighbors?.[0]
+    let proPoseSequence: Awaited<ReturnType<typeof getTrainSamplePoseSequence>> = null
+    if (topNeighbor?.train_sample_id) {
+      proPoseSequence = await getTrainSamplePoseSequence(topNeighbor.train_sample_id)
+    }
+
+    const videoProvider = resolveVideoProvider()
+    const wantFun = isComfyFunControlConfigured()
+    let videoBuffer: Buffer
+    let poseVideoBuffer: Buffer | undefined
+    let pipeline: 'fun-control' | 'ti2v-i2v' | 'veo-i2v' = 'ti2v-i2v'
+
+    if (videoProvider === 'gemini') {
+      if (!isGeminiVideoConfigured()) {
+        return res.status(503).json({
+          error: 'XEVO_VIDEO_PROVIDER=gemini requires GEMINI_API_KEY',
+        })
+      }
+      console.log('[Technique] Veo I2V (no OpenPose)', {
+        analysisId,
+        frame: frameRow.frame,
+        shotName,
+        handedness,
+      })
+      videoBuffer = await generateCorrectedVideoGemini({
+        analysisId,
+        frameNumber: frameRow.frame,
+        imageBuffer: frameBuffer,
+        shotName,
+        handedness,
+      })
+      pipeline = 'veo-i2v'
+    } else if (wantFun && proPoseSequence?.length) {
+      const userFrameIndices = sampleImpactWindowFrameIndices({
+        impactFrame: impactFrameResolved ?? frameRow.frame,
+        totalFrames,
+        videoDurationMs,
+        count: FUN_CONTROL_LENGTH,
+      })
+      const proLandmarks = alignedProLandmarksForUserFrames(
+        userFrameIndices,
+        totalFrames,
+        proPoseSequence
+      )
+      if (!proLandmarks.length) {
+        return res.status(400).json({
+          error: 'Pro pose sequence has no usable landmarks for Fun Control',
+        })
+      }
+      const windowLo = Math.min(...userFrameIndices)
+      const windowHi = Math.max(...userFrameIndices)
+      const yoloSource = Array.isArray(metrics.pose_data)
+        ? (metrics.pose_data as PoseYoloRow[])
+        : []
+      const windowRows = yoloSource.filter(
+        (r) => typeof r.frame === 'number' && r.frame >= windowLo && r.frame <= windowHi
+      )
+      const overlays = controlOverlaysForWindow({
+        userFrameIndices,
+        poseRows: windowRows.length ? windowRows : yoloSource,
+        proLandmarks,
+        handedness,
+      })
+      poseVideoBuffer = await renderOpenPoseMp4({
+        landmarkFrames: proLandmarks,
+        overlays,
+      })
+      console.log('[Technique] Fun Control pose-retarget', {
+        analysisId,
+        proFrames: proPoseSequence.length,
+        controlFrames: proLandmarks.length,
+        overlayRackets: overlays.filter((o) => o.racket).length,
+        overlayBalls: overlays.filter((o) => o.ball).length,
+        trainSampleId: topNeighbor?.train_sample_id,
+      })
+      videoBuffer = await generatePoseRetargetVideoComfy({
+        analysisId,
+        frameNumber: frameRow.frame,
+        imageBuffer: frameBuffer,
+        poseVideoBuffer,
+        shotName,
+        handedness,
+      })
+      pipeline = 'fun-control'
+    } else if (wantFun && !proPoseSequence?.length && !isComfyTi2vConfigured()) {
+      return res.status(400).json({
+        error:
+          'No pro pose sequence for Fun Control. Analyze a clip that matches a train-library neighbor, or set COMFYUI_VIDEO_WORKFLOW_PATH for TI2V fallback.',
+      })
+    } else if (isComfyTi2vConfigured()) {
+      if (wantFun) {
+        console.warn('[Technique] Fun Control configured but no pro pose; falling back to TI2V I2V')
+      }
+      videoBuffer = await generateCorrectedVideoComfy({
+        analysisId,
+        frameNumber: frameRow.frame,
+        imageBuffer: frameBuffer,
+        shotName,
+        handedness,
+      })
+    } else {
+      return res.status(503).json({
+        error:
+          'ComfyUI video is not configured. Set COMFYUI_FUN_CONTROL_WORKFLOW_PATH or COMFYUI_VIDEO_WORKFLOW_PATH, or set XEVO_VIDEO_PROVIDER=gemini.',
+      })
+    }
+
+    const previousCached = parseCachedCorrectionVideo(metrics.correction_videos_comfy)
+    const persisted = persistCorrectionVideo({
+      analysisId,
+      frame: frameRow.frame,
+      videoBuffer,
+      startImageBuffer: frameBuffer,
+      poseVideoBuffer,
+      videoFileName: pipeline === 'veo-i2v' ? 'corrected-veo.mp4' : 'corrected.mp4',
+    })
+    const context = {
+      version:
+        pipeline === 'fun-control'
+          ? 'wan22-fun-control-14b-pose-v1'
+          : pipeline === 'veo-i2v'
+            ? 'gemini-veo-i2v-v1'
+            : 'wan22-ti2v-5b-i2v-v1',
+      generated_at: new Date().toISOString(),
+      frame: persisted.frame,
+      shot_name: shotName,
+      handedness,
+      pipeline,
+      video_provider: videoProvider,
+      train_sample_id: topNeighbor?.train_sample_id ?? null,
+      ...(pipeline === 'veo-i2v'
+        ? {
+            veo_video: persisted.video,
+            ...(previousCached?.video && !previousCached.video.includes('corrected-veo')
+              ? { comfy_video: previousCached.video, comfy_pose_video: previousCached.poseVideo ?? null }
+              : {}),
+          }
+        : {}),
+    }
+    await db
+      .update(techniqueAnalysis)
+      .set({
+        metrics: {
+          ...metrics,
+          // Veo writes corrected-veo.mp4; keep prior Fun Control cache URL for A/B when present.
+          correction_videos_comfy:
+            pipeline === 'veo-i2v' && previousCached?.video && !previousCached.video.includes('corrected-veo')
+              ? {
+                  ...previousCached,
+                  // App primary remains last Fun Control; Veo path is in context.veo_video
+                }
+              : persisted,
+          correction_context_videos_comfy: context,
+          ...(pipeline === 'veo-i2v' ? { correction_videos_veo: persisted } : {}),
+        } as any,
+      })
+      .where(eq(techniqueAnalysis.id, analysisId))
+
+    try {
+      await db.insert(userNotification).values({
+        id: randomUUID(),
+        userId,
+        kind: 'correction_videos_ready',
+        title: 'Corrected video ready',
+        body: 'Your generated clip is ready in AI Coach.',
+        refType: 'technique_analysis',
+        refId: analysisId,
+        createdAt: new Date(),
+      })
+    } catch (notiErr) {
+      console.warn('[Technique] correction_videos_ready notification failed', notiErr)
+    }
+
+    return res.json({
+      frame: persisted.frame,
+      startImage: persisted.startImage,
+      video: persisted.video,
+      poseVideo: persisted.poseVideo ?? null,
+    })
+  } catch (e: any) {
+    console.error('[Technique] Correction-videos error:', e)
+    return res.status(500).json({ error: e?.message || 'Failed to generate correction video' })
   }
 })
 

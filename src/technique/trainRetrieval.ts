@@ -39,6 +39,8 @@ export type NeighborRow = {
   stroke_preset: string;
   skill_level: string;
   distance: number;
+  /** Camera view from train_video_view_profile when joined. */
+  view_profile?: string | null;
 };
 
 export function formatRetrievalForPrompt(r: TechniqueRetrievalResult | undefined): string {
@@ -230,6 +232,7 @@ async function queryFilteredTrainCandidates(
     category: string;
     stroke_preset: string;
     skill_level: string;
+    view_profile: string | null;
     dist: string;
     extraction_meta: TrainNeighborCandidate["extraction_meta"];
   }>(
@@ -241,11 +244,13 @@ async function queryFilteredTrainCandidates(
       tv.category::text AS category,
       tv."strokePreset"::text AS stroke_preset,
       tv."skillLevel"::text AS skill_level,
+      tvvp."viewProfile"::text AS view_profile,
       ts."extractionMeta" AS extraction_meta,
       (tse.embedding <=> $1::vector)::float8 AS dist
     FROM train_sample_embedding tse
     INNER JOIN train_sample ts ON ts.id = tse."trainSampleId"
     INNER JOIN train_video tv ON tv.id = ts."trainVideoId"
+    LEFT JOIN train_video_view_profile tvvp ON tvvp."trainVideoId" = tv.id
     WHERE ts.status = $2
       AND tse."specVersion" = $4
       AND ($5::text IS NULL OR ts.id != $5)
@@ -265,11 +270,41 @@ async function queryFilteredTrainCandidates(
       stroke_preset: r.stroke_preset,
       skill_level: r.skill_level,
       distance: Number(r.dist),
+      view_profile: r.view_profile,
       extraction_meta: r.extraction_meta ?? null,
     };
   });
 
   return filterTrainNeighborsForRetrieval(mapped);
+}
+
+/**
+ * Soft preference: when preferred view is known and the top neighbors are close in
+ * distance, prefer a same-view neighbor without changing the global vote system.
+ */
+export function preferSameViewNeighbors(
+  neighbors: NeighborRow[],
+  preferredView: string | null | undefined,
+  maxRelativeGap = 0.12
+): NeighborRow[] {
+  const pref = String(preferredView ?? "")
+    .trim()
+    .toLowerCase();
+  if (!pref || neighbors.length < 2) return neighbors;
+  const top = neighbors[0]!;
+  if (String(top.view_profile ?? "").toLowerCase() === pref) return neighbors;
+  const matchIdx = neighbors.findIndex(
+    (n) => String(n.view_profile ?? "").toLowerCase() === pref
+  );
+  if (matchIdx < 1) return neighbors;
+  const match = neighbors[matchIdx]!;
+  const gap = match.distance - top.distance;
+  const scale = Math.max(1e-6, top.distance);
+  if (gap / scale > maxRelativeGap) return neighbors;
+  const out = neighbors.slice();
+  out.splice(matchIdx, 1);
+  out.unshift(match);
+  return out;
 }
 
 export async function findNearestTrainNeighbors(
@@ -416,6 +451,7 @@ function aggregateEnsemble(poseProbes: Probe[], meshProbes: Probe[]): EnsembleAg
     stroke_preset: r.cand.stroke_preset,
     skill_level: r.cand.skill_level,
     distance: r.bestDistance,
+    view_profile: r.cand.view_profile ?? null,
   }));
 
   const shot_hypothesis = selectShotLabel(
@@ -612,11 +648,17 @@ export async function retrieveForTechniqueMetrics(
         ? (metricsRecord.impact_frame_resolved as number)
         : undefined;
 
+    const preferredViewRaw =
+      metricsRecord?.preferred_view_profile ?? metricsRecord?.view_profile ?? null;
+    const preferredView =
+      typeof preferredViewRaw === "string" ? preferredViewRaw : null;
+    const neighbors = preferSameViewNeighbors(agg.neighbors, preferredView).slice(0, k);
+
     return {
       spec_version,
       embedding_dim: POSE_EMBEDDING_DIM,
       query_embedding_ok: true,
-      neighbors: agg.neighbors.slice(0, k),
+      neighbors,
       shot_hypothesis: agg.shot_hypothesis,
       neighbor_distance_gap: agg.neighbor_distance_gap,
       embedding_source,
