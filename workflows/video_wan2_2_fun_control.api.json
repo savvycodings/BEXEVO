@@ -1,0 +1,166 @@
+{
+  "90": {
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": { "title": "Load CLIP" }
+  },
+  "91": {
+    "inputs": {
+      "text": "extra ball, extra balls, multiple balls, two balls, second ball, duplicate ball, duplicated ball, cloned ball, newly generated ball, replacement ball, ghost ball, floating ball, ball artifact, ball trail resembling another ball, motion blur creating duplicate balls, multiple ball positions visible simultaneously, ball appearing from nowhere, inconsistent ball identity, disappearing and reappearing ball, giant racket, oversized racket, oversized racquet, oversized paddle, duplicate racket, extra racket, deformed racket, distorted hands, extra fingers, malformed limbs, incorrect anatomy, changing clothes, changing player identity, changing court, changing lighting, camera movement, camera shake, zoom, reframing, perspective shift. extra ball, extra balls, multiple balls, second ball, duplicate ball, duplicated ball, cloned ball, mirrored ball, floating ball, floating balls, background ball, ghost ball, ball trail, motion-trail ball, invented ball, new ball, two balls, three balls, extra racket, multiple rackets, duplicate racket, deformed racket, giant racket, oversized racket, oversized racquet, oversized paddle, tiny racket, warped racket, different person, changed face, changed identity, changed clothing, changed shoes, changed court, changed background, changed lighting, changed camera angle, camera movement, zoom, crop, perspective change, incorrect grip, impossible racket angle, incorrect handedness, anatomically impossible pose, broken wrist, twisted arm, extra arm, extra hand, extra fingers, missing fingers, malformed hands, duplicated limbs, distorted anatomy, incorrect ball contact, ball far from racket, racket missing ball, unrealistic contact point, unrealistic padel technique, cartoon, illustration, CGI, 3D render, artificial skin, unrealistic proportions",
+      "clip": ["90", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP Text Encode (Negative Prompt)" }
+  },
+  "92": {
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": { "title": "Load VAE" }
+  },
+  "99": {
+    "inputs": {
+      "text": "Photorealistic professional padel tennis action. The exact same player from the start frame, with identical face, body proportions, hairstyle, clothing, shoes, accessories, court environment, lighting, shadows, and camera perspective. The player is right-handed and performs a realistic padel shot, accurately following the provided pose skeleton. Natural biomechanics, correct body rotation, believable weight transfer, realistic arm and wrist position, and anatomically correct hands. Camera remains completely locked: no camera movement, zoom, reframing, perspective change, or lens change. The player holds exactly one normal-sized professional padel racket with realistic proportions. Ball continuity — critical. There is exactly ONE padel ball in the entire scene at all times. It must be the same physical ball visible in the start frame. Preserve its identity and visual continuity throughout the motion. The player must make realistic racket contact with that exact same ball during the padel shot. The ball may naturally change position according to the action, but never duplicate, replace, regenerate, or introduce another ball. At no point may two balls appear simultaneously, including during motion blur, racket contact, or immediately before/after impact. Maintain strict temporal consistency and photorealism throughout.",
+      "clip": ["90", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP Text Encode (Positive Prompt)" }
+  },
+  "101": {
+    "inputs": {
+      "unet_name": "wan2.2_fun_control_high_noise_14B_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "Load Fun Control high-noise UNet" }
+  },
+  "102": {
+    "inputs": {
+      "unet_name": "wan2.2_fun_control_low_noise_14B_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "Load Fun Control low-noise UNet" }
+  },
+  "93": {
+    "inputs": {
+      "shift": 8,
+      "model": ["101", 0]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": { "title": "ModelSamplingSD3 high" }
+  },
+  "94": {
+    "inputs": {
+      "shift": 8,
+      "model": ["102", 0]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": { "title": "ModelSamplingSD3 low" }
+  },
+  "145": {
+    "inputs": {
+      "image": "xevo_fun_start.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Start / identity frame" }
+  },
+  "158": {
+    "inputs": {
+      "file": "xevo_fun_pose.mp4"
+    },
+    "class_type": "LoadVideo",
+    "_meta": { "title": "OpenPose control video" }
+  },
+  "156": {
+    "inputs": {
+      "video": ["158", 0]
+    },
+    "class_type": "GetVideoComponents",
+    "_meta": { "title": "Control frames" }
+  },
+  "160": {
+    "inputs": {
+      "width": 768,
+      "height": 768,
+      "length": 17,
+      "batch_size": 1,
+      "positive": ["99", 0],
+      "negative": ["91", 0],
+      "vae": ["92", 0],
+      "ref_image": ["145", 0],
+      "control_video": ["156", 0]
+    },
+    "class_type": "Wan22FunControlToVideo",
+    "_meta": { "title": "Wan22FunControlToVideo" }
+  },
+  "96": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 42,
+      "steps": 20,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": 10,
+      "return_with_leftover_noise": "enable",
+      "model": ["93", 0],
+      "positive": ["160", 0],
+      "negative": ["160", 1],
+      "latent_image": ["160", 2]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": { "title": "KSamplerAdvanced high" }
+  },
+  "95": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 20,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 10,
+      "end_at_step": 20,
+      "return_with_leftover_noise": "disable",
+      "model": ["94", 0],
+      "positive": ["160", 0],
+      "negative": ["160", 1],
+      "latent_image": ["96", 0]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": { "title": "KSamplerAdvanced low" }
+  },
+  "97": {
+    "inputs": {
+      "samples": ["95", 0],
+      "vae": ["92", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode" }
+  },
+  "100": {
+    "inputs": {
+      "fps": 16,
+      "images": ["97", 0]
+    },
+    "class_type": "CreateVideo",
+    "_meta": { "title": "Create Video" }
+  },
+  "98": {
+    "inputs": {
+      "filename_prefix": "video/xevo_fun_control",
+      "format": "auto",
+      "codec": "auto",
+      "video": ["100", 0]
+    },
+    "class_type": "SaveVideo",
+    "_meta": { "title": "Save Video" }
+  }
+}
