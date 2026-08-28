@@ -54,7 +54,7 @@ import {
   type PoseYoloRow,
 } from './openPoseVideo'
 import { generateCorrectedImageComfy, isComfyCorrectionConfigured } from './comfyCorrection'
-import { generateCorrectedVideoComfy, generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured } from './comfyVideo'
+import { generateCorrectedVideoComfy, generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured, comfyBaseHost } from './comfyVideo'
 import {
   generateCorrectedVideoGemini,
   isGeminiVideoConfigured,
@@ -3383,12 +3383,20 @@ router.post('/correction-images', async (req, res) => {
 })
 
 router.post('/correction-videos', async (req, res) => {
+  const routeT0 = Date.now()
+  let analysisIdForLog: string | undefined
   try {
     const userId = await resolveUserId(req)
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' })
     }
     if (!isVideoGenerationConfigured()) {
+      console.error('[Technique][correction-videos] not configured', {
+        videoProvider: resolveVideoProvider(),
+        comfyHost: comfyBaseHost(),
+        funControl: isComfyFunControlConfigured(),
+        ti2v: isComfyTi2vConfigured(),
+      })
       return res.status(503).json({
         error:
           'Video generation is not configured. Set XEVO_VIDEO_PROVIDER=gemini with GEMINI_API_KEY, or COMFYUI_BASE_URL + COMFYUI_FUN_CONTROL_WORKFLOW_PATH (or COMFYUI_VIDEO_WORKFLOW_PATH for TI2V).',
@@ -3399,6 +3407,7 @@ router.post('/correction-videos', async (req, res) => {
       analysisId?: string
       forceRegenerate?: boolean
     }
+    analysisIdForLog = analysisId
     if (!analysisId) {
       return res.status(400).json({ error: 'Missing analysisId' })
     }
@@ -3408,6 +3417,10 @@ router.post('/correction-videos', async (req, res) => {
         and(_eq(ta.id, analysisId), _eq(ta.userId, userId)),
     })
     if (!analysis) {
+      console.warn('[Technique][correction-videos] analysis not found', {
+        analysisId,
+        userIdPrefix: String(userId).slice(0, 8),
+      })
       return res.status(404).json({ error: 'Analysis not found' })
     }
     if (analysis.status !== 'completed') {
@@ -3417,8 +3430,31 @@ router.post('/correction-videos', async (req, res) => {
     const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
     const skipCache = forceRegenerate === true
     const cached = parseCachedCorrectionVideo(metrics.correction_videos_comfy)
+    const videoProvider = resolveVideoProvider()
+    const wantFun = isComfyFunControlConfigured()
+    const ti2vConfigured = isComfyTi2vConfigured()
+    const funWf = String(process.env.COMFYUI_FUN_CONTROL_WORKFLOW_PATH ?? '').trim()
+    const ti2vWf = String(process.env.COMFYUI_VIDEO_WORKFLOW_PATH ?? '').trim()
+
+    console.log('[Technique][correction-videos] start', {
+      analysisId,
+      userIdPrefix: String(userId).slice(0, 8),
+      videoProvider,
+      wantFun,
+      ti2vConfigured,
+      comfyHost: comfyBaseHost(),
+      funWorkflow: funWf ? path.basename(funWf) : '(unset)',
+      ti2vWorkflow: ti2vWf ? path.basename(ti2vWf) : '(unset)',
+      forceRegenerate: skipCache,
+      cacheHit: !skipCache && Boolean(cached?.video),
+    })
+
     if (!skipCache && cached) {
-      console.log('[Technique] Returning cached correction video', { analysisId })
+      console.log('[Technique][correction-videos] cache hit', {
+        analysisId,
+        video: cached.video,
+        elapsedMs: Date.now() - routeT0,
+      })
       return res.json({
         frame: cached.frame,
         startImage: cached.startImage,
@@ -3430,6 +3466,7 @@ router.post('/correction-videos', async (req, res) => {
       ? (metrics.pose_data as PoseFrameRow[])
       : []
     if (poseData.length === 0) {
+      console.warn('[Technique][correction-videos] no pose data', { analysisId })
       return res.status(400).json({ error: 'No pose data available' })
     }
 
@@ -3475,6 +3512,7 @@ router.post('/correction-videos', async (req, res) => {
     })
     const frameRow = picked[0]
     if (!frameRow) {
+      console.warn('[Technique][correction-videos] no matching frames', { analysisId })
       return res.status(400).json({ error: 'No matching frames found' })
     }
 
@@ -3482,10 +3520,15 @@ router.post('/correction-videos', async (req, res) => {
       where: (tv, { eq: _eq }) => _eq(tv.id, analysis.techniqueVideoId),
     })
     if (!video?.cloudinaryPublicId) {
+      console.warn('[Technique][correction-videos] video file not found', { analysisId })
       return res.status(404).json({ error: 'Video file not found' })
     }
     const videoPath = resolveVideoPath(video.cloudinaryPublicId)
     if (!fs.existsSync(videoPath)) {
+      console.warn('[Technique][correction-videos] video missing on disk', {
+        analysisId,
+        videoPath,
+      })
       return res.status(404).json({ error: 'Video file missing from disk' })
     }
 
@@ -3496,11 +3539,12 @@ router.post('/correction-videos', async (req, res) => {
     })
     const handedness = profileTextToDominantHand(profileRow?.dominantHand ?? null) || 'unknown'
 
-    console.log('[Technique] Generating correction video', {
+    console.log('[Technique][correction-videos] generating', {
       analysisId,
       frame: frameRow.frame,
       shotName,
       handedness,
+      impactFrameResolved,
     })
 
     const frameBuffer = await extractFrame(videoPath, frameRow.frame)
@@ -3525,8 +3569,6 @@ router.post('/correction-videos', async (req, res) => {
       proPoseSequence = await getTrainSamplePoseSequence(topNeighbor.train_sample_id)
     }
 
-    const videoProvider = resolveVideoProvider()
-    const wantFun = isComfyFunControlConfigured()
     let videoBuffer: Buffer
     let poseVideoBuffer: Buffer | undefined
     let pipeline: 'fun-control' | 'ti2v-i2v' | 'veo-i2v' = 'ti2v-i2v'
@@ -3537,7 +3579,7 @@ router.post('/correction-videos', async (req, res) => {
           error: 'XEVO_VIDEO_PROVIDER=gemini requires GEMINI_API_KEY',
         })
       }
-      console.log('[Technique] Veo I2V (no OpenPose)', {
+      console.log('[Technique][correction-videos] branch=veo-i2v', {
         analysisId,
         frame: frameRow.frame,
         shotName,
@@ -3564,6 +3606,10 @@ router.post('/correction-videos', async (req, res) => {
         proPoseSequence
       )
       if (!proLandmarks.length) {
+        console.warn('[Technique][correction-videos] pro landmarks empty', {
+          analysisId,
+          trainSampleId: topNeighbor?.train_sample_id,
+        })
         return res.status(400).json({
           error: 'Pro pose sequence has no usable landmarks for Fun Control',
         })
@@ -3586,13 +3632,14 @@ router.post('/correction-videos', async (req, res) => {
         landmarkFrames: proLandmarks,
         overlays,
       })
-      console.log('[Technique] Fun Control pose-retarget', {
+      console.log('[Technique][correction-videos] branch=fun-control', {
         analysisId,
         proFrames: proPoseSequence.length,
         controlFrames: proLandmarks.length,
         overlayRackets: overlays.filter((o) => o.racket).length,
         overlayBalls: overlays.filter((o) => o.ball).length,
         trainSampleId: topNeighbor?.train_sample_id,
+        comfyHost: comfyBaseHost(),
       })
       videoBuffer = await generatePoseRetargetVideoComfy({
         analysisId,
@@ -3603,15 +3650,26 @@ router.post('/correction-videos', async (req, res) => {
         handedness,
       })
       pipeline = 'fun-control'
-    } else if (wantFun && !proPoseSequence?.length && !isComfyTi2vConfigured()) {
+    } else if (wantFun && !proPoseSequence?.length && !ti2vConfigured) {
+      console.warn('[Technique][correction-videos] no pro pose and no TI2V', {
+        analysisId,
+        trainSampleId: topNeighbor?.train_sample_id ?? null,
+      })
       return res.status(400).json({
         error:
           'No pro pose sequence for Fun Control. Analyze a clip that matches a train-library neighbor, or set COMFYUI_VIDEO_WORKFLOW_PATH for TI2V fallback.',
       })
-    } else if (isComfyTi2vConfigured()) {
+    } else if (ti2vConfigured) {
       if (wantFun) {
-        console.warn('[Technique] Fun Control configured but no pro pose; falling back to TI2V I2V')
+        console.warn('[Technique][correction-videos] Fun Control configured but no pro pose; falling back to TI2V I2V', {
+          analysisId,
+          trainSampleId: topNeighbor?.train_sample_id ?? null,
+        })
       }
+      console.log('[Technique][correction-videos] branch=ti2v-i2v', {
+        analysisId,
+        comfyHost: comfyBaseHost(),
+      })
       videoBuffer = await generateCorrectedVideoComfy({
         analysisId,
         frameNumber: frameRow.frame,
@@ -3620,6 +3678,13 @@ router.post('/correction-videos', async (req, res) => {
         handedness,
       })
     } else {
+      console.error('[Technique][correction-videos] no pipeline available', {
+        analysisId,
+        videoProvider,
+        wantFun,
+        ti2vConfigured,
+        comfyHost: comfyBaseHost(),
+      })
       return res.status(503).json({
         error:
           'ComfyUI video is not configured. Set COMFYUI_FUN_CONTROL_WORKFLOW_PATH or COMFYUI_VIDEO_WORKFLOW_PATH, or set XEVO_VIDEO_PROVIDER=gemini.',
@@ -3692,6 +3757,15 @@ router.post('/correction-videos', async (req, res) => {
       console.warn('[Technique] correction_videos_ready notification failed', notiErr)
     }
 
+    console.log('[Technique][correction-videos] success', {
+      analysisId,
+      pipeline,
+      video: persisted.video,
+      poseVideo: persisted.poseVideo ?? null,
+      bytes: videoBuffer.length,
+      elapsedMs: Date.now() - routeT0,
+    })
+
     return res.json({
       frame: persisted.frame,
       startImage: persisted.startImage,
@@ -3699,8 +3773,19 @@ router.post('/correction-videos', async (req, res) => {
       poseVideo: persisted.poseVideo ?? null,
     })
   } catch (e: any) {
-    console.error('[Technique] Correction-videos error:', e)
-    return res.status(500).json({ error: e?.message || 'Failed to generate correction video' })
+    const message = e?.message || 'Failed to generate correction video'
+    const stack =
+      typeof e?.stack === 'string' ? e.stack.split('\n').slice(0, 12).join('\n') : undefined
+    console.error('[Technique][correction-videos] error', {
+      analysisId: analysisIdForLog,
+      message,
+      name: e?.name,
+      promptId: e?.promptId ?? e?.prompt_id,
+      statusText: e?.statusText,
+      elapsedMs: Date.now() - routeT0,
+      stack,
+    })
+    return res.status(500).json({ error: message })
   }
 })
 

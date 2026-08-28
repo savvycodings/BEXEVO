@@ -21,6 +21,18 @@ function envBaseUrl(): string {
   return String(process.env.COMFYUI_BASE_URL ?? "").trim();
 }
 
+/** Hostname (or host:port) of COMFYUI_BASE_URL for safe server logs. */
+export function comfyBaseHost(): string {
+  const raw = envBaseUrl();
+  if (!raw) return "(unset)";
+  try {
+    const u = new URL(raw.includes("://") ? raw : `http://${raw}`);
+    return u.host || raw;
+  } catch {
+    return raw.slice(0, 64);
+  }
+}
+
 export function isComfyFunControlConfigured(): boolean {
   const base = envBaseUrl();
   const wf = String(process.env.COMFYUI_FUN_CONTROL_WORKFLOW_PATH ?? "").trim();
@@ -91,6 +103,8 @@ export async function generateCorrectedVideoComfy(opts: {
   const baseUrl = String(process.env.COMFYUI_BASE_URL).trim();
   const workflowPath = resolveWorkflowPath(String(process.env.COMFYUI_VIDEO_WORKFLOW_PATH));
   const timeoutMs = Number(process.env.COMFYUI_TIMEOUT_MS) || 420_000;
+  const t0 = Date.now();
+  const prefixId = opts.analysisId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12);
 
   let fileJson: string;
   try {
@@ -114,35 +128,62 @@ export async function generateCorrectedVideoComfy(opts: {
 
   const save = workflow[SAVE_VIDEO_NODE_ID];
   if (!save?.inputs) throw new Error("WAN workflow missing SaveVideo node 58");
-  const prefixId = opts.analysisId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12);
   save.inputs.filename_prefix = `video/xevo_wan_${prefixId || "clip"}`;
 
   const positive = workflow[POSITIVE_NODE_ID];
   if (!positive?.inputs) throw new Error("WAN workflow missing CLIPTextEncode node 6");
   positive.inputs.text = buildWanI2vPrompt(opts.shotName, opts.handedness);
 
-  const uploaded = await comfyUploadImage(
-    baseUrl,
-    opts.imageBuffer,
-    `xevo_wan_start_${prefixId}_${opts.frameNumber}.png`
-  );
-  const loadName = uploaded.subfolder
-    ? `${uploaded.subfolder.replace(/\/+$/, "")}/${uploaded.name}`
-    : uploaded.name;
+  const startName = `xevo_wan_start_${prefixId}_${opts.frameNumber}.png`;
+  try {
+    const uploaded = await comfyUploadImage(baseUrl, opts.imageBuffer, startName);
+    const loadName = uploaded.subfolder
+      ? `${uploaded.subfolder.replace(/\/+$/, "")}/${uploaded.name}`
+      : uploaded.name;
 
-  workflow[LOAD_IMAGE_NODE_ID] = {
-    class_type: "LoadImage",
-    inputs: { image: loadName },
-  };
-  latent.inputs.start_image = [LOAD_IMAGE_NODE_ID, 0];
+    workflow[LOAD_IMAGE_NODE_ID] = {
+      class_type: "LoadImage",
+      inputs: { image: loadName },
+    };
+    latent.inputs.start_image = [LOAD_IMAGE_NODE_ID, 0];
 
-  const queued = await comfyQueuePrompt(baseUrl, workflow);
-  const media = await comfyWaitForOutputMedia(baseUrl, queued.prompt_id, { timeoutMs });
-  const viewed = await comfyViewToBuffer(baseUrl, media.filename, media.subfolder, media.type);
-  if (!viewed.buffer.length) {
-    throw new Error("ComfyUI /view returned an empty video");
+    console.log("[comfyVideo] TI2V queue", {
+      analysisId: opts.analysisId,
+      comfyHost: comfyBaseHost(),
+      workflow: path.basename(workflowPath),
+      startImage: loadName,
+      timeoutMs,
+    });
+
+    const queued = await comfyQueuePrompt(baseUrl, workflow);
+    console.log("[comfyVideo] TI2V queued", {
+      analysisId: opts.analysisId,
+      promptId: queued.prompt_id,
+    });
+    const media = await comfyWaitForOutputMedia(baseUrl, queued.prompt_id, { timeoutMs });
+    const viewed = await comfyViewToBuffer(baseUrl, media.filename, media.subfolder, media.type);
+    if (!viewed.buffer.length) {
+      throw new Error("ComfyUI /view returned an empty video");
+    }
+    console.log("[comfyVideo] TI2V done", {
+      analysisId: opts.analysisId,
+      promptId: queued.prompt_id,
+      filename: media.filename,
+      bytes: viewed.buffer.length,
+      elapsedMs: Date.now() - t0,
+    });
+    return viewed.buffer;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[comfyVideo] TI2V failed", {
+      analysisId: opts.analysisId,
+      comfyHost: comfyBaseHost(),
+      workflow: path.basename(workflowPath),
+      message: msg,
+      elapsedMs: Date.now() - t0,
+    });
+    throw e;
   }
-  return viewed.buffer;
 }
 
 const FUN_LOAD_IMAGE_NODE_ID = "145";
@@ -205,6 +246,8 @@ export async function generatePoseRetargetVideoComfy(opts: {
   );
   const timeoutMs = Number(process.env.COMFYUI_TIMEOUT_MS) || 420_000;
   const length = opts.length ?? FUN_CONTROL_LENGTH;
+  const t0 = Date.now();
+  const prefixId = opts.analysisId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12);
 
   let fileJson: string;
   try {
@@ -226,7 +269,6 @@ export async function generatePoseRetargetVideoComfy(opts: {
 
   const save = workflow[FUN_SAVE_VIDEO_NODE_ID];
   if (!save?.inputs) throw new Error("Fun Control workflow missing SaveVideo node 98");
-  const prefixId = opts.analysisId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12);
   save.inputs.filename_prefix = `video/xevo_fun_${prefixId || "clip"}`;
 
   const positive = workflow[FUN_POSITIVE_NODE_ID];
@@ -255,44 +297,78 @@ export async function generatePoseRetargetVideoComfy(opts: {
     lowSampler.inputs.end_at_step = FUN_CONTROL_STEPS;
   }
 
-  const uploadedImage = await comfyUploadImage(
-    baseUrl,
-    opts.imageBuffer,
-    `xevo_fun_start_${prefixId}_${opts.frameNumber}.png`
-  );
-  const imageName = uploadedImage.subfolder
-    ? `${uploadedImage.subfolder.replace(/\/+$/, "")}/${uploadedImage.name}`
-    : uploadedImage.name;
+  try {
+    const uploadedImage = await comfyUploadImage(
+      baseUrl,
+      opts.imageBuffer,
+      `xevo_fun_start_${prefixId}_${opts.frameNumber}.png`
+    );
+    const imageName = uploadedImage.subfolder
+      ? `${uploadedImage.subfolder.replace(/\/+$/, "")}/${uploadedImage.name}`
+      : uploadedImage.name;
 
-  const uploadedVideo = await comfyUploadVideo(
-    baseUrl,
-    opts.poseVideoBuffer,
-    `xevo_fun_pose_${prefixId}_${opts.frameNumber}.mp4`
-  );
-  const videoName = uploadedVideo.subfolder
-    ? `${uploadedVideo.subfolder.replace(/\/+$/, "")}/${uploadedVideo.name}`
-    : uploadedVideo.name;
+    const uploadedVideo = await comfyUploadVideo(
+      baseUrl,
+      opts.poseVideoBuffer,
+      `xevo_fun_pose_${prefixId}_${opts.frameNumber}.mp4`
+    );
+    const videoName = uploadedVideo.subfolder
+      ? `${uploadedVideo.subfolder.replace(/\/+$/, "")}/${uploadedVideo.name}`
+      : uploadedVideo.name;
 
-  workflow[FUN_LOAD_IMAGE_NODE_ID] = {
-    class_type: "LoadImage",
-    inputs: { image: imageName },
-  };
-  workflow[FUN_LOAD_VIDEO_NODE_ID] = {
-    class_type: "LoadVideo",
-    inputs: { file: videoName },
-  };
-  control.inputs.ref_image = [FUN_LOAD_IMAGE_NODE_ID, 0];
-  const components = workflow["156"];
-  if (components?.inputs) {
-    components.inputs.video = [FUN_LOAD_VIDEO_NODE_ID, 0];
-    control.inputs.control_video = ["156", 0];
+    workflow[FUN_LOAD_IMAGE_NODE_ID] = {
+      class_type: "LoadImage",
+      inputs: { image: imageName },
+    };
+    workflow[FUN_LOAD_VIDEO_NODE_ID] = {
+      class_type: "LoadVideo",
+      inputs: { file: videoName },
+    };
+    control.inputs.ref_image = [FUN_LOAD_IMAGE_NODE_ID, 0];
+    const components = workflow["156"];
+    if (components?.inputs) {
+      components.inputs.video = [FUN_LOAD_VIDEO_NODE_ID, 0];
+      control.inputs.control_video = ["156", 0];
+    }
+
+    console.log("[comfyVideo] Fun Control queue", {
+      analysisId: opts.analysisId,
+      comfyHost: comfyBaseHost(),
+      workflow: path.basename(workflowPath),
+      startImage: imageName,
+      poseVideo: videoName,
+      length,
+      size: FUN_CONTROL_SIZE,
+      timeoutMs,
+    });
+
+    const queued = await comfyQueuePrompt(baseUrl, workflow);
+    console.log("[comfyVideo] Fun Control queued", {
+      analysisId: opts.analysisId,
+      promptId: queued.prompt_id,
+    });
+    const media = await comfyWaitForOutputMedia(baseUrl, queued.prompt_id, { timeoutMs });
+    const viewed = await comfyViewToBuffer(baseUrl, media.filename, media.subfolder, media.type);
+    if (!viewed.buffer.length) {
+      throw new Error("ComfyUI /view returned an empty Fun Control video");
+    }
+    console.log("[comfyVideo] Fun Control done", {
+      analysisId: opts.analysisId,
+      promptId: queued.prompt_id,
+      filename: media.filename,
+      bytes: viewed.buffer.length,
+      elapsedMs: Date.now() - t0,
+    });
+    return viewed.buffer;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[comfyVideo] Fun Control failed", {
+      analysisId: opts.analysisId,
+      comfyHost: comfyBaseHost(),
+      workflow: path.basename(workflowPath),
+      message: msg,
+      elapsedMs: Date.now() - t0,
+    });
+    throw e;
   }
-
-  const queued = await comfyQueuePrompt(baseUrl, workflow);
-  const media = await comfyWaitForOutputMedia(baseUrl, queued.prompt_id, { timeoutMs });
-  const viewed = await comfyViewToBuffer(baseUrl, media.filename, media.subfolder, media.type);
-  if (!viewed.buffer.length) {
-    throw new Error("ComfyUI /view returned an empty Fun Control video");
-  }
-  return viewed.buffer;
 }
