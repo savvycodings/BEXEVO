@@ -363,3 +363,40 @@ export function resolveVideoPath(cloudinaryPublicId: string): string {
   if (path.isAbsolute(cloudinaryPublicId)) return cloudinaryPublicId;
   return path.join(process.cwd(), cloudinaryPublicId);
 }
+
+/**
+ * Encoded frame size of a clip, read from ffmpeg's own stream banner. `ffmpeg -i` with no
+ * output exits non-zero by design, so this reads stderr instead of treating that as failure.
+ * ffmpeg-static ships no ffprobe, which is why this parses text rather than JSON.
+ */
+export function probeVideoDimensions(
+  videoPath: string
+): Promise<{ width: number; height: number } | null> {
+  return new Promise((resolve) => {
+    const proc = execFile(resolveFfmpegBinary(), ["-hide_banner", "-i", videoPath], {
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    let stderr = "";
+    proc.stderr?.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    const done = () => {
+      // e.g. "Stream #0:1(und): Video: h264 (High) ..., yuv420p(tv), 368x448, 1321 kb/s"
+      const line = stderr.split(/\r?\n/).find((l) => /Stream #.*Video:/.test(l));
+      const m = line?.match(/(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)/);
+      if (!m) return resolve(null);
+      const width = Number(m[1]);
+      const height = Number(m[2]);
+      if (!width || !height) return resolve(null);
+      resolve({ width, height });
+    };
+    proc.on("close", done);
+    proc.on("error", () => resolve(null));
+  });
+}
+
+/**
+ * Below this on the short side, the AI correction pipeline has too little detail to work
+ * with: the render upscales the frame and the model invents texture rather than preserving it.
+ */
+export const MIN_RECOMMENDED_SHORT_SIDE = 720;

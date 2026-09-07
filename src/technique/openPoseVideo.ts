@@ -25,9 +25,43 @@ const VISIBILITY_MIN = 0.25;
  * level, and mirroring on a coin flip is worse than not mirroring at all.
  */
 const SWING_SIDE_MIN_MARGIN = 0.04;
+/** Longest side of the control clip and the Fun Control render. Square unless aspect fitting is on. */
 const DEFAULT_SIZE = 768;
 const DEFAULT_FPS = 16;
-const DEFAULT_LENGTH = 17;
+/**
+ * Frames handed to Fun Control. Must stay 4n+1 or the latent packing rejects it.
+ * 33 frames at 16 fps is ~2s, which matches `correctionVideoWindowMs()` so the compare lines up.
+ */
+const DEFAULT_LENGTH = 33;
+
+function envInt(name: string, min: number, max: number): number | null {
+  const n = Number(process.env[name]);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+/** Snap a canvas side to a multiple of 32. WAN accepts multiples of 16 but resolves them poorly. */
+function round32(n: number): number {
+  return Math.max(256, Math.round(n / 32) * 32);
+}
+
+/** Longest side of the generated clip. Raising this is the main quality/VRAM dial. */
+export function correctionCanvasSize(): number {
+  const n = envInt("CORRECTION_CANVAS_SIZE", 256, 1536);
+  if (n == null) return DEFAULT_SIZE;
+  return round32(n);
+}
+
+/** Frame count for Fun Control, snapped up to the nearest 4n+1 the model accepts. */
+export function correctionFunLength(): number {
+  const n = envInt("CORRECTION_FUN_LENGTH", 5, 121) ?? DEFAULT_LENGTH;
+  return Math.round((n - 1) / 4) * 4 + 1;
+}
+
+/** Playback rate of the control clip and the generated clip. */
+export function correctionFunFps(): number {
+  return envInt("CORRECTION_FUN_FPS", 8, 60) ?? DEFAULT_FPS;
+}
 
 function resolveFfmpegBinary(): string {
   const fromEnv = process.env.FFMPEG_PATH?.trim();
@@ -164,6 +198,15 @@ export type ControlOverlay = {
 
 const RACKET_RGB: [number, number, number] = [255, 0, 180];
 const BALL_RGB: [number, number, number] = [255, 220, 0];
+
+/**
+ * Off by default. A saturated filled rectangle is a very strong control signal, and WAN paints
+ * it in literally as a striped slab instead of a paddle. With it gone, the racket has to come
+ * from the start frame and the prompt, which is what keeps it looking like the athlete's own.
+ */
+function drawRacketBox(): boolean {
+  return String(process.env.CORRECTION_DRAW_RACKET_BOX ?? "").trim().toLowerCase() === "true";
+}
 
 function fillRect(
   buf: Uint8Array,
@@ -342,7 +385,7 @@ export function drawOpenPoseRgb(
     const p = toPixel(lm, width, height);
     drawDisk(buf, width, height, p.x, p.y, 6, [255, 255, 255]);
   }
-  if (overlay?.racket) {
+  if (overlay?.racket && drawRacketBox()) {
     const { cx, cy, w, h } = overlay.racket;
     fillRect(buf, width, height, cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, RACKET_RGB);
   }
@@ -381,12 +424,12 @@ export function sampleImpactWindowFrameIndices(opts: {
   count?: number;
   windowMs?: number;
 }): number[] {
-  const count = Math.max(1, opts.count ?? DEFAULT_LENGTH);
+  const count = Math.max(1, opts.count ?? correctionFunLength());
   const total = Math.max(1, Math.round(opts.totalFrames));
   const impact = Math.max(0, Math.min(total - 1, Math.round(opts.impactFrame)));
   const windowMs = Number.isFinite(opts.windowMs) && (opts.windowMs ?? 0) > 0
     ? Number(opts.windowMs)
-    : Number(process.env.CORRECTION_IMPACT_WINDOW_MS) || 1000;
+    : correctionVideoWindowMs();
   const durationMs =
     typeof opts.videoDurationMs === "number" && opts.videoDurationMs > 0
       ? opts.videoDurationMs
@@ -663,24 +706,75 @@ export function coachedControlLandmarkFrames(opts: {
     });
     out.push(blendLandmarks(userLm, retargeted, blend));
   }
-  return out;
+  return smoothLandmarkTrack(out, correctionPoseSmoothing());
 }
 
 /**
- * Control-clip canvas matching the user's footage aspect, longest side capped at 768 and
- * both sides on a multiple of 16 for the WAN latent grid.
+ * Centred moving average over each joint's track. The window is sampled well below the
+ * source frame rate, so a fast swing aliases and the control signal picks up steps that the
+ * athlete's real motion does not have. Endpoints shrink the window rather than clamping, so
+ * contact at the centre of the clip keeps its extremes.
+ */
+export function smoothLandmarkTrack(
+  frames: NamedLandmarks[],
+  radius: number
+): NamedLandmarks[] {
+  if (radius < 1 || frames.length < 3) return frames;
+  return frames.map((frame, i) => {
+    const out: NamedLandmarks = {};
+    for (const name of Object.keys(frame)) {
+      const centre = frame[name];
+      if (!isVisible(centre)) continue;
+      let sx = 0;
+      let sy = 0;
+      let n = 0;
+      const lo = Math.max(0, i - radius);
+      const hi = Math.min(frames.length - 1, i + radius);
+      for (let j = lo; j <= hi; j++) {
+        const lm = frames[j]?.[name];
+        if (!isVisible(lm)) continue;
+        sx += lm.x;
+        sy += lm.y;
+        n++;
+      }
+      out[name] = n ? { ...centre, x: sx / n, y: sy / n } : centre;
+    }
+    return out;
+  });
+}
+
+/** Half-width of the smoothing window, in frames. 0 disables it. */
+export function correctionPoseSmoothing(): number {
+  const n = Number(process.env.CORRECTION_POSE_SMOOTHING);
+  if (Number.isFinite(n) && n >= 0 && n <= 5) return Math.floor(n);
+  return 1;
+}
+
+/**
+ * Control-clip canvas, square at `correctionCanvasSize()` by default.
+ *
+ * Matching the user's footage aspect instead lands on sizes WAN cannot resolve. Divisibility
+ * is not the constraint: 624x768 and 848x1024 are both clean multiples of 16 and need no
+ * latent padding, yet both decode with the DiT patch grid visible as a 16px lattice (8x VAE
+ * downsample times patch_size 2). The same model at the same step count is clean at 768x768,
+ * which is near a size it was trained on. Aspect fitting stays available behind
+ * CORRECTION_CANVAS_ASPECT for probing candidate sizes, on a multiple of 32.
  */
 export function controlCanvasSize(
   videoWidth?: number | null,
   videoHeight?: number | null
 ): { width: number; height: number } {
+  const size = correctionCanvasSize();
+  if (process.env.CORRECTION_CANVAS_ASPECT !== "1") {
+    return { width: size, height: size };
+  }
+
   const w = typeof videoWidth === "number" && videoWidth > 0 ? videoWidth : 0;
   const h = typeof videoHeight === "number" && videoHeight > 0 ? videoHeight : 0;
-  if (!w || !h) return { width: DEFAULT_SIZE, height: DEFAULT_SIZE };
+  if (!w || !h) return { width: size, height: size };
 
-  const round16 = (n: number) => Math.max(256, Math.round(n / 16) * 16);
-  const scale = DEFAULT_SIZE / Math.max(w, h);
-  return { width: round16(w * scale), height: round16(h * scale) };
+  const scale = size / Math.max(w, h);
+  return { width: round32(w * scale), height: round32(h * scale) };
 }
 
 export async function renderOpenPoseMp4(opts: {
@@ -693,9 +787,9 @@ export async function renderOpenPoseMp4(opts: {
   if (!opts.landmarkFrames.length) {
     throw new Error("OpenPose render: no landmark frames");
   }
-  const width = opts.width ?? DEFAULT_SIZE;
-  const height = opts.height ?? DEFAULT_SIZE;
-  const fps = opts.fps ?? DEFAULT_FPS;
+  const width = opts.width ?? correctionCanvasSize();
+  const height = opts.height ?? correctionCanvasSize();
+  const fps = opts.fps ?? correctionFunFps();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "xevo-openpose-"));
   try {
     opts.landmarkFrames.forEach((lm, i) => {
@@ -704,6 +798,8 @@ export async function renderOpenPoseMp4(opts: {
       writePpm(path.join(tmp, name), rgb, width, height);
     });
     const outPath = path.join(tmp, "openpose.mp4");
+    // Lossless 4:4:4. Default CRF 23 + yuv420p stamped a 16px H.264 quilt on the black
+    // field, and Fun Control copied that grid onto the generated court and stands.
     await runFfmpeg([
       "-y",
       "-framerate",
@@ -711,9 +807,11 @@ export async function renderOpenPoseMp4(opts: {
       "-i",
       path.join(tmp, "frame_%04d.ppm"),
       "-pix_fmt",
-      "yuv420p",
+      "yuv444p",
       "-c:v",
       "libx264",
+      "-qp",
+      "0",
       "-movflags",
       "+faststart",
       outPath,
@@ -726,10 +824,24 @@ export async function renderOpenPoseMp4(opts: {
   }
 }
 
-export function correctionImpactWindowMs(): number {
-  const n = Number(process.env.CORRECTION_IMPACT_WINDOW_MS);
+/**
+ * Span of real action the generated clip covers, centred on contact. 2000ms reaches from
+ * backswing through follow-through rather than just the contact instant, and on a typical 2s
+ * upload it makes the generated clip cover the same moments as the source, so the
+ * before/after compare lines up.
+ *
+ * Deliberately does not read `CORRECTION_IMPACT_WINDOW_MS`: that one is set to 1000 in
+ * deployed env to pick image-correction stills near contact, and reusing it here would hold
+ * the video at 1s wherever it is set.
+ */
+export function correctionVideoWindowMs(): number {
+  const n = Number(process.env.CORRECTION_VIDEO_WINDOW_MS);
   if (Number.isFinite(n) && n >= 200) return Math.min(Math.floor(n), 4000);
-  return 1000;
+  return 2000;
 }
 
+/**
+ * Static fallbacks. Runtime code should prefer `correctionFunLength()` and
+ * `correctionCanvasSize()` so the env overrides used for tuning sweeps take effect.
+ */
 export { DEFAULT_LENGTH as FUN_CONTROL_LENGTH, DEFAULT_SIZE as FUN_CONTROL_SIZE };

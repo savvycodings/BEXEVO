@@ -7,7 +7,11 @@ import {
   comfyViewToBuffer,
   comfyWaitForOutputMedia,
 } from "./comfyClient";
-import { FUN_CONTROL_LENGTH, FUN_CONTROL_SIZE } from "./openPoseVideo";
+import {
+  correctionCanvasSize,
+  correctionFunFps,
+  correctionFunLength,
+} from "./openPoseVideo";
 
 type ApiWorkflow = Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
 
@@ -102,7 +106,7 @@ export async function generateCorrectedVideoComfy(opts: {
 
   const baseUrl = String(process.env.COMFYUI_BASE_URL).trim();
   const workflowPath = resolveWorkflowPath(String(process.env.COMFYUI_VIDEO_WORKFLOW_PATH));
-  const timeoutMs = Number(process.env.COMFYUI_TIMEOUT_MS) || 420_000;
+  const timeoutMs = Math.max(Number(process.env.COMFYUI_TIMEOUT_MS) || 0, 900_000);
   const t0 = Date.now();
   const prefixId = opts.analysisId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12);
 
@@ -194,9 +198,21 @@ const FUN_CONTROL_NODE_ID = "160";
 const FUN_SAVE_VIDEO_NODE_ID = "98";
 const FUN_HIGH_SAMPLER_NODE_ID = "96";
 const FUN_LOW_SAMPLER_NODE_ID = "95";
-const FUN_CONTROL_STEPS = 20;
+const FUN_CREATE_VIDEO_NODE_ID = "100";
 const FUN_CONTROL_CFG = 3.5;
-const FUN_CONTROL_HIGH_END = 10;
+
+/**
+ * Total sampling steps, split evenly between the high-noise and low-noise experts.
+ *
+ * 30 was tried against the blocky texture and did not touch it, because the texture came from
+ * the canvas size rather than under-sampling; it only tripled the runtime. Back to 20, which is
+ * what the clean output was sampled at. Env-overridable for tuning sweeps.
+ */
+function funControlSteps(): number {
+  const n = Number(process.env.CORRECTION_FUN_STEPS);
+  if (Number.isFinite(n) && n >= 4 && n <= 80) return Math.floor(n);
+  return 20;
+}
 
 export function buildWanFunControlPrompt(shotName: string, handedness: string): string {
   const shot = shotName.trim() || "padel shot";
@@ -329,15 +345,21 @@ export function hasCoachingVideoContext(ctx?: CoachingVideoContext | null): bool
   );
 }
 
+/**
+ * Deduplicated: the previous version repeated whole phrase groups two and three times, which
+ * spends conditioning weight on repetition rather than coverage.
+ *
+ * Do not negate softness (blurry / low detail / mushy texture). On a bilinear-upscaled
+ * identity frame that pushes WAN to invent a 16px DiT patch grid instead of staying smooth.
+ */
 export function buildWanFunControlNegativePrompt(): string {
   return (
-    "extra ball, extra balls, multiple balls, two balls, second ball, duplicate ball, duplicated ball, cloned ball, newly generated ball, replacement ball, ghost ball, floating ball, ball artifact, ball trail resembling another ball, motion blur creating duplicate balls, multiple ball positions visible simultaneously, ball appearing from nowhere, inconsistent ball identity, disappearing and reappearing ball, " +
-    "giant racket, oversized racket, oversized racquet, oversized paddle, duplicate racket, extra racket, deformed racket, distorted hands, extra fingers, malformed limbs, incorrect anatomy, changing clothes, changing player identity, changing court, changing lighting, camera movement, camera shake, zoom, reframing, perspective shift, " +
-    "extra ball, extra balls, multiple balls, second ball, duplicate ball, duplicated ball, cloned ball, mirrored ball, floating ball, floating balls, background ball, ghost ball, ball trail, motion-trail ball, invented ball, new ball, two balls, three balls, " +
-    "extra racket, multiple rackets, duplicate racket, deformed racket, giant racket, oversized racket, oversized racquet, oversized paddle, tiny racket, warped racket, " +
-    "different person, changed face, changed identity, changed clothing, changed shoes, changed court, changed background, changed lighting, changed camera angle, camera movement, zoom, crop, perspective change, " +
+    "extra ball, multiple balls, duplicate ball, cloned ball, ghost ball, floating ball, ball trail, invented ball, inconsistent ball identity, ball appearing from nowhere, " +
+    "extra racket, duplicate racket, deformed racket, warped racket, oversized racket, oversized paddle, tiny racket, " +
+    "different person, changed face, changed identity, changed clothing, changed shoes, changed court, changed background, changed lighting, changed camera angle, " +
+    "camera movement, camera shake, zoom, crop, reframing, perspective shift, " +
     "incorrect grip, impossible racket angle, incorrect handedness, anatomically impossible pose, broken wrist, twisted arm, extra arm, extra hand, extra fingers, missing fingers, malformed hands, duplicated limbs, distorted anatomy, " +
-    "incorrect ball contact, ball far from racket, racket missing ball, unrealistic contact point, unrealistic padel technique, " +
+    "incorrect ball contact, ball far from racket, unrealistic contact point, unrealistic padel technique, " +
     "cartoon, illustration, CGI, 3D render, artificial skin, unrealistic proportions"
   );
 }
@@ -364,8 +386,11 @@ export async function generatePoseRetargetVideoComfy(opts: {
   const workflowPath = resolveWorkflowPath(
     String(process.env.COMFYUI_FUN_CONTROL_WORKFLOW_PATH)
   );
-  const timeoutMs = Number(process.env.COMFYUI_TIMEOUT_MS) || 420_000;
-  const length = opts.length ?? FUN_CONTROL_LENGTH;
+  // Measured 445s for 848x1024 at 33 frames and 30 steps, so the old 420s ceiling would have
+  // killed the render it was waiting for. Video gets its own floor rather than sharing the
+  // image pipeline's shorter one.
+  const timeoutMs = Math.max(Number(process.env.COMFYUI_TIMEOUT_MS) || 0, 900_000);
+  const length = opts.length ?? correctionFunLength();
   const t0 = Date.now();
   const prefixId = opts.analysisId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12);
 
@@ -383,8 +408,8 @@ export async function generatePoseRetargetVideoComfy(opts: {
   if (!control?.inputs) {
     throw new Error("Fun Control workflow missing Wan22FunControlToVideo node 160");
   }
-  const outWidth = opts.width && opts.width > 0 ? opts.width : FUN_CONTROL_SIZE;
-  const outHeight = opts.height && opts.height > 0 ? opts.height : FUN_CONTROL_SIZE;
+  const outWidth = opts.width && opts.width > 0 ? opts.width : correctionCanvasSize();
+  const outHeight = opts.height && opts.height > 0 ? opts.height : correctionCanvasSize();
   control.inputs.width = outWidth;
   control.inputs.height = outHeight;
   control.inputs.length = length;
@@ -410,21 +435,29 @@ export async function generatePoseRetargetVideoComfy(opts: {
     negative.inputs.text = buildWanFunControlNegativePrompt();
   }
 
+  const steps = funControlSteps();
+  const highEnd = Math.max(1, Math.round(steps / 2));
   const highSampler = workflow[FUN_HIGH_SAMPLER_NODE_ID];
   if (highSampler?.inputs) {
     highSampler.inputs.noise_seed = Date.now() % 1_000_000_000;
-    highSampler.inputs.steps = FUN_CONTROL_STEPS;
+    highSampler.inputs.steps = steps;
     highSampler.inputs.cfg = FUN_CONTROL_CFG;
     highSampler.inputs.start_at_step = 0;
-    highSampler.inputs.end_at_step = FUN_CONTROL_HIGH_END;
+    highSampler.inputs.end_at_step = highEnd;
   }
   const lowSampler = workflow[FUN_LOW_SAMPLER_NODE_ID];
   if (lowSampler?.inputs) {
-    lowSampler.inputs.steps = FUN_CONTROL_STEPS;
+    lowSampler.inputs.steps = steps;
     lowSampler.inputs.cfg = FUN_CONTROL_CFG;
-    lowSampler.inputs.start_at_step = FUN_CONTROL_HIGH_END;
-    lowSampler.inputs.end_at_step = FUN_CONTROL_STEPS;
+    lowSampler.inputs.start_at_step = highEnd;
+    lowSampler.inputs.end_at_step = steps;
   }
+
+  // The control clip is encoded at this rate, so the output has to match or the swing
+  // plays back at the wrong speed.
+  const fps = correctionFunFps();
+  const createVideo = workflow[FUN_CREATE_VIDEO_NODE_ID];
+  if (createVideo?.inputs) createVideo.inputs.fps = fps;
 
   try {
     const uploadedImage = await comfyUploadImage(
@@ -468,6 +501,11 @@ export async function generatePoseRetargetVideoComfy(opts: {
       poseVideo: videoName,
       length,
       size: `${outWidth}x${outHeight}`,
+      fps,
+      steps,
+      model: String(workflow["101"]?.inputs?.unet_name ?? "?").includes("fp8")
+        ? "fp8"
+        : "bf16",
       prompt: useCoachingPrompt ? "coaching" : "generic",
       timeoutMs,
     });

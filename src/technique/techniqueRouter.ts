@@ -26,6 +26,8 @@ import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import {
   extractFrame,
   extractProReferenceFrame,
+  MIN_RECOMMENDED_SHORT_SIDE,
+  probeVideoDimensions,
   probeVideoFrameCount,
   resolveVideoPath,
 } from './frameExtractor'
@@ -52,8 +54,8 @@ import {
   coachedControlLandmarkFrames,
   controlCanvasSize,
   controlOverlaysForWindow,
+  correctionFunLength,
   correctionPoseBlend,
-  FUN_CONTROL_LENGTH,
   inferSwingSideFromLandmarks,
   renderOpenPoseMp4,
   sampleImpactWindowFrameIndices,
@@ -724,6 +726,20 @@ router.post('/upload', upload.single('video'), async (req, res) => {
     console.log('[Technique] Writing video to disk...', { filePath })
     await fs.promises.writeFile(filePath, req.file.buffer)
 
+    // Resolution caps everything downstream: the correction render upscales this frame, so a
+    // small upload can only ever produce invented texture. Surface it instead of silently
+    // generating a soft clip.
+    const dims = await probeVideoDimensions(filePath).catch(() => null)
+    const shortSide = dims ? Math.min(dims.width, dims.height) : null
+    const lowResolution = shortSide != null && shortSide < MIN_RECOMMENDED_SHORT_SIDE
+    console.log('[Technique] Uploaded video dimensions', {
+      id,
+      dimensions: dims ? `${dims.width}x${dims.height}` : 'unknown',
+      shortSide,
+      lowResolution,
+      minRecommended: MIN_RECOMMENDED_SHORT_SIDE,
+    })
+
     const publicPath = `/technique/video/${id}`
 
     await db.insert(techniqueVideo).values({
@@ -774,6 +790,9 @@ router.post('/upload', upload.single('video'), async (req, res) => {
       url: publicPath,
       publicId: filePath,
       coachReviewCreated,
+      ...(dims ? { width: dims.width, height: dims.height } : {}),
+      lowResolution,
+      minRecommendedShortSide: MIN_RECOMMENDED_SHORT_SIDE,
     }
     console.log('[Technique] Sending success response')
     void onVideoUploaded(userId).catch((err) => {
@@ -2304,6 +2323,8 @@ router.get('/analysis/:id/correction-videos', async (req, res) => {
       startImage: cached?.startImage ?? null,
       video: cached?.video ?? null,
       poseVideo: cached?.poseVideo ?? null,
+      windowStartMs: cached?.windowStartMs ?? null,
+      windowEndMs: cached?.windowEndMs ?? null,
       correction_videos_comfy: cached,
       correction_context_videos_comfy: metrics.correction_context_videos_comfy ?? null,
     })
@@ -3659,6 +3680,8 @@ router.post('/correction-videos', async (req, res) => {
     let videoBuffer: Buffer
     let poseVideoBuffer: Buffer | undefined
     let pipeline: 'fun-control' | 'ti2v-i2v' | 'veo-i2v' = 'ti2v-i2v'
+    /** Span of the source clip the generated video covers, for the before/after compare. */
+    let sourceWindow: { startMs: number; endMs: number } | null = null
 
     if (videoProvider === 'gemini') {
       if (!isGeminiVideoConfigured()) {
@@ -3686,10 +3709,19 @@ router.post('/correction-videos', async (req, res) => {
         impactFrame: userImpactFrame,
         totalFrames,
         videoDurationMs,
-        count: FUN_CONTROL_LENGTH,
+        count: correctionFunLength(),
       })
       const userFps =
         videoDurationMs != null ? estimateFps(totalFrames, videoDurationMs) : 30
+
+      // Frame indices back to source timestamps, so the app can play the same moments on the
+      // "Current" side instead of starting both clips at zero.
+      if (userFrameIndices.length && userFps > 0) {
+        sourceWindow = {
+          startMs: (userFrameIndices[0]! / userFps) * 1000,
+          endMs: (userFrameIndices[userFrameIndices.length - 1]! / userFps) * 1000,
+        }
+      }
 
       // Contact-to-contact alignment when the pro clip has a resolved impact frame; the pro
       // clip's fps is not stored, so assume the same capture rate as the user's clip.
@@ -3878,6 +3910,9 @@ router.post('/correction-videos', async (req, res) => {
       startImageBuffer: frameBuffer,
       poseVideoBuffer,
       videoFileName: pipeline === 'veo-i2v' ? 'corrected-veo.mp4' : 'corrected.mp4',
+      ...(sourceWindow
+        ? { windowStartMs: sourceWindow.startMs, windowEndMs: sourceWindow.endMs }
+        : {}),
     })
     const context = {
       version:
@@ -3950,6 +3985,8 @@ router.post('/correction-videos', async (req, res) => {
       startImage: persisted.startImage,
       video: persisted.video,
       poseVideo: persisted.poseVideo ?? null,
+      windowStartMs: persisted.windowStartMs ?? null,
+      windowEndMs: persisted.windowEndMs ?? null,
     })
   } catch (e: any) {
     const message = e?.message || 'Failed to generate correction video'

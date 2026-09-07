@@ -4,6 +4,9 @@ import {
   alignedProLandmarksByImpact,
   blendLandmarks,
   controlCanvasSize,
+  correctionCanvasSize,
+  correctionFunLength,
+  smoothLandmarkTrack,
   inferSwingSideFromLandmarks,
   retargetProToUser,
   userLandmarksForFrames,
@@ -87,18 +90,76 @@ test("blendLandmarks keeps a joint that only one side has", () => {
   assert.equal(out.RIGHT_WRIST?.x, 0.9);
 });
 
-test("controlCanvasSize matches the clip aspect, caps the long side, and stays on a multiple of 16", () => {
-  const portrait = controlCanvasSize(1080, 1920);
-  assert.equal(portrait.height, 768);
-  assert.equal(portrait.width % 16, 0);
-  assert.ok(Math.abs(portrait.width / portrait.height - 1080 / 1920) < 0.02);
+test("controlCanvasSize is square unless aspect fitting is explicitly enabled", () => {
+  // Asserted against the resolver rather than a literal, so raising the render size for
+  // quality does not silently fail this test.
+  const cap = correctionCanvasSize();
 
-  const landscape = controlCanvasSize(1920, 1080);
-  assert.equal(landscape.width, 768);
-  assert.equal(landscape.height % 16, 0);
+  // Aspect fitting lands on sizes WAN decodes with its patch grid visible, so the clip
+  // aspect is deliberately ignored by default even when we know it.
+  assert.deepEqual(controlCanvasSize(1080, 1920), { width: cap, height: cap });
+  assert.deepEqual(controlCanvasSize(1920, 1080), { width: cap, height: cap });
+  assert.deepEqual(controlCanvasSize(null, null), { width: cap, height: cap });
+});
 
-  // No dimensions available -> legacy square.
-  assert.deepEqual(controlCanvasSize(null, null), { width: 768, height: 768 });
+test("controlCanvasSize aspect fitting stays on a multiple of 32 when enabled", () => {
+  const prev = process.env.CORRECTION_CANVAS_ASPECT;
+  process.env.CORRECTION_CANVAS_ASPECT = "1";
+  try {
+    const cap = correctionCanvasSize();
+
+    // Within half a 32px step of the aspect-preserving ideal is all the rounding allows.
+    const portrait = controlCanvasSize(1080, 1920);
+    assert.equal(portrait.height, cap);
+    assert.equal(portrait.width % 32, 0);
+    assert.ok(Math.abs(portrait.width - (cap * 1080) / 1920) <= 16);
+
+    const landscape = controlCanvasSize(1920, 1080);
+    assert.equal(landscape.width, cap);
+    assert.equal(landscape.height % 32, 0);
+    assert.ok(Math.abs(landscape.height - (cap * 1080) / 1920) <= 16);
+
+    // 32-alignment is what keeps the patch count even in both dimensions.
+    assert.equal((portrait.width / 16) % 2, 0);
+    assert.equal((landscape.height / 16) % 2, 0);
+
+    assert.deepEqual(controlCanvasSize(null, null), { width: cap, height: cap });
+  } finally {
+    if (prev == null) delete process.env.CORRECTION_CANVAS_ASPECT;
+    else process.env.CORRECTION_CANVAS_ASPECT = prev;
+  }
+});
+
+test("correctionFunLength snaps to the 4n+1 lengths Fun Control accepts", () => {
+  const prev = process.env.CORRECTION_FUN_LENGTH;
+  try {
+    for (const [set, want] of [["33", 33], ["17", 17], ["30", 29], ["48", 49]] as const) {
+      process.env.CORRECTION_FUN_LENGTH = set;
+      assert.equal(correctionFunLength(), want);
+      assert.equal((correctionFunLength() - 1) % 4, 0);
+    }
+    delete process.env.CORRECTION_FUN_LENGTH;
+    assert.equal(correctionFunLength(), 33);
+    assert.equal((correctionFunLength() - 1) % 4, 0);
+  } finally {
+    if (prev == null) delete process.env.CORRECTION_FUN_LENGTH;
+    else process.env.CORRECTION_FUN_LENGTH = prev;
+  }
+});
+
+test("smoothLandmarkTrack damps a one-frame spike without moving a steady track", () => {
+  const steady = [0.2, 0.3, 0.4, 0.5, 0.6].map((x) => ({ RIGHT_WRIST: { x, y: 0.5 } }));
+  const smoothedSteady = smoothLandmarkTrack(steady, 1);
+  // A constant-velocity track is unchanged by a centred average.
+  assert.ok(Math.abs((smoothedSteady[2]!.RIGHT_WRIST?.x ?? 0) - 0.4) < 1e-9);
+
+  const spiky = [0.2, 0.3, 0.9, 0.5, 0.6].map((x) => ({ RIGHT_WRIST: { x, y: 0.5 } }));
+  const smoothedSpike = smoothLandmarkTrack(spiky, 1);
+  const peak = smoothedSpike[2]!.RIGHT_WRIST?.x ?? 0;
+  assert.ok(peak < 0.9 && peak > 0.5, `spike should be damped, got ${peak}`);
+
+  // radius 0 is a passthrough.
+  assert.equal(smoothLandmarkTrack(spiky, 0), spiky);
 });
 
 test("inferSwingSideFromLandmarks picks the arm with more reach", () => {
