@@ -38,6 +38,7 @@ import {
   generateCorrectedImage,
   generateCorrectedImageFal,
   buildProNeighborCorrectionContext,
+  formatTopPriorityMove,
   mergeLandmarkDeltas,
   proGapToLandmarkDeltas,
   type FrameLandmarks,
@@ -46,15 +47,22 @@ import {
   type ShotAndHandedness,
 } from './correctionPrompt'
 import {
+  alignedProLandmarksByImpact,
   alignedProLandmarksForUserFrames,
+  coachedControlLandmarkFrames,
+  controlCanvasSize,
   controlOverlaysForWindow,
+  correctionPoseBlend,
   FUN_CONTROL_LENGTH,
+  inferSwingSideFromLandmarks,
   renderOpenPoseMp4,
   sampleImpactWindowFrameIndices,
+  userLandmarksForFrames,
   type PoseYoloRow,
 } from './openPoseVideo'
 import { generateCorrectedImageComfy, isComfyCorrectionConfigured } from './comfyCorrection'
-import { generateCorrectedVideoComfy, generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured, comfyBaseHost } from './comfyVideo'
+import { readImageDimensions } from './poseMask'
+import { generateCorrectedVideoComfy, generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured, comfyBaseHost, type CoachingVideoContext } from './comfyVideo'
 import {
   generateCorrectedVideoGemini,
   isGeminiVideoConfigured,
@@ -94,6 +102,7 @@ import {
 import {
   retrieveForTechniqueMetrics,
   formatRetrievalForPrompt,
+  getTrainSampleImpactMeta,
   getTrainSamplePoseSequence,
   pickAlignedProPoseFrame,
   proReferenceFrameCandidates,
@@ -3382,6 +3391,84 @@ router.post('/correction-images', async (req, res) => {
   }
 })
 
+/**
+ * Coaching text for the Fun Control prompt, assembled from analysis data already on the
+ * record: coach narrative, pro-gap joint targets at contact, you-vs-pro joint angles, and
+ * swing timing. No extra LLM call, so it adds no latency to video generation.
+ */
+function buildCorrectionVideoCoachingContext(opts: {
+  metrics: any
+  userFrameIndices: number[]
+  userLandmarkFrames: Array<Record<string, { x: number; y: number } | undefined>>
+  proLandmarkFrames: Array<Record<string, { x: number; y: number } | undefined>>
+  userImpactFrame: number
+  handedness: string
+}): CoachingVideoContext {
+  const enAnalysis = opts.metrics?.ai_analysis?.en ?? opts.metrics?.ai_analysis
+  const diagnosis =
+    typeof enAnalysis?.diagnosis === 'string' ? enAnalysis.diagnosis.trim() : ''
+  const recommendations: string[] = Array.isArray(enAnalysis?.actionable_corrections)
+    ? enAnalysis.actionable_corrections
+    : Array.isArray(enAnalysis?.recommendations)
+      ? enAnalysis.recommendations
+      : []
+
+  // Index of the sampled window frame closest to contact — the instant the coaching targets describe.
+  let impactIdx = 0
+  let bestD = Number.POSITIVE_INFINITY
+  opts.userFrameIndices.forEach((frame, i) => {
+    const d = Math.abs(frame - opts.userImpactFrame)
+    if (d < bestD) {
+      bestD = d
+      impactIdx = i
+    }
+  })
+
+  const userLm = opts.userLandmarkFrames[impactIdx] as FrameLandmarks | undefined
+  const proLm = opts.proLandmarkFrames[impactIdx] as FrameLandmarks | undefined
+
+  let jointMoves: string[] = []
+  let angleTargets: string[] = []
+  if (userLm && proLm && Object.keys(userLm).length && Object.keys(proLm).length) {
+    const deltas = proGapToLandmarkDeltas(userLm, proLm, 8)
+    jointMoves = deltas
+      .slice(0, 5)
+      .map((d) => formatTopPriorityMove(d, userLm, proLm))
+      .filter((s) => typeof s === 'string' && s.trim().length > 0)
+
+    const side: 'LEFT' | 'RIGHT' = opts.handedness.toLowerCase().includes('left')
+      ? 'LEFT'
+      : 'RIGHT'
+    const you = computeSideMobilityAngles(userLm, side)
+    const ideal = computeSideMobilityAngles(proLm, side)
+    const readings = buildSideReadings(you, ideal)
+    angleTargets = (['shoulder', 'wrist', 'knee'] as const)
+      .map((key) => {
+        const r = readings[key]
+        if (r?.you == null || r?.ideal == null) return null
+        return `${key} ${Math.round(r.you)} -> ${Math.round(r.ideal)}`
+      })
+      .filter((s): s is string => Boolean(s))
+  }
+
+  const timingRaw = opts.metrics?.biomechanics_summary?.timing
+  const timing =
+    timingRaw && typeof timingRaw === 'object'
+      ? {
+          prepToImpactMs:
+            typeof timingRaw.prep_to_impact_ms === 'number'
+              ? timingRaw.prep_to_impact_ms
+              : null,
+          impactToFollowMs:
+            typeof timingRaw.impact_to_follow_ms === 'number'
+              ? timingRaw.impact_to_follow_ms
+              : null,
+        }
+      : null
+
+  return { diagnosis, recommendations, jointMoves, angleTargets, timing }
+}
+
 router.post('/correction-videos', async (req, res) => {
   const routeT0 = Date.now()
   let analysisIdForLog: string | undefined
@@ -3594,17 +3681,37 @@ router.post('/correction-videos', async (req, res) => {
       })
       pipeline = 'veo-i2v'
     } else if (wantFun && proPoseSequence?.length) {
+      const userImpactFrame = impactFrameResolved ?? frameRow.frame
       const userFrameIndices = sampleImpactWindowFrameIndices({
-        impactFrame: impactFrameResolved ?? frameRow.frame,
+        impactFrame: userImpactFrame,
         totalFrames,
         videoDurationMs,
         count: FUN_CONTROL_LENGTH,
       })
-      const proLandmarks = alignedProLandmarksForUserFrames(
-        userFrameIndices,
-        totalFrames,
-        proPoseSequence
-      )
+      const userFps =
+        videoDurationMs != null ? estimateFps(totalFrames, videoDurationMs) : 30
+
+      // Contact-to-contact alignment when the pro clip has a resolved impact frame; the pro
+      // clip's fps is not stored, so assume the same capture rate as the user's clip.
+      const proImpactMeta = topNeighbor?.train_sample_id
+        ? await getTrainSampleImpactMeta(topNeighbor.train_sample_id)
+        : null
+      const proImpactFrame = proImpactMeta?.impactFrame ?? null
+      const proLandmarks =
+        proImpactFrame != null
+          ? alignedProLandmarksByImpact({
+              userFrameIndices,
+              userImpactFrame,
+              userFps,
+              proSeq: proPoseSequence,
+              proImpactFrame,
+              proFps: userFps,
+            })
+          : alignedProLandmarksForUserFrames(
+              userFrameIndices,
+              totalFrames,
+              proPoseSequence
+            )
       if (!proLandmarks.length) {
         console.warn('[Technique][correction-videos] pro landmarks empty', {
           analysisId,
@@ -3622,25 +3729,94 @@ router.post('/correction-videos', async (req, res) => {
       const windowRows = yoloSource.filter(
         (r) => typeof r.frame === 'number' && r.frame >= windowLo && r.frame <= windowHi
       )
+
+      // Control clip matches the user's framing so the skeleton stays in their camera space.
+      let canvas = controlCanvasSize(null, null)
+      try {
+        const dims = await readImageDimensions(frameBuffer)
+        canvas = controlCanvasSize(dims.width, dims.height)
+      } catch (err) {
+        console.warn('[Technique][correction-videos] start frame dimensions failed', {
+          analysisId,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+
+      const userLandmarkFrames = userLandmarksForFrames(
+        userFrameIndices,
+        Array.isArray(metrics.pose_data)
+          ? (metrics.pose_data as Array<{ frame?: number; landmarks?: unknown }>)
+          : []
+      )
+      // Both sides must be measured the same way. MediaPipe's LEFT_/RIGHT_ naming does not
+      // reliably track real-world handedness, so mixing the user's profile handedness into this
+      // comparison flips the pro pose on a naming mismatch rather than a genuine side mismatch.
+      const canvasAspect = canvas.width / canvas.height
+      const proSide = inferSwingSideFromLandmarks(proLandmarks, canvasAspect)
+      const userSide = inferSwingSideFromLandmarks(userLandmarkFrames, canvasAspect)
+      const mirrorPro = Boolean(proSide && userSide && proSide !== userSide)
+
+      const poseBlend = correctionPoseBlend()
+      const controlLandmarks = coachedControlLandmarkFrames({
+        userFrames: userLandmarkFrames,
+        proFrames: proLandmarks,
+        aspect: canvasAspect,
+        mirror: mirrorPro,
+        blend: poseBlend,
+      })
+      const landmarkFrames = controlLandmarks.length ? controlLandmarks : proLandmarks
+
       const overlays = controlOverlaysForWindow({
         userFrameIndices,
         poseRows: windowRows.length ? windowRows : yoloSource,
-        proLandmarks,
+        controlLandmarks: landmarkFrames,
         handedness,
+        width: canvas.width,
+        height: canvas.height,
       })
       poseVideoBuffer = await renderOpenPoseMp4({
-        landmarkFrames: proLandmarks,
+        landmarkFrames,
         overlays,
+        width: canvas.width,
+        height: canvas.height,
       })
       console.log('[Technique][correction-videos] branch=fun-control', {
         analysisId,
         proFrames: proPoseSequence.length,
-        controlFrames: proLandmarks.length,
+        controlFrames: landmarkFrames.length,
         overlayRackets: overlays.filter((o) => o.racket).length,
         overlayBalls: overlays.filter((o) => o.ball).length,
         trainSampleId: topNeighbor?.train_sample_id,
+        proImpactFrame,
+        alignment: proImpactFrame != null ? 'impact' : 'relative-timeline',
+        userImpactFrame,
+        userFps: Math.round(userFps),
+        poseBlend,
+        proSide,
+        userSide,
+        mirrorPro,
+        // Logged for visibility only; deliberately not an input to mirrorPro.
+        profileHandedness: handedness,
+        canvas: `${canvas.width}x${canvas.height}`,
         comfyHost: comfyBaseHost(),
       })
+      const coaching = buildCorrectionVideoCoachingContext({
+        metrics,
+        userFrameIndices,
+        userLandmarkFrames,
+        proLandmarkFrames: proLandmarks,
+        userImpactFrame,
+        handedness,
+      })
+      console.log('[Technique][correction-videos] coaching context', {
+        analysisId,
+        hasDiagnosis: Boolean(coaching.diagnosis),
+        jointMoves: coaching.jointMoves?.length ?? 0,
+        recommendations: coaching.recommendations?.length ?? 0,
+        angleTargets: coaching.angleTargets?.length ?? 0,
+        hasTiming: Boolean(coaching.timing),
+      })
+
       videoBuffer = await generatePoseRetargetVideoComfy({
         analysisId,
         frameNumber: frameRow.frame,
@@ -3648,6 +3824,9 @@ router.post('/correction-videos', async (req, res) => {
         poseVideoBuffer,
         shotName,
         handedness,
+        width: canvas.width,
+        height: canvas.height,
+        coaching,
       })
       pipeline = 'fun-control'
     } else if (wantFun && !proPoseSequence?.length && !ti2vConfigured) {

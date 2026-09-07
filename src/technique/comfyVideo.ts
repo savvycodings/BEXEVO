@@ -214,6 +214,121 @@ export function buildWanFunControlPrompt(shotName: string, handedness: string): 
   );
 }
 
+export type CoachingVideoContext = {
+  /** Coach diagnosis for this clip (locale-picked upstream). */
+  diagnosis?: string | null;
+  recommendations?: string[];
+  /** Formatted `JOINT: current (x,y) -> target (x,y)` lines, highest priority first. */
+  jointMoves?: string[];
+  timing?: {
+    prepToImpactMs?: number | null;
+    impactToFollowMs?: number | null;
+  } | null;
+  /** You-vs-pro joint angles in degrees, e.g. `shoulder 96 -> 118`. */
+  angleTargets?: string[];
+};
+
+function trimList(items: string[] | undefined, max: number): string[] {
+  return (items ?? [])
+    .map((s) => String(s ?? "").trim())
+    .filter((s) => s.length > 0)
+    .slice(0, max);
+}
+
+function timingIntentLines(timing: CoachingVideoContext["timing"]): string[] {
+  if (!timing) return [];
+  const out: string[] = [];
+  const prep = timing.prepToImpactMs;
+  const follow = timing.impactToFollowMs;
+  if (typeof prep === "number" && Number.isFinite(prep) && prep > 0) {
+    out.push(
+      `Preparation to contact took about ${Math.round(prep)} ms — begin the upward drive and racket lift earlier so the body is loaded before contact.`
+    );
+  }
+  if (typeof follow === "number" && Number.isFinite(follow) && follow > 0) {
+    out.push(
+      `Contact to follow-through took about ${Math.round(follow)} ms — carry the racket arm further through the finish instead of stopping at the ball.`
+    );
+  }
+  return out;
+}
+
+/**
+ * Fun Control prompt carrying the coaching intent (diagnosis, joint targets, timing) rather than
+ * only shot + handedness. The pose skeleton says where limbs go; this says what is being fixed and why,
+ * so the model shapes a correction instead of tracing points.
+ */
+export function buildWanFunControlCoachingPrompt(
+  shotName: string,
+  handedness: string,
+  ctx: CoachingVideoContext
+): string {
+  const shot = shotName.trim() || "padel shot";
+  const hand =
+    handedness.trim() && handedness !== "unknown" ? handedness.trim() : "right-handed";
+
+  const moves = trimList(ctx.jointMoves, 5);
+  const recs = trimList(ctx.recommendations, 3);
+  const angles = trimList(ctx.angleTargets, 4);
+  const timing = timingIntentLines(ctx.timing);
+  const diagnosis = String(ctx.diagnosis ?? "").trim();
+
+  const sections: string[] = [
+    `Photorealistic professional padel tennis action. The exact same player from the reference frame, with identical face, body proportions, hairstyle, clothing, shoes, accessories, court environment, lighting, shadows, and camera perspective. ` +
+      `The player is ${hand} and performs a realistic ${shot}, following the provided pose skeleton as a coaching guide for limb placement. ` +
+      `Natural biomechanics, correct body rotation, believable weight transfer, realistic arm and wrist position, and anatomically correct hands.`,
+  ];
+
+  sections.push(
+    `COACHING INTENT — this clip demonstrates the corrected version of this player's own swing. Keep the athlete, court, and camera identical; change only how the body moves.`
+  );
+
+  if (diagnosis) {
+    sections.push(`WHAT WENT WRONG: ${diagnosis}`);
+  }
+  if (moves.length) {
+    sections.push(
+      `PRIORITY BODY CHANGES (normalized frame coords, current -> target):\n${moves
+        .map((m, i) => `${i + 1}. ${m}`)
+        .join("\n")}`
+    );
+  }
+  if (angles.length) {
+    sections.push(`JOINT ANGLE TARGETS (degrees, you -> pro): ${angles.join("; ")}`);
+  }
+  if (timing.length) {
+    sections.push(`MOTION TIMING:\n${timing.join("\n")}`);
+  }
+  if (recs.length) {
+    sections.push(
+      `COACH CUES TO EXPRESS IN THE MOVEMENT:\n${recs.map((r, i) => `${i + 1}. ${r}`).join("\n")}`
+    );
+  }
+
+  sections.push(
+    `Camera remains completely locked: no camera movement, zoom, reframing, perspective change, or lens change. ` +
+      `The player holds exactly one normal-sized professional padel racket with realistic proportions. ` +
+      `Ball continuity — critical. There is exactly ONE padel ball in the entire scene at all times. It must be the same physical ball visible in the reference frame. Preserve its identity and visual continuity throughout the motion. ` +
+      `The player must make realistic racket contact with that exact same ball during the ${shot}. The ball may naturally change position according to the action, but never duplicate, replace, regenerate, or introduce another ball. ` +
+      `At no point may two balls appear simultaneously, including during motion blur, racket contact, or immediately before/after impact. ` +
+      `Maintain strict temporal consistency and photorealism throughout.`
+  );
+
+  return sections.join("\n\n");
+}
+
+/** True when there is enough analysis text to justify the coaching prompt over the generic one. */
+export function hasCoachingVideoContext(ctx?: CoachingVideoContext | null): boolean {
+  if (!ctx) return false;
+  return Boolean(
+    String(ctx.diagnosis ?? "").trim() ||
+      trimList(ctx.jointMoves, 1).length ||
+      trimList(ctx.recommendations, 1).length ||
+      trimList(ctx.angleTargets, 1).length ||
+      timingIntentLines(ctx.timing).length
+  );
+}
+
 export function buildWanFunControlNegativePrompt(): string {
   return (
     "extra ball, extra balls, multiple balls, two balls, second ball, duplicate ball, duplicated ball, cloned ball, newly generated ball, replacement ball, ghost ball, floating ball, ball artifact, ball trail resembling another ball, motion blur creating duplicate balls, multiple ball positions visible simultaneously, ball appearing from nowhere, inconsistent ball identity, disappearing and reappearing ball, " +
@@ -235,6 +350,11 @@ export async function generatePoseRetargetVideoComfy(opts: {
   shotName: string;
   handedness: string;
   length?: number;
+  /** Control-clip canvas; defaults to the legacy 768 square when omitted. */
+  width?: number;
+  height?: number;
+  /** Coaching text; falls back to the generic shot prompt when empty. */
+  coaching?: CoachingVideoContext | null;
 }): Promise<Buffer> {
   if (!isComfyFunControlConfigured()) {
     throw new Error("COMFYUI_BASE_URL and COMFYUI_FUN_CONTROL_WORKFLOW_PATH are required");
@@ -263,8 +383,10 @@ export async function generatePoseRetargetVideoComfy(opts: {
   if (!control?.inputs) {
     throw new Error("Fun Control workflow missing Wan22FunControlToVideo node 160");
   }
-  control.inputs.width = FUN_CONTROL_SIZE;
-  control.inputs.height = FUN_CONTROL_SIZE;
+  const outWidth = opts.width && opts.width > 0 ? opts.width : FUN_CONTROL_SIZE;
+  const outHeight = opts.height && opts.height > 0 ? opts.height : FUN_CONTROL_SIZE;
+  control.inputs.width = outWidth;
+  control.inputs.height = outHeight;
   control.inputs.length = length;
 
   const save = workflow[FUN_SAVE_VIDEO_NODE_ID];
@@ -275,7 +397,14 @@ export async function generatePoseRetargetVideoComfy(opts: {
   if (!positive?.inputs) {
     throw new Error("Fun Control workflow missing CLIPTextEncode node 99");
   }
-  positive.inputs.text = buildWanFunControlPrompt(opts.shotName, opts.handedness);
+  const useCoachingPrompt = hasCoachingVideoContext(opts.coaching);
+  positive.inputs.text = useCoachingPrompt
+    ? buildWanFunControlCoachingPrompt(
+        opts.shotName,
+        opts.handedness,
+        opts.coaching as CoachingVideoContext
+      )
+    : buildWanFunControlPrompt(opts.shotName, opts.handedness);
   const negative = workflow[FUN_NEGATIVE_NODE_ID];
   if (negative?.inputs) {
     negative.inputs.text = buildWanFunControlNegativePrompt();
@@ -338,7 +467,8 @@ export async function generatePoseRetargetVideoComfy(opts: {
       startImage: imageName,
       poseVideo: videoName,
       length,
-      size: FUN_CONTROL_SIZE,
+      size: `${outWidth}x${outHeight}`,
+      prompt: useCoachingPrompt ? "coaching" : "generic",
       timeoutMs,
     });
 

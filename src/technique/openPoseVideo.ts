@@ -4,7 +4,10 @@ import os from "os";
 import path from "path";
 import ffmpegStatic from "ffmpeg-static";
 import { estimateFps } from "./impactPoseContext";
-import { pickAlignedProPoseFrame } from "./trainRetrieval";
+import {
+  pickAlignedProPoseFrame,
+  pickImpactAlignedProPoseFrame,
+} from "./proTimeAlign";
 import type { TrainPoseFrame } from "../db/schema";
 
 export type NamedLandmark = {
@@ -17,6 +20,11 @@ export type NamedLandmark = {
 export type NamedLandmarks = Record<string, NamedLandmark | undefined>;
 
 const VISIBILITY_MIN = 0.25;
+/**
+ * Minimum relative wrist-reach gap to call a swing side. Below this the arms are effectively
+ * level, and mirroring on a coin flip is worse than not mirroring at all.
+ */
+const SWING_SIDE_MIN_MARGIN = 0.04;
 const DEFAULT_SIZE = 768;
 const DEFAULT_FPS = 16;
 const DEFAULT_LENGTH = 17;
@@ -212,11 +220,15 @@ function racketElbowName(handedness: string): "LEFT_ELBOW" | "RIGHT_ELBOW" {
   return racketWristName(handedness) === "LEFT_WRIST" ? "LEFT_ELBOW" : "RIGHT_ELBOW";
 }
 
-/** Median YOLO racket size in the window; ball boxes per sampled frame with lerp. */
+/**
+ * Median YOLO racket size in the window; ball boxes per sampled frame with lerp.
+ * `controlLandmarks` must be the same poses drawn into the control clip (blended, retargeted)
+ * so the racket sits on the wrist that is actually rendered.
+ */
 export function controlOverlaysForWindow(opts: {
   userFrameIndices: number[];
   poseRows: PoseYoloRow[];
-  proLandmarks: NamedLandmarks[];
+  controlLandmarks: NamedLandmarks[];
   handedness: string;
   width?: number;
   height?: number;
@@ -265,7 +277,7 @@ export function controlOverlaysForWindow(opts: {
     ];
   };
 
-  return opts.proLandmarks.map((lm, i) => {
+  return opts.controlLandmarks.map((lm, i) => {
     const overlay: ControlOverlay = {};
     if (rw != null && rh != null) {
       const wrist = lm[wristKey];
@@ -392,25 +404,283 @@ export function sampleImpactWindowFrameIndices(opts: {
   return out;
 }
 
+/**
+ * One landmark set per requested frame, gaps filled from the nearest neighbour in time.
+ * The returned array must stay index-aligned with `userFrameIndices`, because downstream
+ * blending and overlay placement pair the two arrays position by position.
+ */
+function denseLandmarkFrames(
+  picked: Array<TrainPoseFrame | null>
+): NamedLandmarks[] {
+  const raw: Array<NamedLandmarks | null> = picked.map((pro) => {
+    const lm = pro?.landmarks;
+    if (!lm || typeof lm !== "object" || !Object.keys(lm).length) return null;
+    return lm as NamedLandmarks;
+  });
+  if (raw.every((lm) => lm === null)) return [];
+
+  const out: NamedLandmarks[] = new Array(raw.length);
+  let last: NamedLandmarks | null = null;
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i]) last = raw[i]!;
+    if (last) out[i] = last;
+  }
+  // Leading gap: borrow the first frame that did resolve.
+  let next: NamedLandmarks | null = null;
+  for (let i = raw.length - 1; i >= 0; i--) {
+    if (out[i]) next = out[i]!;
+    else if (next) out[i] = next;
+  }
+  return out;
+}
+
 export function alignedProLandmarksForUserFrames(
   userFrameIndices: number[],
   videoTotalFrames: number,
   proSeq: TrainPoseFrame[]
 ): NamedLandmarks[] {
+  return denseLandmarkFrames(
+    userFrameIndices.map((idx) =>
+      pickAlignedProPoseFrame(idx, videoTotalFrames, proSeq)
+    )
+  );
+}
+
+/**
+ * Contact-to-contact pro alignment: each user frame maps to the pro frame at the same
+ * time offset from impact. Falls back to relative-timeline alignment upstream when the
+ * pro clip has no resolved impact frame.
+ */
+export function alignedProLandmarksByImpact(opts: {
+  userFrameIndices: number[];
+  userImpactFrame: number;
+  userFps: number;
+  proSeq: TrainPoseFrame[];
+  proImpactFrame: number;
+  proFps: number;
+}): NamedLandmarks[] {
+  return denseLandmarkFrames(
+    opts.userFrameIndices.map((idx) =>
+      pickImpactAlignedProPoseFrame({
+        userVideoFrameIndex: idx,
+        userImpactFrame: opts.userImpactFrame,
+        userFps: opts.userFps,
+        proSeq: opts.proSeq,
+        proImpactFrame: opts.proImpactFrame,
+        proFps: opts.proFps,
+      })
+    )
+  );
+}
+
+/** User landmarks for the sampled window frames, carrying forward the last good row. */
+export function userLandmarksForFrames(
+  userFrameIndices: number[],
+  poseRows: Array<{ frame?: number; landmarks?: unknown }>
+): NamedLandmarks[] {
+  const rows = poseRows.filter(
+    (r) => typeof r.frame === "number" && r.landmarks && typeof r.landmarks === "object"
+  ) as Array<{ frame: number; landmarks: NamedLandmarks }>;
   const frames: NamedLandmarks[] = [];
   let last: NamedLandmarks | null = null;
   for (const idx of userFrameIndices) {
-    const pro = pickAlignedProPoseFrame(idx, videoTotalFrames, proSeq);
-    const lm: NamedLandmarks | null =
-      pro?.landmarks && typeof pro.landmarks === "object"
-        ? (pro.landmarks as NamedLandmarks)
-        : last;
-    if (lm) {
-      frames.push(lm);
-      last = lm;
+    let best: NamedLandmarks | null = null;
+    let bestD = Number.POSITIVE_INFINITY;
+    for (const row of rows) {
+      const d = Math.abs(row.frame - idx);
+      if (d < bestD) {
+        bestD = d;
+        best = row.landmarks;
+      }
     }
+    const lm: NamedLandmarks | null = best ?? last;
+    frames.push(lm ?? {});
+    if (lm) last = lm;
   }
   return frames;
+}
+
+function midpoint(
+  a: NamedLandmark | undefined,
+  b: NamedLandmark | undefined
+): { x: number; y: number } | null {
+  if (isVisible(a) && isVisible(b)) return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  if (isVisible(a)) return { x: a.x, y: a.y };
+  if (isVisible(b)) return { x: b.x, y: b.y };
+  return null;
+}
+
+type BodyFrame = {
+  hip: { x: number; y: number };
+  torso: number;
+};
+
+/** Hip origin + torso length (aspect-corrected) used as the similarity-transform basis. */
+function bodyFrameOf(lm: NamedLandmarks, aspect: number): BodyFrame | null {
+  const hip = midpoint(lm.LEFT_HIP, lm.RIGHT_HIP);
+  const shoulder = midpoint(lm.LEFT_SHOULDER, lm.RIGHT_SHOULDER);
+  if (!hip || !shoulder) return null;
+  const dx = (shoulder.x - hip.x) * aspect;
+  const dy = shoulder.y - hip.y;
+  const torso = Math.hypot(dx, dy);
+  if (!Number.isFinite(torso) || torso < 1e-4) return null;
+  return { hip, torso };
+}
+
+/**
+ * Put the pro skeleton in the user's camera frame: hip midpoints coincide, pro limb lengths
+ * scale to the user's torso, and the pose mirrors when handedness disagrees. Without this the
+ * control clip carries the pro's position, body size, and viewpoint.
+ */
+export function retargetProToUser(
+  proLm: NamedLandmarks,
+  userLm: NamedLandmarks,
+  opts?: { aspect?: number; mirror?: boolean }
+): NamedLandmarks {
+  const aspect = opts?.aspect && opts.aspect > 0 ? opts.aspect : 1;
+  const proFrame = bodyFrameOf(proLm, aspect);
+  const userFrame = bodyFrameOf(userLm, aspect);
+  if (!proFrame || !userFrame) return proLm;
+
+  const scale = userFrame.torso / proFrame.torso;
+  const sx = opts?.mirror ? -scale : scale;
+  const out: NamedLandmarks = {};
+  for (const [name, lm] of Object.entries(proLm)) {
+    if (!lm || typeof lm.x !== "number" || typeof lm.y !== "number") continue;
+    out[name] = {
+      ...lm,
+      x: userFrame.hip.x + (lm.x - proFrame.hip.x) * sx,
+      y: userFrame.hip.y + (lm.y - proFrame.hip.y) * scale,
+    };
+  }
+  return out;
+}
+
+/**
+ * Which landmark arm swings, from wrist reach across the window. Pro clips carry no handedness
+ * metadata (only landmarks), so the mirror decision has to come out of the pose itself. Summing
+ * reach over the window rather than reading one frame keeps it stable through occlusion.
+ *
+ * Only ever compare this against another call of the same function. It reports a side in
+ * MediaPipe's LEFT_/RIGHT_ naming, which is not reliably the athlete's real-world handedness;
+ * what makes the mirror decision sound is that both sequences are measured the same way.
+ * Returns null when the two arms are too close to call, so callers can decline to mirror.
+ */
+export function inferSwingSideFromLandmarks(
+  frames: NamedLandmarks[],
+  aspect = 1,
+  minMargin = SWING_SIDE_MIN_MARGIN
+): "LEFT" | "RIGHT" | null {
+  let left = 0;
+  let right = 0;
+  for (const lm of frames) {
+    const hip = midpoint(lm.LEFT_HIP, lm.RIGHT_HIP);
+    if (!hip) continue;
+    const reach = (w: NamedLandmark | undefined): number | null => {
+      if (!isVisible(w)) return null;
+      return Math.hypot((w.x - hip.x) * aspect, w.y - hip.y);
+    };
+    const l = reach(lm.LEFT_WRIST);
+    const r = reach(lm.RIGHT_WRIST);
+    if (l != null) left += l;
+    if (r != null) right += r;
+  }
+  if (left <= 0 && right <= 0) return null;
+  const margin = Math.abs(left - right) / Math.max(left, right);
+  if (margin < minMargin) return null;
+  return right > left ? "RIGHT" : "LEFT";
+}
+
+/** Interpolate the user's pose toward the retargeted pro pose (0 = user, 1 = full pro). */
+export function blendLandmarks(
+  userLm: NamedLandmarks,
+  proLm: NamedLandmarks,
+  alpha: number
+): NamedLandmarks {
+  const a = Math.max(0, Math.min(1, alpha));
+  const names = new Set([...Object.keys(userLm), ...Object.keys(proLm)]);
+  const out: NamedLandmarks = {};
+  for (const name of names) {
+    const u = userLm[name];
+    const p = proLm[name];
+    if (isVisible(u) && isVisible(p)) {
+      out[name] = {
+        x: u.x + (p.x - u.x) * a,
+        y: u.y + (p.y - u.y) * a,
+        z: typeof p.z === "number" ? p.z : u.z,
+        visibility: Math.min(
+          typeof u.visibility === "number" ? u.visibility : 1,
+          typeof p.visibility === "number" ? p.visibility : 1
+        ),
+      };
+    } else if (isVisible(p)) {
+      out[name] = p;
+    } else if (isVisible(u)) {
+      out[name] = u;
+    }
+  }
+  return out;
+}
+
+/**
+ * Blend fraction toward the pro pose; 1 reproduces the old full-puppeteering behaviour.
+ *
+ * 0.4 measured best on a swept clip: it moves joints about 5% of the frame height, which reads
+ * as a correction, while frame-to-frame wrist travel stays near the athlete's own motion
+ * (peak/mean 3.4 against their natural 2.9). Higher values reimport the pro's sampling jerk
+ * faster than they add useful correction: 0.65 buys 47% more movement for a peak/mean of 5.1.
+ */
+export function correctionPoseBlend(): number {
+  const n = Number(process.env.CORRECTION_POSE_BLEND);
+  if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
+  return 0.4;
+}
+
+/**
+ * Per-frame control poses: retarget the pro into the user's frame, then blend the user
+ * toward it so the clip reads as a correction of this athlete rather than a pose swap.
+ */
+export function coachedControlLandmarkFrames(opts: {
+  userFrames: NamedLandmarks[];
+  proFrames: NamedLandmarks[];
+  aspect?: number;
+  mirror?: boolean;
+  blend?: number;
+}): NamedLandmarks[] {
+  const blend = opts.blend ?? correctionPoseBlend();
+  const count = Math.min(opts.userFrames.length, opts.proFrames.length);
+  const out: NamedLandmarks[] = [];
+  for (let i = 0; i < count; i++) {
+    const userLm = opts.userFrames[i] ?? {};
+    const proLm = opts.proFrames[i] ?? {};
+    if (!Object.keys(userLm).length) {
+      out.push(proLm);
+      continue;
+    }
+    const retargeted = retargetProToUser(proLm, userLm, {
+      aspect: opts.aspect,
+      mirror: opts.mirror,
+    });
+    out.push(blendLandmarks(userLm, retargeted, blend));
+  }
+  return out;
+}
+
+/**
+ * Control-clip canvas matching the user's footage aspect, longest side capped at 768 and
+ * both sides on a multiple of 16 for the WAN latent grid.
+ */
+export function controlCanvasSize(
+  videoWidth?: number | null,
+  videoHeight?: number | null
+): { width: number; height: number } {
+  const w = typeof videoWidth === "number" && videoWidth > 0 ? videoWidth : 0;
+  const h = typeof videoHeight === "number" && videoHeight > 0 ? videoHeight : 0;
+  if (!w || !h) return { width: DEFAULT_SIZE, height: DEFAULT_SIZE };
+
+  const round16 = (n: number) => Math.max(256, Math.round(n / 16) * 16);
+  const scale = DEFAULT_SIZE / Math.max(w, h);
+  return { width: round16(w * scale), height: round16(h * scale) };
 }
 
 export async function renderOpenPoseMp4(opts: {

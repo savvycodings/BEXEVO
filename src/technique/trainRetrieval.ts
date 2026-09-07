@@ -1,6 +1,13 @@
 import { randomUUID } from "crypto";
 import { pool, db } from "../db";
 import type { TechniqueRetrievalResult, TrainPoseFrame } from "../db/schema";
+// Re-exported so existing callers keep importing pro alignment from here; the implementations
+// live in a DB-free module so the control-clip geometry is unit testable.
+export {
+  pickAlignedProPoseFrame,
+  pickImpactAlignedProPoseFrame,
+} from "./proTimeAlign";
+import { pickAlignedProPoseFrame } from "./proTimeAlign";
 import {
   embedTrainPoseFrames,
   embedPoseQueryFrames,
@@ -695,33 +702,49 @@ export async function getTrainSamplePoseSequence(
   return seq as TrainPoseFrame[];
 }
 
-/**
- * Map user video frame index to a pro-library frame by relative position in the clip.
- * Embedding matched the whole pro sequence; this picks a comparable instant for landmark targets.
- * Uses frame_idx when present (train_modal_app) so array order matches video timeline.
- */
-export function pickAlignedProPoseFrame(
-  userVideoFrameIndex: number,
-  videoTotalFrames: number,
-  proSeq: TrainPoseFrame[]
-): TrainPoseFrame | null {
-  if (!proSeq.length) return null;
-  const sorted = [...proSeq].sort((a, b) => a.frame_idx - b.frame_idx);
-  const tf = Math.max(1, videoTotalFrames);
-  const t = Math.max(0, Math.min(1, userVideoFrameIndex / Math.max(1, tf - 1)));
-  const proMaxIdx = sorted[sorted.length - 1]?.frame_idx ?? sorted.length - 1;
-  const targetProIdx = Math.round(t * Math.max(0, proMaxIdx));
+export type TrainSampleImpactMeta = {
+  /** Pro contact frame from train_modal_app (YOLO ball-racket median), null when not resolved. */
+  impactFrame: number | null;
+  /** Source video frame count, for pro fps estimation. */
+  totalFrames: number | null;
+  frameCount: number | null;
+};
 
-  let best = sorted[0]!;
-  let bestD = Math.abs(best.frame_idx - targetProIdx);
-  for (const row of sorted) {
-    const d = Math.abs(row.frame_idx - targetProIdx);
-    if (d < bestD) {
-      bestD = d;
-      best = row;
-    }
-  }
-  return best;
+/**
+ * Pro-clip impact frame + length, so a control clip can be aligned contact-to-contact
+ * instead of by relative position in the clip.
+ */
+export async function getTrainSampleImpactMeta(
+  trainSampleId: string
+): Promise<TrainSampleImpactMeta | null> {
+  const row = await db.query.trainSample.findFirst({
+    where: (ts, { eq }) => eq(ts.id, trainSampleId),
+    columns: {
+      status: true,
+      extractionMeta: true,
+      totalFrames: true,
+      frameCount: true,
+    },
+  });
+  if (!row || row.status !== "completed") return null;
+  const raw = (row.extractionMeta as Record<string, unknown> | null)?.[
+    "impact_frame_resolved"
+  ];
+  const impactFrame =
+    typeof raw === "number" && Number.isFinite(raw) && raw >= 0
+      ? Math.round(raw)
+      : null;
+  return {
+    impactFrame,
+    totalFrames:
+      typeof row.totalFrames === "number" && row.totalFrames > 0
+        ? row.totalFrames
+        : null,
+    frameCount:
+      typeof row.frameCount === "number" && row.frameCount > 0
+        ? row.frameCount
+        : null,
+  };
 }
 
 /** Frame indices to try when extracting a pro-library still (pose frame_idx may exceed video length). */
