@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { E2EClient } from "./http";
 
 // Fixed test account so repeat runs re-use the same user instead of accumulating throwaway
@@ -36,5 +37,38 @@ export async function signInE2EUser(): Promise<E2EClient> {
     const body = await retrySignIn.text().catch(() => "");
     throw new Error(`E2E test user sign-in failed after sign-up (${retrySignIn.status}): ${body}`);
   }
+  return client;
+}
+
+/**
+ * Creates and signs in a brand-new, uniquely-emailed e2e user, unlike signInE2EUser's fixed,
+ * reused account. Achievement/streak state is permanent per user, so a suite that wants to
+ * observe achievements move locked -> claimable -> claimed from a clean slate needs a fresh
+ * account every run rather than one that accumulates state across runs.
+ */
+export async function signUpFreshE2EUser(label: string): Promise<E2EClient> {
+  const client = new E2EClient();
+  const suffix = randomUUID().slice(0, 8);
+  const email = `e2e-${label}-${suffix}@xevo.test`;
+  const password = "E2E-test-password-1!";
+
+  const signUp = await client.postJson("/api/auth/sign-up/email", {
+    email,
+    password,
+    name: `E2E ${label} ${suffix}`,
+  });
+  if (!signUp.ok) {
+    const body = await signUp.text().catch(() => "");
+    throw new Error(`Fresh e2e user sign-up failed for ${email} (${signUp.status}): ${body}`);
+  }
+
+  const signIn = await client.postJson("/api/auth/sign-in/email", { email, password });
+  if (!signIn.ok) {
+    const body = await signIn.text().catch(() => "");
+    throw new Error(
+      `Fresh e2e user sign-in failed after sign-up for ${email} (${signIn.status}): ${body}`
+    );
+  }
+
   return client;
 }

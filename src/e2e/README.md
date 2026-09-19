@@ -1,8 +1,19 @@
 # Backend E2E tests
 
-Real HTTP requests against a real running BEXevo server, walking the actual technique-analysis
-flow: sign in → upload a video → analyze → read the analysis → confirm it shows up in
-`/activities` → (optional) generate Comfy correction images.
+Real HTTP requests against a real running BEXevo server.
+
+- `technique.flow.e2e.ts` — sign in → upload a video → analyze → read the analysis → confirm it
+  shows up in `/activities` → (optional) generate Comfy correction images.
+- `achievements.flow.e2e.ts` — every achievement in `gamification/definitions.ts`'
+  `ACHIEVEMENT_KEYS`, seeded progressively from a clean two-account slate (a throwaway student +
+  coach) and driven through the real `/gamification/state` and `/gamification/achievements/:key/claim`
+  endpoints: locked → claimable → claimed, for all 22 keys, finishing with an audit that nothing
+  was missed. It seeds the underlying DB rows directly (technique videos/analyses, coach reviews,
+  friend links, login streak) rather than driving the real AI pipeline or 30 real days of
+  logins — see the file's header comment for why, and `lib/achievementSeed.ts` for what each
+  helper seeds. `gamification/achievementCatalogParity.test.ts` (a plain unit test, run by
+  `pnpm test`, not part of this suite) separately guards that the server's key list and the
+  FEXevo client catalog haven't drifted apart.
 
 This is separate from the existing unit tests (`src/**/*.test.ts`, run by `pnpm test`) — those
 test pure functions in isolation; this exercises the real routes, real DB, and (mostly) real

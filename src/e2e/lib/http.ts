@@ -34,6 +34,9 @@ export class E2EClient {
     const headers = new Headers(init.headers);
     const cookieHeader = this.cookieHeader();
     if (cookieHeader) headers.set("cookie", cookieHeader);
+    // better-auth rejects state-changing requests without an Origin header matching one of its
+    // trustedOrigins (MISSING_OR_NULL_ORIGIN) — plain server-side `fetch` calls don't send one.
+    if (!headers.has("origin")) headers.set("origin", E2E_BASE_URL);
 
     const res = await fetch(`${E2E_BASE_URL}${path}`, { ...init, headers });
     this.applySetCookie(res);
