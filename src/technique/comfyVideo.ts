@@ -214,19 +214,6 @@ function funControlSteps(): number {
   return 20;
 }
 
-/**
- * The skeleton carries no ball and no contact timing, so asking for contact made WAN invent a
- * ball that drifts past the racket or vanishes. Ask for the swing alone, and pin the racket to
- * its hand: with nothing in the control clip for it, the racket otherwise stays where the start
- * frame had it while the skeleton's arm swings away empty.
- */
-function racketNoBallSentence(frame: "start" | "reference"): string {
-  return (
-    `No ball in the scene. The player holds exactly one normal-sized professional padel racket with realistic proportions, ` +
-    `firmly in the same hand as in the ${frame} frame for the whole swing; the racket travels with that arm through the stroke and follow-through. `
-  );
-}
-
 export function buildWanFunControlPrompt(shotName: string, handedness: string): string {
   const shot = shotName.trim() || "padel shot";
   const hand =
@@ -235,7 +222,10 @@ export function buildWanFunControlPrompt(shotName: string, handedness: string): 
     `Photorealistic professional padel tennis action. The exact same player from the start frame, with identical face, body proportions, hairstyle, clothing, shoes, accessories, court environment, lighting, shadows, and camera perspective. ` +
     `The player is ${hand} and performs a realistic ${shot}, accurately following the provided pose skeleton. Natural biomechanics, correct body rotation, believable weight transfer, realistic arm and wrist position, and anatomically correct hands. ` +
     `Camera remains completely locked: no camera movement, zoom, reframing, perspective change, or lens change. ` +
-    racketNoBallSentence("start") +
+    `The player holds exactly one normal-sized professional padel racket with realistic proportions. ` +
+    `Ball continuity — critical. There is exactly ONE padel ball in the entire scene at all times. It must be the same physical ball visible in the start frame. Preserve its identity and visual continuity throughout the motion. ` +
+    `The player must make realistic racket contact with that exact same ball during the ${shot}. The ball may naturally change position according to the action, but never duplicate, replace, regenerate, or introduce another ball. ` +
+    `At no point may two balls appear simultaneously, including during motion blur, racket contact, or immediately before/after impact. ` +
     `Maintain strict temporal consistency and photorealism throughout.`
   );
 }
@@ -268,12 +258,12 @@ function timingIntentLines(timing: CoachingVideoContext["timing"]): string[] {
   const follow = timing.impactToFollowMs;
   if (typeof prep === "number" && Number.isFinite(prep) && prep > 0) {
     out.push(
-      `Preparation to the hitting point took about ${Math.round(prep)} ms — begin the upward drive and racket lift earlier so the body is loaded before the hitting point.`
+      `Preparation to contact took about ${Math.round(prep)} ms — begin the upward drive and racket lift earlier so the body is loaded before contact.`
     );
   }
   if (typeof follow === "number" && Number.isFinite(follow) && follow > 0) {
     out.push(
-      `Hitting point to follow-through took about ${Math.round(follow)} ms — carry the racket arm further through the finish instead of stopping at the hitting point.`
+      `Contact to follow-through took about ${Math.round(follow)} ms — carry the racket arm further through the finish instead of stopping at the ball.`
     );
   }
   return out;
@@ -333,7 +323,10 @@ export function buildWanFunControlCoachingPrompt(
 
   sections.push(
     `Camera remains completely locked: no camera movement, zoom, reframing, perspective change, or lens change. ` +
-      racketNoBallSentence("reference") +
+      `The player holds exactly one normal-sized professional padel racket with realistic proportions. ` +
+      `Ball continuity — critical. There is exactly ONE padel ball in the entire scene at all times. It must be the same physical ball visible in the reference frame. Preserve its identity and visual continuity throughout the motion. ` +
+      `The player must make realistic racket contact with that exact same ball during the ${shot}. The ball may naturally change position according to the action, but never duplicate, replace, regenerate, or introduce another ball. ` +
+      `At no point may two balls appear simultaneously, including during motion blur, racket contact, or immediately before/after impact. ` +
       `Maintain strict temporal consistency and photorealism throughout.`
   );
 
@@ -361,13 +354,12 @@ export function hasCoachingVideoContext(ctx?: CoachingVideoContext | null): bool
  */
 export function buildWanFunControlNegativePrompt(): string {
   return (
-    "ball, tennis ball, padel ball, yellow ball, flying ball, floating object, " +
-    "extra racket, duplicate racket, racket switching hands, racket in the wrong hand, empty swinging hand, detached racket, floating racket, " +
-    "deformed racket, warped racket, oversized racket, oversized paddle, tiny racket, " +
+    "extra ball, multiple balls, duplicate ball, cloned ball, ghost ball, floating ball, ball trail, invented ball, inconsistent ball identity, ball appearing from nowhere, " +
+    "extra racket, duplicate racket, deformed racket, warped racket, oversized racket, oversized paddle, tiny racket, " +
     "different person, changed face, changed identity, changed clothing, changed shoes, changed court, changed background, changed lighting, changed camera angle, " +
     "camera movement, camera shake, zoom, crop, reframing, perspective shift, " +
     "incorrect grip, impossible racket angle, incorrect handedness, anatomically impossible pose, broken wrist, twisted arm, extra arm, extra hand, extra fingers, missing fingers, malformed hands, duplicated limbs, distorted anatomy, " +
-    "unrealistic padel technique, ghosting, double exposure, " +
+    "incorrect ball contact, ball far from racket, unrealistic contact point, unrealistic padel technique, " +
     "cartoon, illustration, CGI, 3D render, artificial skin, unrealistic proportions"
   );
 }
