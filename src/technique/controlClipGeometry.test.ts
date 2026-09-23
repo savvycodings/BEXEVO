@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   alignedProLandmarksByImpact,
   blendLandmarks,
+  coachedControlLandmarkFrames,
   controlCanvasSize,
   correctionCanvasSize,
   correctionFunLength,
@@ -59,9 +60,31 @@ test("retargetProToUser mirrors about the user's hip x when handedness disagrees
   const mirrored = retargetProToUser(pro, user, { mirror: true });
 
   assert.ok(Math.abs((plain.RIGHT_WRIST?.x ?? 0) - 0.5) < 1e-6);
-  assert.ok(Math.abs((mirrored.RIGHT_WRIST?.x ?? 0) - 0.1) < 1e-6);
+  // The pro's right-arm reach, mirrored, is a left arm: it lands under LEFT_WRIST.
+  assert.ok(Math.abs((mirrored.LEFT_WRIST?.x ?? 0) - 0.1) < 1e-6);
+  // And the pro's left wrist (dx -0.1) becomes the right wrist on the other side.
+  assert.ok(Math.abs((mirrored.RIGHT_WRIST?.x ?? 0) - 0.4) < 1e-6);
   // Vertical geometry is untouched by the mirror.
-  assert.equal(mirrored.RIGHT_WRIST?.y, plain.RIGHT_WRIST?.y);
+  assert.equal(mirrored.LEFT_WRIST?.y, plain.RIGHT_WRIST?.y);
+});
+
+test("coachedControlLandmarkFrames blends a mirrored pro's swinging arm into the user's swinging arm", () => {
+  // User swings with the left arm (reach 0.2), pro with the right (reach 0.3).
+  const user = body({ hx: 0.5, hy: 0.5, torso: 0.3, leftWristDx: -0.2, rightWristDx: 0.05 });
+  const pro = body({ hx: 0.5, hy: 0.5, torso: 0.3, leftWristDx: -0.05, rightWristDx: 0.3 });
+
+  const [out] = coachedControlLandmarkFrames({
+    userFrames: [user],
+    proFrames: [pro],
+    mirror: true,
+    blend: 0.5,
+  });
+
+  // Mirrored pro swing wrist sits at 0.2; the user's swinging wrist (0.3) moves halfway to it.
+  assert.ok(Math.abs((out?.LEFT_WRIST?.x ?? 0) - 0.25) < 1e-6, `left ${out?.LEFT_WRIST?.x}`);
+  // The user's other wrist pairs with the pro's other wrist (both at 0.55), so it stays put
+  // instead of being dragged toward the pro's swing.
+  assert.ok(Math.abs((out?.RIGHT_WRIST?.x ?? 0) - 0.55) < 1e-6, `right ${out?.RIGHT_WRIST?.x}`);
 });
 
 test("retargetProToUser returns the pro pose unchanged when the torso basis is missing", () => {
