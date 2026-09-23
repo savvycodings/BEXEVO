@@ -92,29 +92,66 @@ function toPixel(
   };
 }
 
-/** OpenPose-like limb colors (BGR-ish RGB used by controlnet_aux BODY_25). */
-const BONES: Array<[string, string, [number, number, number]]> = [
-  ["LEFT_SHOULDER", "RIGHT_SHOULDER", [255, 0, 0]],
-  ["LEFT_SHOULDER", "LEFT_HIP", [255, 85, 0]],
-  ["RIGHT_SHOULDER", "RIGHT_HIP", [255, 170, 0]],
-  ["LEFT_HIP", "RIGHT_HIP", [255, 255, 0]],
-  ["LEFT_SHOULDER", "LEFT_ELBOW", [170, 255, 0]],
-  ["LEFT_ELBOW", "LEFT_WRIST", [85, 255, 0]],
-  ["LEFT_WRIST", "LEFT_INDEX", [0, 255, 0]],
-  ["RIGHT_SHOULDER", "RIGHT_ELBOW", [0, 255, 85]],
-  ["RIGHT_ELBOW", "RIGHT_WRIST", [0, 255, 170]],
-  ["RIGHT_WRIST", "RIGHT_INDEX", [0, 255, 255]],
-  ["LEFT_HIP", "LEFT_KNEE", [0, 170, 255]],
-  ["LEFT_KNEE", "LEFT_ANKLE", [0, 85, 255]],
-  ["LEFT_ANKLE", "LEFT_FOOT_INDEX", [0, 0, 255]],
-  ["LEFT_ANKLE", "LEFT_HEEL", [85, 0, 255]],
-  ["RIGHT_HIP", "RIGHT_KNEE", [170, 0, 255]],
-  ["RIGHT_KNEE", "RIGHT_ANKLE", [255, 0, 255]],
-  ["RIGHT_ANKLE", "RIGHT_FOOT_INDEX", [255, 0, 170]],
-  ["RIGHT_ANKLE", "RIGHT_HEEL", [255, 0, 85]],
-  ["LEFT_SHOULDER", "NOSE", [255, 128, 0]],
-  ["RIGHT_SHOULDER", "NOSE", [255, 0, 128]],
+/**
+ * OpenPose-18 body keypoints from MediaPipe names. Both name sides from the athlete's point of
+ * view, so no flip. Index 1 (neck) has no MediaPipe point; it is the shoulder midpoint.
+ * Fun Control was trained on this layout (DWPose/OpenPose renders), not on MediaPipe's.
+ */
+const OPENPOSE18: Array<string | null> = [
+  "NOSE",
+  null,
+  "RIGHT_SHOULDER",
+  "RIGHT_ELBOW",
+  "RIGHT_WRIST",
+  "LEFT_SHOULDER",
+  "LEFT_ELBOW",
+  "LEFT_WRIST",
+  "RIGHT_HIP",
+  "RIGHT_KNEE",
+  "RIGHT_ANKLE",
+  "LEFT_HIP",
+  "LEFT_KNEE",
+  "LEFT_ANKLE",
+  "RIGHT_EYE",
+  "LEFT_EYE",
+  "RIGHT_EAR",
+  "LEFT_EAR",
 ];
+
+/** controlnet_aux `draw_bodypose` limb order (0-indexed); limb i is drawn in OPENPOSE_COLORS[i]. */
+const OPENPOSE_LIMBS: Array<[number, number]> = [
+  [1, 2], [1, 5], [2, 3], [3, 4], [5, 6], [6, 7], [1, 8], [8, 9], [9, 10],
+  [1, 11], [11, 12], [12, 13], [1, 0], [0, 14], [14, 16], [0, 15], [15, 17],
+];
+
+const OPENPOSE_COLORS: Array<[number, number, number]> = [
+  [255, 0, 0], [255, 85, 0], [255, 170, 0], [255, 255, 0], [170, 255, 0], [85, 255, 0],
+  [0, 255, 0], [0, 255, 85], [0, 255, 170], [0, 255, 255], [0, 170, 255], [0, 85, 255],
+  [0, 0, 255], [85, 0, 255], [170, 0, 255], [255, 0, 255], [255, 0, 170], [255, 0, 85],
+];
+
+/** The reference blends limbs onto black at 0.6, so a limb reads as its color scaled by 0.6. */
+function limbColor(rgb: [number, number, number]): [number, number, number] {
+  return [Math.round(rgb[0] * 0.6), Math.round(rgb[1] * 0.6), Math.round(rgb[2] * 0.6)];
+}
+
+/** Stick half-width and joint radius: the reference's 4px at 512, scaled to the canvas. */
+function openPoseStickRadius(width: number, height: number): number {
+  return Math.max(2, Math.round((4 * Math.min(width, height)) / 512));
+}
+
+function openPose18Points(landmarks: NamedLandmarks): Array<NamedLandmark | null> {
+  return OPENPOSE18.map((name) => {
+    if (name) {
+      const lm = landmarks[name];
+      return isVisible(lm) ? lm : null;
+    }
+    const l = landmarks.LEFT_SHOULDER;
+    const r = landmarks.RIGHT_SHOULDER;
+    if (!isVisible(l) || !isVisible(r)) return null;
+    return { x: (l.x + r.x) / 2, y: (l.y + r.y) / 2 };
+  });
+}
 
 function setPixel(
   buf: Uint8Array,
@@ -206,6 +243,15 @@ const BALL_RGB: [number, number, number] = [255, 220, 0];
  */
 function drawRacketBox(): boolean {
   return String(process.env.CORRECTION_DRAW_RACKET_BOX ?? "").trim().toLowerCase() === "true";
+}
+
+/**
+ * Off by default for the same reason as the racket box: WAN paints the disk in literally, and
+ * since the skeleton carries no contact timing the ball drifts past the racket or vanishes.
+ * The prompts now ask for no ball at all; the real ball is better composited afterwards.
+ */
+function drawBallMarker(): boolean {
+  return String(process.env.CORRECTION_DRAW_BALL ?? "").trim().toLowerCase() === "true";
 }
 
 function fillRect(
@@ -366,30 +412,26 @@ export function drawOpenPoseRgb(
   overlay?: ControlOverlay
 ): Buffer {
   const buf = new Uint8Array(width * height * 3);
-  for (const [a, b, color] of BONES) {
-    const la = landmarks[a];
-    const lb = landmarks[b];
-    if (!isVisible(la) || !isVisible(lb)) continue;
+  const points = openPose18Points(landmarks);
+  const stick = openPoseStickRadius(width, height);
+  OPENPOSE_LIMBS.forEach(([a, b], i) => {
+    const la = points[a];
+    const lb = points[b];
+    if (!la || !lb) return;
     const pa = toPixel(la, width, height);
     const pb = toPixel(lb, width, height);
-    drawThickLine(buf, width, height, pa.x, pa.y, pb.x, pb.y, 4, color);
-  }
-  const joints = new Set<string>();
-  for (const [a, b] of BONES) {
-    joints.add(a);
-    joints.add(b);
-  }
-  for (const name of joints) {
-    const lm = landmarks[name];
-    if (!isVisible(lm)) continue;
+    drawThickLine(buf, width, height, pa.x, pa.y, pb.x, pb.y, stick, limbColor(OPENPOSE_COLORS[i]!));
+  });
+  points.forEach((lm, i) => {
+    if (!lm) return;
     const p = toPixel(lm, width, height);
-    drawDisk(buf, width, height, p.x, p.y, 6, [255, 255, 255]);
-  }
+    drawDisk(buf, width, height, p.x, p.y, stick, OPENPOSE_COLORS[i]!);
+  });
   if (overlay?.racket && drawRacketBox()) {
     const { cx, cy, w, h } = overlay.racket;
     fillRect(buf, width, height, cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, RACKET_RGB);
   }
-  if (overlay?.ball) {
+  if (overlay?.ball && drawBallMarker()) {
     drawDisk(buf, width, height, overlay.ball.cx, overlay.ball.cy, overlay.ball.r, BALL_RGB);
   }
   return Buffer.from(buf);
@@ -570,6 +612,12 @@ function bodyFrameOf(lm: NamedLandmarks, aspect: number): BodyFrame | null {
   return { hip, torso };
 }
 
+function swapSideName(name: string): string {
+  if (name.startsWith("LEFT_")) return `RIGHT_${name.slice(5)}`;
+  if (name.startsWith("RIGHT_")) return `LEFT_${name.slice(6)}`;
+  return name;
+}
+
 /**
  * Put the pro skeleton in the user's camera frame: hip midpoints coincide, pro limb lengths
  * scale to the user's torso, and the pose mirrors when handedness disagrees. Without this the
@@ -590,7 +638,9 @@ export function retargetProToUser(
   const out: NamedLandmarks = {};
   for (const [name, lm] of Object.entries(proLm)) {
     if (!lm || typeof lm.x !== "number" || typeof lm.y !== "number") continue;
-    out[name] = {
+    // A mirrored left arm is a right arm. Keeping the name would blend the pro's swinging arm
+    // into the user's other arm, since blending pairs joints by name.
+    out[opts?.mirror ? swapSideName(name) : name] = {
       ...lm,
       x: userFrame.hip.x + (lm.x - proFrame.hip.x) * sx,
       y: userFrame.hip.y + (lm.y - proFrame.hip.y) * scale,
