@@ -21,6 +21,30 @@ test("adminStrokeLabelKey strips level from strokeName when label missing", () =
   );
 });
 
+test("resolveCanonicalShotFromMetrics prefers a user-declared shot over retrieval", () => {
+  const r = resolveCanonicalShotFromMetrics({
+    user_shot: {
+      shotLabel: "Forehand Volley",
+      strokePreset: "forehand_volley",
+      category: "net_play",
+      skillLevel: "Intermediate",
+      viewId: "side",
+    },
+    retrieval: {
+      shot_hypothesis: {
+        stroke_label: "Backhand Volley",
+        confidence: 0.9,
+        category: "net_play",
+      },
+      neighbors: [],
+    },
+  });
+  assert.equal(r.shotName, "Forehand Volley");
+  assert.equal(r.source, "user_declared");
+  assert.equal(r.category, "net_play");
+  assert.equal(r.confidence, 1);
+});
+
 test("resolveCanonicalShotFromMetrics uses hypothesis when confidence >= threshold", () => {
   const r = resolveCanonicalShotFromMetrics({
     retrieval: {

@@ -26,6 +26,7 @@ import {
 } from "./meshEmbedding";
 import {
   adminStrokeLabelKey,
+  readUserDeclaredShot,
   RETRIEVAL_CONFIDENCE_THRESHOLD,
 } from "../train/trainShotDisplay";
 import { buildShotHypothesis, selectShotLabel } from "./shotHypothesis";
@@ -223,11 +224,17 @@ export async function replaceTrainSampleEmbeddings(
   }
 }
 
+export type RetrievalCandidateFilter = {
+  strokePreset?: string | null;
+  category?: string | null;
+};
+
 async function queryFilteredTrainCandidates(
   queryVector: number[],
   k: number,
   specVersion: string = POSE_EMBEDDING_SPEC_VERSION,
-  excludeTrainSampleId?: string
+  excludeTrainSampleId?: string,
+  constraint?: RetrievalCandidateFilter
 ): Promise<TrainNeighborCandidate[]> {
   const literal = formatVectorSqlLiteral(queryVector);
   const fetchLimit = Math.max(k * 6, 36);
@@ -261,9 +268,19 @@ async function queryFilteredTrainCandidates(
     WHERE ts.status = $2
       AND tse."specVersion" = $4
       AND ($5::text IS NULL OR ts.id != $5)
+      AND ($6::text IS NULL OR tv."strokePreset"::text = $6)
+      AND ($7::text IS NULL OR tv.category::text = $7)
     ORDER BY tse.embedding <=> $1::vector
     LIMIT $3`,
-    [literal, "completed", fetchLimit, specVersion, excludeTrainSampleId ?? null]
+    [
+      literal,
+      "completed",
+      fetchLimit,
+      specVersion,
+      excludeTrainSampleId ?? null,
+      constraint?.strokePreset?.trim() || null,
+      constraint?.category?.trim() || null,
+    ]
   );
 
   const mapped: TrainNeighborCandidate[] = rows.map((r) => {
@@ -499,7 +516,8 @@ async function runChannelProbes(
   channel: EnsembleChannel,
   specVersion: string,
   k: number,
-  excludeTrainSampleId?: string
+  excludeTrainSampleId?: string,
+  constraint?: RetrievalCandidateFilter
 ): Promise<Probe[]> {
   const probes: Probe[] = [];
   for (const f of frames) {
@@ -507,7 +525,8 @@ async function runChannelProbes(
       f.vector,
       k,
       specVersion,
-      excludeTrainSampleId
+      excludeTrainSampleId,
+      constraint
     ).catch((e) => {
       console.warn("[TrainRetrieval] probe query failed", { channel, seq: f.seqIndex, e });
       return [] as TrainNeighborCandidate[];
@@ -575,13 +594,28 @@ export async function runEnsembleRetrieval(
   poseFrames: EnsembleQueryFrame[],
   meshFrames: EnsembleQueryFrame[],
   k = 8,
-  excludeTrainSampleId?: string
+  excludeTrainSampleId?: string,
+  constraint?: RetrievalCandidateFilter
 ): Promise<EnsembleRetrievalRun> {
   const poseProbes = poseFrames.length
-    ? await runChannelProbes(poseFrames, "pose", POSE_EMBEDDING_SPEC_VERSION, k, excludeTrainSampleId)
+    ? await runChannelProbes(
+        poseFrames,
+        "pose",
+        POSE_EMBEDDING_SPEC_VERSION,
+        k,
+        excludeTrainSampleId,
+        constraint
+      )
     : [];
   let meshProbes = meshFrames.length
-    ? await runChannelProbes(meshFrames, "mesh", MESH_EMBEDDING_SPEC_VERSION, k, excludeTrainSampleId)
+    ? await runChannelProbes(
+        meshFrames,
+        "mesh",
+        MESH_EMBEDDING_SPEC_VERSION,
+        k,
+        excludeTrainSampleId,
+        constraint
+      )
     : [];
 
   const poseHasNeighbors = poseProbes.some((p) => p.candidates.length > 0);
@@ -626,7 +660,29 @@ export async function retrieveForTechniqueMetrics(
 
   try {
     // Redundancy: if a channel is empty (no library rows / low conf), the other still answers.
-    const run = await runEnsembleRetrieval(poseQuery, meshQuery, k);
+    const declared = readUserDeclaredShot(metricsRecord);
+    const preset = declared?.strokePreset ?? null;
+    const declaredCategory = declared?.category ?? null;
+    let constraint: RetrievalCandidateFilter | undefined = preset
+      ? { strokePreset: preset }
+      : declaredCategory
+        ? { category: declaredCategory }
+        : undefined;
+    let run = await runEnsembleRetrieval(poseQuery, meshQuery, k, undefined, constraint);
+    if (declared && preset && run.neighbors.length === 0 && declaredCategory) {
+      console.log(
+        "[TrainRetrieval] no clips for declared stroke preset; falling back to category",
+        { strokePreset: preset, category: declaredCategory }
+      );
+      constraint = { category: declaredCategory };
+      run = await runEnsembleRetrieval(poseQuery, meshQuery, k, undefined, constraint);
+    }
+    if (declared && run.neighbors.length === 0) {
+      console.log("[TrainRetrieval] no pro clips for declared shot", {
+        strokePreset: preset,
+        category: declaredCategory,
+      });
+    }
     const { poseHasNeighbors, meshHasNeighbors } = run;
     const agg: EnsembleAggregate = run;
 
@@ -656,17 +712,29 @@ export async function retrieveForTechniqueMetrics(
         : undefined;
 
     const preferredViewRaw =
-      metricsRecord?.preferred_view_profile ?? metricsRecord?.view_profile ?? null;
+      declared?.viewId ??
+      metricsRecord?.preferred_view_profile ??
+      metricsRecord?.view_profile ??
+      null;
     const preferredView =
       typeof preferredViewRaw === "string" ? preferredViewRaw : null;
     const neighbors = preferSameViewNeighbors(agg.neighbors, preferredView).slice(0, k);
+    const shot_hypothesis = declared?.shotLabel
+      ? {
+          stroke_preset: declared.strokePreset,
+          stroke_label: declared.shotLabel,
+          category: declared.category,
+          skill_level: declared.skillLevel,
+          confidence: 1,
+        }
+      : agg.shot_hypothesis;
 
     return {
       spec_version,
       embedding_dim: POSE_EMBEDDING_DIM,
       query_embedding_ok: true,
       neighbors,
-      shot_hypothesis: agg.shot_hypothesis,
+      shot_hypothesis,
       neighbor_distance_gap: agg.neighbor_distance_gap,
       embedding_source,
       mesh_used: meshUsed,

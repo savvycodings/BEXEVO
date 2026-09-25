@@ -43,11 +43,42 @@ function looksLikeStrokePresetId(s: string): boolean {
 }
 
 export type CanonicalShotSource =
+  | "user_declared"
   | "retrieval_hypothesis"
   | "neighbor"
   | "ai_shot_context"
   | "low_confidence_fallback"
   | "fallback";
+
+export type UserDeclaredShot = {
+  category: string | null;
+  strokePreset: string | null;
+  shotLabel: string | null;
+  skillLevel: string | null;
+  viewId: string | null;
+};
+
+const DECLARED_VIEWS = new Set(["front", "side", "diagonal", "behind"]);
+
+/** Shot tags collected on the AI Coach stepper. Null when the client did not send them. */
+export function readUserDeclaredShot(
+  metrics: Record<string, unknown> | null | undefined
+): UserDeclaredShot | null {
+  const raw = metrics?.user_shot;
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  const shotLabel = typeof row.shotLabel === "string" ? row.shotLabel.trim() : "";
+  const strokePreset = typeof row.strokePreset === "string" ? row.strokePreset.trim() : "";
+  if (!shotLabel && !strokePreset) return null;
+  const viewRaw = typeof row.viewId === "string" ? row.viewId.trim().toLowerCase() : "";
+  return {
+    category: typeof row.category === "string" && row.category.trim() ? row.category.trim() : null,
+    strokePreset: strokePreset || null,
+    shotLabel: shotLabel || null,
+    skillLevel: typeof row.skillLevel === "string" && row.skillLevel.trim() ? row.skillLevel.trim() : null,
+    viewId: DECLARED_VIEWS.has(viewRaw) ? viewRaw : null,
+  };
+}
 
 export type CanonicalShotResolution = {
   shotName: string;
@@ -78,6 +109,17 @@ export function resolveCanonicalShotFromMetrics(
     source: "fallback",
   };
   if (!metrics || typeof metrics !== "object") return fallback;
+
+  const declared = readUserDeclaredShot(metrics);
+  if (declared?.shotLabel) {
+    return {
+      shotName: stripTrainClipIndexSuffix(declared.shotLabel),
+      category: declared.category,
+      skillLevel: declared.skillLevel,
+      confidence: 1,
+      source: "user_declared",
+    };
+  }
 
   const retrieval = metrics.retrieval as Record<string, unknown> | undefined;
   const hyp = retrieval?.shot_hypothesis as Record<string, unknown> | undefined;

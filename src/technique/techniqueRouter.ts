@@ -144,6 +144,7 @@ import { metricsForClientFetch } from './clientMetrics'
 import { sanitizeUserClips } from './techniqueClipLimits'
 import {
   deriveHumanShotLabelFromMetrics,
+  readUserDeclaredShot,
   resolveCanonicalShotFromMetrics,
   shotClassificationFromResolved,
   RETRIEVAL_CONFIDENCE_THRESHOLD,
@@ -494,10 +495,34 @@ async function persistTechniqueDetections(
   })
 }
 
+const DECLARED_SHOT_VIEWS = new Set(['front', 'side', 'diagonal', 'behind'])
+
+function userShotFromAnalyzeBody(body: unknown): Record<string, string> | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as { userShot?: unknown }).userShot
+  if (!raw || typeof raw !== 'object') return null
+  const row = raw as Record<string, unknown>
+  const shotLabel = typeof row.shotLabel === 'string' ? row.shotLabel.trim() : ''
+  const strokePreset = typeof row.strokePreset === 'string' ? row.strokePreset.trim() : ''
+  if (!shotLabel && !strokePreset) return null
+  const viewId = typeof row.viewId === 'string' ? row.viewId.trim().toLowerCase() : ''
+  const shot: Record<string, string> = {
+    category: typeof row.category === 'string' ? row.category.trim() : '',
+    strokePreset,
+    shotLabel,
+    skillLevel: typeof row.skillLevel === 'string' ? row.skillLevel.trim() : '',
+  }
+  if (DECLARED_SHOT_VIEWS.has(viewId)) shot.viewId = viewId
+  return shot
+}
+
 function buildCanonicalShotAnalyzeHint(metrics: Record<string, unknown>): string {
   const r = resolveCanonicalShotFromMetrics(metrics)
-  if (r.source !== 'retrieval_hypothesis') return ''
   const cat = r.category ? ` — category ${r.category}` : ''
+  if (r.source === 'user_declared') {
+    return `\nThe player declared this shot. It is "${r.shotName}"${cat}. Do not reclassify the stroke. Use this exact shot for en.shot_context and primary_train_category. Coach the movement only.\n`
+  }
+  if (r.source !== 'retrieval_hypothesis') return ''
   return `\nCanonical shot from pro library (k-NN): "${r.shotName}"${cat}. Use this for en.shot_context and primary_train_category when consistent with pose.\n`
 }
 
@@ -506,20 +531,25 @@ function alignAnalyzeShotContextWithRetrieval(
   metrics: Record<string, unknown>
 ): boolean {
   const resolved = resolveCanonicalShotFromMetrics(metrics)
-  if (resolved.source !== 'retrieval_hypothesis') {
+  if (resolved.source !== 'retrieval_hypothesis' && resolved.source !== 'user_declared') {
     return false
   }
   const en = (aiAnalysis.en ?? {}) as Record<string, unknown>
   const es = (aiAnalysis.es ?? {}) as Record<string, unknown>
+  const declared = resolved.source === 'user_declared'
   aiAnalysis.en = {
     ...en,
-    shot_context: `Pro library match: ${resolved.shotName}.`,
+    shot_context: declared
+      ? `Declared shot: ${resolved.shotName}.`
+      : `Pro library match: ${resolved.shotName}.`,
   }
   aiAnalysis.es = {
     ...es,
-    shot_context: `Coincidencia con biblioteca pro: ${resolved.shotName}.`,
+    shot_context: declared
+      ? `Golpe declarado: ${resolved.shotName}.`
+      : `Coincidencia con biblioteca pro: ${resolved.shotName}.`,
   }
-  if (resolved.category && !aiAnalysis.primary_train_category) {
+  if (resolved.category && (declared || !aiAnalysis.primary_train_category)) {
     aiAnalysis.primary_train_category = resolved.category
   }
   return true
@@ -1310,6 +1340,11 @@ router.post('/analyze', async (req, res) => {
     }
 
     let metrics: any = { ...modalRes.metrics }
+    const declaredFromClient = userShotFromAnalyzeBody(req.body)
+    if (declaredFromClient) {
+      metrics = { ...metrics, user_shot: declaredFromClient }
+      console.log('[Technique] user declared shot', { analysisId, ...declaredFromClient })
+    }
     const poseDataEarly = metrics.pose_data as
       | Array<{ frame: number; landmarks: FrameLandmarks }>
       | undefined
@@ -1426,7 +1461,10 @@ router.post('/analyze', async (req, res) => {
         totalFrames: metrics?.total_frames ?? null,
       }
     )
-    const lobTie = applyLobTieBreak(retrievalRaw, lobSignal)
+    const userDeclared = readUserDeclaredShot(metrics)
+    const lobTie = userDeclared
+      ? { retrieval: retrievalRaw, applied: false as const, note: 'user_declared_shot' }
+      : applyLobTieBreak(retrievalRaw, lobSignal)
 
     // Forehand/backhand family tie-break from pose geometry, anchored on a KNOWN dominant hand
     // (user profile first, then racket-detection consensus). The k-NN embeddings carry no
@@ -1490,9 +1528,11 @@ router.post('/analyze', async (req, res) => {
       typeof metrics?.impact_frame_source === 'string'
         ? metrics.impact_frame_source
         : null
-    const sideTie = applyStrokeSideTieBreak(lobTie.retrieval, strokeSideSignal, {
-      impactFrameSource,
-    })
+    const sideTie = userDeclared
+      ? { retrieval: lobTie.retrieval, applied: false as const, note: 'user_declared_shot' }
+      : applyStrokeSideTieBreak(lobTie.retrieval, strokeSideSignal, {
+          impactFrameSource,
+        })
 
     const retrieval = sideTie.retrieval
     metrics = {
