@@ -305,7 +305,7 @@ function runFfmpegExtract(videoPath: string, vf: string): Promise<Buffer> {
     videoPath,
     "-vf",
     vf,
-    "-vsync",
+    "-fps_mode",
     "vfr",
     "-frames:v",
     "1",
