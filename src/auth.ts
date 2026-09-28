@@ -1,6 +1,8 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { expo } from "@better-auth/expo";
+import { emailOTP } from "better-auth/plugins";
+import { deliverPasswordResetOtp, passwordResetDevOtp } from "./auth/passwordResetOtp";
 import { db, user, session, account, verification } from "./db";
 
 const resolvedBaseUrl = process.env.BETTER_AUTH_URL;
@@ -97,8 +99,21 @@ export const auth = betterAuth({
   }),
   emailAndPassword: {
     enabled: true,
+    revokeSessionsOnPasswordReset: true,
   },
-  plugins: [expo()],
+  plugins: [
+    expo(),
+    emailOTP({
+      otpLength: 6,
+      expiresIn: 10 * 60,
+      allowedAttempts: 5,
+      storeOTP: "hashed",
+      generateOTP: ({ type }) => passwordResetDevOtp(type),
+      sendVerificationOTP: async ({ email, otp, type }) => {
+        await deliverPasswordResetOtp({ email, otp, type });
+      },
+    }),
+  ],
   ...(hasSocialProviders ? { socialProviders } : {}),
   secret: resolvedSecret,
   baseURL: resolvedBaseUrl,
