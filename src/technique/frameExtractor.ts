@@ -249,7 +249,7 @@ export async function extractFrameFirstAvailable(
   return result.buffer;
 }
 
-export function extractFrame(
+export async function extractFrame(
   videoPath: string,
   frameNumber: number
 ): Promise<Buffer> {
@@ -257,24 +257,34 @@ export function extractFrame(
     `select=eq(n\\,${frameNumber})`,
     `select=gte(n\\,${frameNumber})`,
   ];
+  const failures: string[] = [];
 
-  return new Promise(async (resolve, reject) => {
-    for (const vf of filters) {
-      try {
-        const frame = await runFfmpegExtract(videoPath, vf);
-        if (frame.length > 0) {
-          return resolve(frame);
-        }
-      } catch {
-        // try next filter
-      }
+  for (const vf of filters) {
+    try {
+      const frame = await runFfmpegExtract(videoPath, vf);
+      if (frame.length > 0) return frame;
+      failures.push(`empty output for vf=${vf}`);
+    } catch (e) {
+      failures.push(e instanceof Error ? e.message : String(e));
     }
-    reject(
-      new Error(
-        `ffmpeg extraction failed for frame ${frameNumber} with all filter strategies`
-      )
+  }
+
+  const meta = await probeVideoStreamMeta(videoPath);
+  const fps = meta?.fps && meta.fps > 0 ? meta.fps : DEFAULT_FPS;
+  const timeSec = Math.max(0, frameNumber) / fps;
+  try {
+    const frame = await extractFrameByTimestamp(videoPath, timeSec);
+    if (frame.length > 0) return frame;
+    failures.push(
+      `empty output for timestamp ${timeSec.toFixed(3)}s at ${fps} fps`
     );
-  });
+  } catch (e) {
+    failures.push(e instanceof Error ? e.message : String(e));
+  }
+
+  throw new Error(
+    `ffmpeg extraction failed for frame ${frameNumber} with all filter strategies: ${failures.join(" | ")}`
+  );
 }
 
 /** Seek by time (seconds); more reliable than select=n on some train codecs. */
@@ -339,11 +349,11 @@ function runFfmpegRawArgs(args: string[]): Promise<Buffer> {
       if (code === 0 && outBuffers.length > 0 && !hasFilterError) {
         resolve(Buffer.concat(outBuffers));
       } else {
+        const compact = stderr.replace(/\s+/g, " ").trim();
+        const stderrTail = compact.length > 500 ? compact.slice(-500) : compact;
         reject(
           new Error(
-            `ffmpeg exited with code ${code}; args=${args.slice(0, 6).join(" ")}…; stderr=${stderr
-              .slice(0, 400)
-              .replace(/\s+/g, " ")}`
+            `ffmpeg exited with code ${code}; args=${args.slice(0, 8).join(" ")}…; stderr=${stderrTail}`
           )
         );
       }
