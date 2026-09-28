@@ -19,6 +19,7 @@ import {
   trainCategoryEnum,
   trainSkillLevelEnum,
   trainStrokePresetEnum,
+  trainViewProfileEnum,
 } from "../db/schema";
 import { eq } from "drizzle-orm";
 import {
@@ -147,7 +148,7 @@ function trainRouteDbError(e: unknown, fallback: string): string {
 const router = express.Router();
 router.use(express.json({ limit: "2mb" }));
 router.use(express.urlencoded({ extended: true }));
-type TrainViewProfile = "front" | "diagonal" | "side" | "behind";
+type TrainViewProfile = (typeof trainViewProfileEnum.enumValues)[number];
 
 // fal.ai LoRA dataset + training routes (admin header required)
 router.use("/fal-lora", falLoraRouter);
@@ -191,6 +192,8 @@ const PRESET_LABEL: Record<TrainStrokePreset, string> = {
   side_wall_forehand: "Side wall forehand",
   contrapared_boast: "Contrapared boast",
   bandeja: "Bandeja",
+  smash: "Smash",
+  slice_serve: "Slice serve",
 };
 
 const LEVEL_LABEL: Record<TrainSkillLevel, string> = {
@@ -203,8 +206,9 @@ function parseViewProfile(raw: unknown): TrainViewProfile | null {
   const v = String(raw ?? "")
     .trim()
     .toLowerCase();
-  if (v === "front" || v === "diagonal" || v === "side" || v === "behind") return v;
-  return null;
+  return trainViewProfileEnum.enumValues.includes(v as TrainViewProfile)
+    ? (v as TrainViewProfile)
+    : null;
 }
 
 function parseCategory(raw: unknown): TrainCategory | null {
@@ -469,7 +473,9 @@ router.post("/upload", parseTrainVideo, async (req, res) => {
       console.log("[Train] Upload rejected: invalid viewProfile", {
         raw: req.body?.viewProfile,
       });
-      return res.status(400).json({ error: "viewProfile must be one of front, diagonal, side, behind" });
+      return res.status(400).json({
+        error: `viewProfile must be one of ${trainViewProfileEnum.enumValues.join(", ")}`,
+      });
     }
 
     if (!req.file?.buffer) {

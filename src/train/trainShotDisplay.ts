@@ -58,7 +58,16 @@ export type UserDeclaredShot = {
   viewId: string | null;
 };
 
-const DECLARED_VIEWS = new Set(["front", "side", "diagonal", "behind"]);
+const DECLARED_VIEWS = new Set<string>([
+  "front",
+  "side",
+  "diagonal",
+  "behind",
+  "deg45_right_side_left_camera",
+  "deg45_right_side_right_camera",
+  "deg45_left_side_right_camera",
+  "deg45_left_side_left_camera",
+]);
 
 /** Shot tags collected on the AI Coach stepper. Null when the client did not send them. */
 export function readUserDeclaredShot(

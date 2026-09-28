@@ -394,6 +394,12 @@ export const trainViewProfileEnum = pgEnum("train_view_profile", [
   "diagonal",
   "side",
   "behind",
+  "diag_right",
+  "diag_left",
+  "deg45_right_side_left_camera",
+  "deg45_right_side_right_camera",
+  "deg45_left_side_right_camera",
+  "deg45_left_side_left_camera",
 ]);
 
 /** Admin training taxonomy (stored on train_video; Modal still receives a single movement_label string). */
@@ -426,6 +432,8 @@ export const trainStrokePresetEnum = pgEnum("train_stroke_preset", [
   "side_wall_backhand",
   "side_wall_forehand",
   "bandeja",
+  "smash",
+  "slice_serve",
 ]);
 
 export const trainSkillLevelEnum = pgEnum("train_skill_level", [

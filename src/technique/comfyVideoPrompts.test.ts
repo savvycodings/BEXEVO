@@ -6,8 +6,6 @@ import {
   buildWanFunControlPrompt,
 } from "./comfyVideo";
 
-const BALL_CONTACT = /contact|ball continuity|exactly ONE padel ball/i;
-
 const coaching = buildWanFunControlCoachingPrompt("forehand volley", "right-handed", {
   diagnosis: "Elbow collapses early and the shoulders open before the hitting point.",
   recommendations: ["Keep the racket head above the wrist through the stroke."],
@@ -16,35 +14,36 @@ const coaching = buildWanFunControlCoachingPrompt("forehand volley", "right-hand
   angleTargets: ["shoulder 96 -> 118"],
 });
 
-test("generic Fun Control prompt asks for the swing with no ball and the racket kept in hand", () => {
+test("generic Fun Control prompt asks for one ball and contact with it", () => {
   const p = buildWanFunControlPrompt("forehand volley", "right-handed");
-  assert.match(p, /No ball in the scene/);
-  assert.match(p, /same hand as in the start frame/);
-  assert.doesNotMatch(p, BALL_CONTACT);
-  assert.match(p, /exact same player from the start frame/);
+  assert.match(p, /exactly ONE padel ball/);
+  assert.match(p, /Ball continuity/);
+  assert.match(p, /racket contact with that exact same ball/);
+  assert.match(p, /start frame/);
   assert.match(p, /Camera remains completely locked/);
 });
 
-test("coaching Fun Control prompt keeps its coaching sections and drops ball contact", () => {
-  assert.match(coaching, /No ball in the scene/);
-  assert.match(coaching, /same hand as in the reference frame/);
-  assert.doesNotMatch(coaching, BALL_CONTACT);
+test("coaching Fun Control prompt keeps its coaching sections and the ball", () => {
+  assert.match(coaching, /exactly ONE padel ball/);
+  assert.match(coaching, /reference frame/);
+  assert.match(coaching, /racket contact with that exact same ball/);
   assert.match(coaching, /COACHING INTENT/);
   assert.match(coaching, /RIGHT_ELBOW: current \(0\.41,0\.52\) -> target \(0\.44,0\.47\)/);
-  assert.match(coaching, /MOTION TIMING/);
+  assert.match(coaching, /Preparation to contact took about 420 ms/);
+  assert.match(coaching, /stopping at the ball/);
 });
 
-test("Fun Control negative prompt suppresses the ball and a wandering racket, not softness", () => {
+test("Fun Control negative prompt rejects a second ball, not softness", () => {
   const n = buildWanFunControlNegativePrompt();
   for (const term of [
-    "ball",
-    "racket switching hands",
-    "floating racket",
-    "ghosting",
+    "extra ball",
+    "duplicate ball",
+    "incorrect ball contact",
     "changed face",
     "camera movement",
   ]) {
     assert.ok(n.includes(term), `missing "${term}"`);
   }
   assert.doesNotMatch(n, /blurry|mushy|low detail/i);
+  assert.doesNotMatch(n, /^ball,/);
 });

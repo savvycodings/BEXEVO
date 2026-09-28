@@ -26,6 +26,8 @@ const APP_TRAIN_STROKE_PRESET_IDS = [
   "side_wall_forehand",
   "contrapared_boast",
   "bandeja",
+  "smash",
+  "slice_serve",
 ] as const;
 
 test("trainStrokePresetEnum matches app train-taxonomy preset ids", () => {

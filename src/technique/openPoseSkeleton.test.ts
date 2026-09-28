@@ -37,28 +37,28 @@ function pixelAt(buf: Buffer, x: number, y: number): number[] {
   return [buf[i]!, buf[i + 1]!, buf[i + 2]!];
 }
 
-test("drawOpenPoseRgb draws the right upper arm as OpenPose limb 2 at 0.6", () => {
+test("drawOpenPoseRgb draws the right upper arm in the previous limb color", () => {
   const buf = drawOpenPoseRgb(pose(), SIZE, SIZE);
-  // Midpoint of RIGHT_SHOULDER (0.4,0.3) -> RIGHT_ELBOW (0.3,0.4); limb 2 color [255,170,0] * 0.6.
-  assert.deepEqual(pixelAt(buf, 0.35, 0.35), [153, 102, 0]);
+  // Midpoint of RIGHT_SHOULDER (0.4,0.3) -> RIGHT_ELBOW (0.3,0.4); color [0,255,85].
+  assert.deepEqual(pixelAt(buf, 0.35, 0.35), [0, 255, 85]);
 });
 
-test("drawOpenPoseRgb draws a neck joint at the shoulder midpoint in joint color 1", () => {
+test("drawOpenPoseRgb draws the shoulder line at the shoulder midpoint", () => {
   const buf = drawOpenPoseRgb(pose(), SIZE, SIZE);
-  assert.deepEqual(pixelAt(buf, 0.5, 0.3), [255, 85, 0]);
+  assert.deepEqual(pixelAt(buf, 0.5, 0.3), [255, 0, 0]);
 });
 
-test("drawOpenPoseRgb no longer draws the shoulder-to-hip torso box", () => {
+test("drawOpenPoseRgb draws the shoulder-to-hip bone", () => {
   const buf = drawOpenPoseRgb(pose(), SIZE, SIZE);
-  // Midpoint of RIGHT_SHOULDER (0.4,0.3) -> RIGHT_HIP (0.45,0.6), a bone only the old layout had.
-  assert.deepEqual(pixelAt(buf, 0.425, 0.45), BLACK);
+  // Midpoint of RIGHT_SHOULDER (0.4,0.3) -> RIGHT_HIP (0.45,0.6); color [255,170,0].
+  assert.deepEqual(pixelAt(buf, 0.425, 0.45), [255, 170, 0]);
 });
 
 test("drawOpenPoseRgb omits a hidden wrist's forearm but keeps the upper arm", () => {
   const buf = drawOpenPoseRgb(pose(["RIGHT_WRIST"]), SIZE, SIZE);
   // Forearm midpoint RIGHT_ELBOW (0.3,0.4) -> RIGHT_WRIST (0.25,0.5).
   assert.deepEqual(pixelAt(buf, 0.275, 0.45), BLACK);
-  assert.deepEqual(pixelAt(buf, 0.35, 0.35), [153, 102, 0]);
+  assert.deepEqual(pixelAt(buf, 0.35, 0.35), [0, 255, 85]);
 });
 
 /** Ball and racket placed well clear of the skeleton. */
@@ -83,25 +83,17 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void): void
   }
 }
 
-test("drawOpenPoseRgb draws no ball or racket marker by default", () => {
-  withEnv({ CORRECTION_DRAW_BALL: undefined, CORRECTION_DRAW_RACKET_BOX: undefined }, () => {
-    const buf = drawOpenPoseRgb(pose(), SIZE, SIZE, OVERLAY);
-    assert.deepEqual(pixelAt(buf, 0.9, 0.1), BLACK);
-    assert.deepEqual(pixelAt(buf, 0.1, 0.9), BLACK);
-  });
-});
-
-test("drawOpenPoseRgb draws the ball marker only when CORRECTION_DRAW_BALL is on", () => {
-  withEnv({ CORRECTION_DRAW_BALL: "true", CORRECTION_DRAW_RACKET_BOX: undefined }, () => {
+test("drawOpenPoseRgb paints the ball marker and leaves the racket box off by default", () => {
+  withEnv({ CORRECTION_DRAW_RACKET_BOX: undefined }, () => {
     const buf = drawOpenPoseRgb(pose(), SIZE, SIZE, OVERLAY);
     assert.deepEqual(pixelAt(buf, 0.9, 0.1), [255, 220, 0]);
     assert.deepEqual(pixelAt(buf, 0.1, 0.9), BLACK);
   });
 });
 
-test("drawOpenPoseRgb drops the neck and its limbs when a shoulder is hidden", () => {
+test("drawOpenPoseRgb drops the shoulder line when a shoulder is hidden", () => {
   const buf = drawOpenPoseRgb(pose(["LEFT_SHOULDER"]), SIZE, SIZE);
   assert.deepEqual(pixelAt(buf, 0.5, 0.3), BLACK);
-  // Neck (0.5,0.3) -> NOSE (0.5,0.2) midpoint.
-  assert.deepEqual(pixelAt(buf, 0.5, 0.25), BLACK);
+  // LEFT_SHOULDER -> NOSE midpoint, also missing without that shoulder.
+  assert.deepEqual(pixelAt(buf, 0.55, 0.25), BLACK);
 });

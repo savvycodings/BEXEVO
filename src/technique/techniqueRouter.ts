@@ -64,7 +64,7 @@ import {
 } from './openPoseVideo'
 import { generateCorrectedImageComfy, isComfyCorrectionConfigured } from './comfyCorrection'
 import { readImageDimensions } from './poseMask'
-import { generateCorrectedVideoComfy, generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured, comfyBaseHost, type CoachingVideoContext } from './comfyVideo'
+import { generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured, comfyBaseHost, type CoachingVideoContext } from './comfyVideo'
 import {
   generateCorrectedVideoGemini,
   isGeminiVideoConfigured,
@@ -495,7 +495,16 @@ async function persistTechniqueDetections(
   })
 }
 
-const DECLARED_SHOT_VIEWS = new Set(['front', 'side', 'diagonal', 'behind'])
+const DECLARED_SHOT_VIEWS = new Set([
+  'front',
+  'side',
+  'diagonal',
+  'behind',
+  'deg45_right_side_left_camera',
+  'deg45_right_side_right_camera',
+  'deg45_left_side_right_camera',
+  'deg45_left_side_left_camera',
+])
 
 function userShotFromAnalyzeBody(body: unknown): Record<string, string> | null {
   if (!body || typeof body !== 'object') return null
@@ -2337,6 +2346,13 @@ router.get('/analysis/:id/correction-images', async (req, res) => {
   }
 })
 
+/** The 5B image-to-video backup. Those clips are not served once Fun Control is the path. */
+function ti2vCorrectionCache(metrics: Record<string, unknown>): boolean {
+  const ctx = metrics.correction_context_videos_comfy
+  if (!ctx || typeof ctx !== 'object') return false
+  return (ctx as { pipeline?: unknown }).pipeline === 'ti2v-i2v'
+}
+
 /** Cached WAN I2V clip (URLs, not bytes) — fetch separately from analysis poll. */
 router.get('/analysis/:id/correction-videos', async (req, res) => {
   try {
@@ -2356,7 +2372,9 @@ router.get('/analysis/:id/correction-videos', async (req, res) => {
       return res.status(404).json({ error: 'Analysis not found' })
     }
     const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
-    const cached = parseCachedCorrectionVideo(metrics.correction_videos_comfy)
+    const cached = ti2vCorrectionCache(metrics)
+      ? null
+      : parseCachedCorrectionVideo(metrics.correction_videos_comfy)
     return res.json({
       analysisId: id,
       frame: cached?.frame ?? null,
@@ -3576,8 +3594,8 @@ router.post('/correction-videos', async (req, res) => {
     }
 
     const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
-    const skipCache = forceRegenerate === true
-    const cached = parseCachedCorrectionVideo(metrics.correction_videos_comfy)
+    const skipCache = forceRegenerate === true || ti2vCorrectionCache(metrics)
+    const cached = skipCache ? null : parseCachedCorrectionVideo(metrics.correction_videos_comfy)
     const videoProvider = resolveVideoProvider()
     const wantFun = isComfyFunControlConfigured()
     const ti2vConfigured = isComfyTi2vConfigured()
@@ -3708,18 +3726,54 @@ router.post('/correction-videos', async (req, res) => {
 
     const retrievalBlock = metrics.retrieval as
       | {
-          neighbors?: Array<{ train_sample_id?: string }>
+          neighbors?: Array<{
+            train_sample_id?: string
+            stroke_preset?: string
+            category?: string
+          }>
         }
       | undefined
-    const topNeighbor = retrievalBlock?.neighbors?.[0]
+    const declaredShot = readUserDeclaredShot(metrics)
+    const neighborMatchesDeclared = (
+      neighbor:
+        | { train_sample_id?: string; stroke_preset?: string; category?: string }
+        | undefined
+    ) => {
+      if (!neighbor?.train_sample_id) return false
+      if (!declaredShot) return true
+      return (
+        neighbor.stroke_preset === declaredShot.strokePreset ||
+        neighbor.category === declaredShot.category
+      )
+    }
+    let topNeighbor = retrievalBlock?.neighbors?.[0]
+    if (!neighborMatchesDeclared(topNeighbor)) {
+      if (topNeighbor?.train_sample_id) {
+        console.log('[Technique][correction-videos] ignoring pro clip from a different stroke', {
+          analysisId,
+          trainSampleId: topNeighbor.train_sample_id,
+          strokePreset: topNeighbor.stroke_preset ?? null,
+          declaredPreset: declaredShot?.strokePreset ?? null,
+        })
+      }
+      topNeighbor = undefined
+    }
     let proPoseSequence: Awaited<ReturnType<typeof getTrainSamplePoseSequence>> = null
     if (topNeighbor?.train_sample_id) {
       proPoseSequence = await getTrainSamplePoseSequence(topNeighbor.train_sample_id)
     }
+    if (wantFun && !proPoseSequence?.length) {
+      const fresh = await retrieveForTechniqueMetrics(metrics)
+      const freshNeighbor = fresh.neighbors?.[0]
+      if (neighborMatchesDeclared(freshNeighbor) && freshNeighbor?.train_sample_id) {
+        topNeighbor = freshNeighbor
+        proPoseSequence = await getTrainSamplePoseSequence(freshNeighbor.train_sample_id)
+      }
+    }
 
     let videoBuffer: Buffer
     let poseVideoBuffer: Buffer | undefined
-    let pipeline: 'fun-control' | 'ti2v-i2v' | 'veo-i2v' = 'ti2v-i2v'
+    let pipeline: 'fun-control' | 'ti2v-i2v' | 'veo-i2v' = 'fun-control'
     /** Span of the source clip the generated video covers, for the before/after compare. */
     let sourceWindow: { startMs: number; endMs: number } | null = null
 
@@ -3901,32 +3955,13 @@ router.post('/correction-videos', async (req, res) => {
         coaching,
       })
       pipeline = 'fun-control'
-    } else if (wantFun && !proPoseSequence?.length && !ti2vConfigured) {
-      console.warn('[Technique][correction-videos] no pro pose and no TI2V', {
+    } else if (wantFun) {
+      console.warn('[Technique][correction-videos] no pro pose for Fun Control', {
         analysisId,
         trainSampleId: topNeighbor?.train_sample_id ?? null,
       })
       return res.status(400).json({
-        error:
-          'No pro pose sequence for Fun Control. Analyze a clip that matches a train-library neighbor, or set COMFYUI_VIDEO_WORKFLOW_PATH for TI2V fallback.',
-      })
-    } else if (ti2vConfigured) {
-      if (wantFun) {
-        console.warn('[Technique][correction-videos] Fun Control configured but no pro pose; falling back to TI2V I2V', {
-          analysisId,
-          trainSampleId: topNeighbor?.train_sample_id ?? null,
-        })
-      }
-      console.log('[Technique][correction-videos] branch=ti2v-i2v', {
-        analysisId,
-        comfyHost: comfyBaseHost(),
-      })
-      videoBuffer = await generateCorrectedVideoComfy({
-        analysisId,
-        frameNumber: frameRow.frame,
-        imageBuffer: frameBuffer,
-        shotName,
-        handedness,
+        error: 'No pro pose sequence for Fun Control.',
       })
     } else {
       console.error('[Technique][correction-videos] no pipeline available', {
