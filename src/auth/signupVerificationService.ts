@@ -2,6 +2,7 @@ import { createHash, randomInt, randomUUID, timingSafeEqual } from "crypto";
 import { and, eq, gt } from "drizzle-orm";
 import { db, verification } from "../db";
 import { sendSignupVerificationEmail } from "../lib/email/sendSignupVerificationEmail";
+import { getSignupOtpHappyPathCode, isSignupOtpHappyPathCode } from "./signupOtpHappyPath";
 
 const CODE_TTL_MS = 10 * 60 * 1000;
 const VERIFIED_TTL_MS = 60 * 60 * 1000;
@@ -28,6 +29,22 @@ function safeEqualHash(a: string, b: string): boolean {
   const right = Buffer.from(b);
   if (left.length !== right.length) return false;
   return timingSafeEqual(left, right);
+}
+
+async function issueSignupVerifiedToken(email: string): Promise<string> {
+  const verificationToken = randomUUID();
+  const verifiedExpiresAt = new Date(Date.now() + VERIFIED_TTL_MS);
+
+  await db.delete(verification).where(eq(verification.identifier, signupCodeIdentifier(email)));
+  await db.delete(verification).where(eq(verification.identifier, signupVerifiedIdentifier(email)));
+  await db.insert(verification).values({
+    id: randomUUID(),
+    identifier: signupVerifiedIdentifier(email),
+    value: verificationToken,
+    expiresAt: verifiedExpiresAt,
+  });
+
+  return verificationToken;
 }
 
 export async function sendSignupVerificationCode(
@@ -71,12 +88,16 @@ export async function sendSignupVerificationCode(
     name,
     code,
   });
+  const happyPathCode = getSignupOtpHappyPathCode();
 
   if (!sendResult.sent) {
-    if (sendResult.skipped === "email_not_configured") {
-      console.warn("[SignupVerification] RESEND not configured — using dev fallback code", {
+    if (sendResult.skipped === "email_not_configured" || happyPathCode) {
+      console.warn("[SignupVerification] email not delivered — using development happy-path OTP", {
         email: normalized,
-        code,
+        skipped: sendResult.skipped,
+        error: sendResult.error,
+        generatedCode: code,
+        happyPathCode: happyPathCode ?? undefined,
       });
       return { ok: true };
     }
@@ -89,6 +110,13 @@ export async function sendSignupVerificationCode(
       error: "EMAIL_SEND_FAILED",
       message: sendResult.error || "Could not send verification email.",
     };
+  }
+
+  if (happyPathCode) {
+    console.warn("[SignupVerification] development happy-path OTP available if email does not arrive", {
+      email: normalized,
+      happyPathCode,
+    });
   }
 
   return { ok: true };
@@ -108,6 +136,14 @@ export async function verifySignupVerificationCode(
     return { ok: false, error: "INVALID_CODE", message: "Enter the 6-digit code from your email." };
   }
 
+  if (isSignupOtpHappyPathCode(trimmedCode)) {
+    console.warn("[SignupVerification] accepted development happy-path OTP", {
+      email: normalized,
+    });
+    const verificationToken = await issueSignupVerifiedToken(normalized);
+    return { ok: true, verificationToken };
+  }
+
   const record = await db.query.verification.findFirst({
     where: eq(verification.identifier, signupCodeIdentifier(normalized)),
   });
@@ -121,18 +157,7 @@ export async function verifySignupVerificationCode(
     return { ok: false, error: "INVALID_CODE", message: "That code is incorrect. Try again." };
   }
 
-  const verificationToken = randomUUID();
-  const verifiedExpiresAt = new Date(Date.now() + VERIFIED_TTL_MS);
-
-  await db.delete(verification).where(eq(verification.identifier, signupCodeIdentifier(normalized)));
-  await db.delete(verification).where(eq(verification.identifier, signupVerifiedIdentifier(normalized)));
-  await db.insert(verification).values({
-    id: randomUUID(),
-    identifier: signupVerifiedIdentifier(normalized),
-    value: verificationToken,
-    expiresAt: verifiedExpiresAt,
-  });
-
+  const verificationToken = await issueSignupVerifiedToken(normalized);
   return { ok: true, verificationToken };
 }
 
