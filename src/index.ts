@@ -9,6 +9,7 @@ import techniqueRouter from './technique/techniqueRouter'
 import trainRouter from './train/trainRouter'
 import profileRouter from './profile/profileRouter'
 import coachRouter from './coach/coachRouter'
+import clubRouter from './club/clubRouter'
 import signupVerificationRouter from './auth/signupVerificationRouter'
 import { passwordResetDevFallbackCode } from './auth/passwordResetOtp'
 import { getSignupOtpHappyPathCode } from './auth/signupOtpHappyPath'
@@ -116,6 +117,7 @@ app.use('/api/auth/technique', techniqueRouter)
 app.use('/api/auth/train', trainRouter)
 app.use('/api/auth/profile', profileRouter)
 app.use('/api/auth/coach', coachRouter)
+app.use('/api/auth/club', clubRouter)
 app.use('/api/auth/signup', signupRequestLogger, signupVerificationRouter)
 
 app.all('/api/auth/*', toNodeHandler(auth))
@@ -164,6 +166,7 @@ app.use('/technique', techniqueRouter)
 app.use('/train', trainRouter)
 app.use('/profile', profileRouter)
 app.use('/coach', coachRouter)
+app.use('/club', clubRouter)
 app.use('/signup', signupRequestLogger, signupVerificationRouter)
 
 app.listen(3050, '0.0.0.0', () => {

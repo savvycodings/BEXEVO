@@ -281,6 +281,13 @@
       "when": 1784600000000,
       "tag": "0040_user_profile_anthropometrics",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1790005934801,
+      "tag": "0040_charming_jazinda",
+      "breakpoints": true
     }
   ]
 }
