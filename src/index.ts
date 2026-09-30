@@ -9,7 +9,10 @@ import techniqueRouter from './technique/techniqueRouter'
 import trainRouter from './train/trainRouter'
 import profileRouter from './profile/profileRouter'
 import coachRouter from './coach/coachRouter'
+import clubRouter from './club/clubRouter'
 import signupVerificationRouter from './auth/signupVerificationRouter'
+import { passwordResetDevFallbackCode } from './auth/passwordResetOtp'
+import { getSignupOtpHappyPathCode } from './auth/signupOtpHappyPath'
 import { getFromAddress, isEmailConfigured } from './lib/email/resendClient'
 import bodyParser from 'body-parser'
 import path from 'path'
@@ -114,6 +117,7 @@ app.use('/api/auth/technique', techniqueRouter)
 app.use('/api/auth/train', trainRouter)
 app.use('/api/auth/profile', profileRouter)
 app.use('/api/auth/coach', coachRouter)
+app.use('/api/auth/club', clubRouter)
 app.use('/api/auth/signup', signupRequestLogger, signupVerificationRouter)
 
 app.all('/api/auth/*', toNodeHandler(auth))
@@ -162,6 +166,7 @@ app.use('/technique', techniqueRouter)
 app.use('/train', trainRouter)
 app.use('/profile', profileRouter)
 app.use('/coach', coachRouter)
+app.use('/club', clubRouter)
 app.use('/signup', signupRequestLogger, signupVerificationRouter)
 
 app.listen(3050, '0.0.0.0', () => {
@@ -171,7 +176,16 @@ app.listen(3050, '0.0.0.0', () => {
     from: getFromAddress(),
     hasApiKey: !!process.env.RESEND_API_KEY?.trim(),
   })
-  console.log('[SignupVerification] Routes ready at /signup/* and /api/auth/signup/*')
+  const happyPathCode = getSignupOtpHappyPathCode()
+  console.log('[SignupVerification] Routes ready at /signup/* and /api/auth/signup/*', {
+    happyPathOtp: happyPathCode ? `enter ${happyPathCode} if email does not arrive` : 'disabled',
+  })
+  const passwordResetDevCode = passwordResetDevFallbackCode()
+  console.log('[PasswordReset] Email code ready at /api/auth/email-otp/request-password-reset', {
+    happyPathOtp: passwordResetDevCode
+      ? `enter ${passwordResetDevCode} if email does not arrive`
+      : 'disabled',
+  })
   if (String(process.env.XEVO_TEXT_PROVIDER ?? '').trim().toLowerCase() === 'xevo') {
     void warnIfXevoModelMismatch()
   }

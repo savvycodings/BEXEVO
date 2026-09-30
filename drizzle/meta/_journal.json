@@ -288,6 +288,13 @@
       "when": 1784700000000,
       "tag": "0041_view_angles_and_core_shots",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1790005934801,
+      "tag": "0042_club_tables",
+      "breakpoints": true
     }
   ]
 }

@@ -967,6 +967,98 @@ export const xpEvent = pgTable(
   ]
 );
 
+/** A padel club business listing, submitted by a self-serve owner account and reviewed by axevo
+ * before it's publicly visible. Status: "pending" | "approved" | "rejected". */
+export const club = pgTable(
+  "club",
+  {
+    id: text("id").primaryKey(),
+    ownerUserId: text("ownerUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    /** Public club id used in app routes/URLs (replaces the old hardcoded "i95"/"reserve" keys). */
+    slug: text("slug").notNull(),
+    description: text("description"),
+    address: text("address").notNull(),
+    city: text("city"),
+    region: text("region"),
+    country: text("country"),
+    postalCode: text("postalCode"),
+    latitude: text("latitude"),
+    longitude: text("longitude"),
+    phone: text("phone"),
+    email: text("email"),
+    website: text("website"),
+    hoursText: text("hoursText"),
+    bannerImageUrl: text("bannerImageUrl"),
+    logoImageUrl: text("logoImageUrl"),
+    status: text("status").notNull().default("pending"),
+    reviewedByUserId: text("reviewedByUserId").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    reviewedAt: timestamp("reviewedAt"),
+    rejectionReason: text("rejectionReason"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("club_slug_idx").on(table.slug),
+    index("club_owner_idx").on(table.ownerUserId),
+    index("club_status_idx").on(table.status),
+  ]
+);
+
+export const clubGalleryImage = pgTable(
+  "club_gallery_image",
+  {
+    id: text("id").primaryKey(),
+    clubId: text("clubId")
+      .notNull()
+      .references(() => club.id, { onDelete: "cascade" }),
+    imageUrl: text("imageUrl").notNull(),
+    displayOrder: integer("displayOrder").notNull().default(0),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [index("club_gallery_image_club_idx").on(table.clubId)]
+);
+
+/** `indoorOutdoor`: "indoor" | "outdoor" | "covered". */
+export const clubCourt = pgTable(
+  "club_court",
+  {
+    id: text("id").primaryKey(),
+    clubId: text("clubId")
+      .notNull()
+      .references(() => club.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    indoorOutdoor: text("indoorOutdoor").notNull(),
+    hasLighting: boolean("hasLighting").notNull().default(false),
+    displayOrder: integer("displayOrder").notNull().default(0),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [index("club_court_club_idx").on(table.clubId)]
+);
+
+/** One row per (club, amenity) the club owner has checked. `amenityKey` is validated against
+ * `CLUB_AMENITY_KEYS` (club/clubDefinitions.ts) — a fixed, axevo-curated catalog, not user data. */
+export const clubAmenity = pgTable(
+  "club_amenity",
+  {
+    id: text("id").primaryKey(),
+    clubId: text("clubId")
+      .notNull()
+      .references(() => club.id, { onDelete: "cascade" }),
+    amenityKey: text("amenityKey").notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("club_amenity_club_key_idx").on(table.clubId, table.amenityKey),
+    index("club_amenity_club_idx").on(table.clubId),
+  ]
+);
+
 export const falLoraTrainingRun = pgTable("fal_lora_training_run", {
   id: text("id").primaryKey(),
   datasetId: text("datasetId")

@@ -1,6 +1,8 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { expo } from "@better-auth/expo";
+import { emailOTP } from "better-auth/plugins";
+import { deliverPasswordResetOtp, passwordResetDevOtp } from "./auth/passwordResetOtp";
 import { db, user, session, account, verification } from "./db";
 
 const resolvedBaseUrl = process.env.BETTER_AUTH_URL;
@@ -64,12 +66,18 @@ const trustedOrigins = [
         "BETTER_AUTH_URL",
         "PUBLIC_VIDEO_BASE_URL",
         "PUBLIC_BASE_URL",
-        "NGROK_PUBLIC_URL"
+        "NGROK_PUBLIC_URL",
+        "CLUB_PORTAL_URL"
       ),
       "http://localhost:3050",
       "http://127.0.0.1:3050",
       "http://localhost:8081",
       "http://127.0.0.1:8081",
+      // Club Portal (Next.js dashboard) dev server — same-site as BEXevo's own
+      // localhost origins, so cookies still flow; production origin comes from
+      // CLUB_PORTAL_URL above.
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
       "exp://",
       "xevo://",
       "xevo://*",
@@ -97,8 +105,21 @@ export const auth = betterAuth({
   }),
   emailAndPassword: {
     enabled: true,
+    revokeSessionsOnPasswordReset: true,
   },
-  plugins: [expo()],
+  plugins: [
+    expo(),
+    emailOTP({
+      otpLength: 6,
+      expiresIn: 10 * 60,
+      allowedAttempts: 5,
+      storeOTP: "hashed",
+      generateOTP: ({ type }) => passwordResetDevOtp(type),
+      sendVerificationOTP: async ({ email, otp, type }) => {
+        await deliverPasswordResetOtp({ email, otp, type });
+      },
+    }),
+  ],
   ...(hasSocialProviders ? { socialProviders } : {}),
   secret: resolvedSecret,
   baseURL: resolvedBaseUrl,
