@@ -581,14 +581,17 @@ function bodyFrameOf(lm: NamedLandmarks, aspect: number): BodyFrame | null {
 export function retargetProToUser(
   proLm: NamedLandmarks,
   userLm: NamedLandmarks,
-  opts?: { aspect?: number; mirror?: boolean }
+  opts?: { aspect?: number; mirror?: boolean; scale?: number }
 ): NamedLandmarks {
   const aspect = opts?.aspect && opts.aspect > 0 ? opts.aspect : 1;
   const proFrame = bodyFrameOf(proLm, aspect);
   const userFrame = bodyFrameOf(userLm, aspect);
   if (!proFrame || !userFrame) return proLm;
 
-  const scale = userFrame.torso / proFrame.torso;
+  const scale =
+    opts?.scale && Number.isFinite(opts.scale) && opts.scale > 0
+      ? opts.scale
+      : userFrame.torso / proFrame.torso;
   const sx = opts?.mirror ? -scale : scale;
   const out: NamedLandmarks = {};
   for (const [name, lm] of Object.entries(proLm)) {
@@ -683,6 +686,33 @@ export function correctionPoseBlend(): number {
 }
 
 /**
+ * One pro-to-user size factor for the whole window: median user torso over median pro torso.
+ * The per-frame ratio jumps whenever either torso foreshortens through trunk rotation, and
+ * because retargeting scales about the hips, the whole skeleton shrinks and the feet lift on
+ * that frame. Null when no frame resolves a torso on both sides.
+ */
+export function windowRetargetScale(
+  userFrames: NamedLandmarks[],
+  proFrames: NamedLandmarks[],
+  aspect = 1
+): number | null {
+  const count = Math.min(userFrames.length, proFrames.length);
+  const userTorsos: number[] = [];
+  const proTorsos: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const u = bodyFrameOf(userFrames[i] ?? {}, aspect);
+    const p = bodyFrameOf(proFrames[i] ?? {}, aspect);
+    if (!u || !p) continue;
+    userTorsos.push(u.torso);
+    proTorsos.push(p.torso);
+  }
+  const u = median(userTorsos);
+  const p = median(proTorsos);
+  if (u == null || p == null) return null;
+  return u / p;
+}
+
+/**
  * Per-frame control poses: retarget the pro into the user's frame, then blend the user
  * toward it so the clip reads as a correction of this athlete rather than a pose swap.
  */
@@ -692,9 +722,15 @@ export function coachedControlLandmarkFrames(opts: {
   aspect?: number;
   mirror?: boolean;
   blend?: number;
+  /** Pro size factor; defaults to `windowRetargetScale`, else per-frame torso ratio. */
+  scale?: number | null;
 }): NamedLandmarks[] {
   const blend = opts.blend ?? correctionPoseBlend();
   const count = Math.min(opts.userFrames.length, opts.proFrames.length);
+  const scale =
+    opts.scale !== undefined
+      ? opts.scale
+      : windowRetargetScale(opts.userFrames, opts.proFrames, opts.aspect);
   const out: NamedLandmarks[] = [];
   for (let i = 0; i < count; i++) {
     const userLm = opts.userFrames[i] ?? {};
@@ -706,6 +742,7 @@ export function coachedControlLandmarkFrames(opts: {
     const retargeted = retargetProToUser(proLm, userLm, {
       aspect: opts.aspect,
       mirror: opts.mirror,
+      scale: scale ?? undefined,
     });
     out.push(blendLandmarks(userLm, retargeted, blend));
   }
@@ -778,6 +815,95 @@ export function controlCanvasSize(
 
   const scale = size / Math.max(w, h);
   return { width: round32(w * scale), height: round32(h * scale) };
+}
+
+/** Region of the source frame, in source pixels, that the start image and control clip share. */
+export type ControlCrop = { x: number; y: number; w: number; h: number };
+
+/**
+ * Largest rectangle at the canvas aspect, centred on the user's median hip across the window
+ * and clamped inside the source. Fun Control center-crops `ref_image` to the canvas on its own,
+ * while the skeleton used to be stretched over the whole frame, so on a portrait clip the two
+ * disagreed on the player's size. Cropping here, once, gives both inputs the same frame and
+ * leaves ComfyUI's resize nothing to change. One crop per request: no per-frame pan.
+ */
+export function pickControlCrop(opts: {
+  srcW: number;
+  srcH: number;
+  canvasW: number;
+  canvasH: number;
+  userFrames: NamedLandmarks[];
+}): ControlCrop {
+  const { srcW, srcH } = opts;
+  const aspect = opts.canvasW / opts.canvasH;
+  let w = srcW;
+  let h = srcW / aspect;
+  if (h > srcH) {
+    h = srcH;
+    w = srcH * aspect;
+  }
+  w = Math.round(w);
+  h = Math.round(h);
+
+  const hipXs: number[] = [];
+  const hipYs: number[] = [];
+  for (const lm of opts.userFrames) {
+    const hip = midpoint(lm.LEFT_HIP, lm.RIGHT_HIP);
+    if (!hip) continue;
+    hipXs.push(hip.x);
+    hipYs.push(hip.y);
+  }
+  // `median` drops non-positive values, which are off-frame for hips anyway.
+  const cx = (median(hipXs) ?? 0.5) * srcW;
+  const cy = (median(hipYs) ?? 0.5) * srcH;
+  const x = Math.round(Math.max(0, Math.min(srcW - w, cx - w / 2)));
+  const y = Math.round(Math.max(0, Math.min(srcH - h, cy - h / 2)));
+  return { x, y, w, h };
+}
+
+/** Normalized source point to normalized canvas point through `crop`. Off-crop values are kept. */
+export function frameToCanvas(
+  lm: NamedLandmark,
+  crop: ControlCrop,
+  srcW: number,
+  srcH: number
+): NamedLandmark {
+  return {
+    ...lm,
+    x: (lm.x * srcW - crop.x) / crop.w,
+    y: (lm.y * srcH - crop.y) / crop.h,
+  };
+}
+
+export function framesToCanvas(
+  frames: NamedLandmarks[],
+  crop: ControlCrop,
+  srcW: number,
+  srcH: number
+): NamedLandmarks[] {
+  return frames.map((frame) => {
+    const out: NamedLandmarks = {};
+    for (const [name, lm] of Object.entries(frame)) {
+      if (!lm || typeof lm.x !== "number" || typeof lm.y !== "number") continue;
+      out[name] = frameToCanvas(lm, crop, srcW, srcH);
+    }
+    return out;
+  });
+}
+
+/** YOLO box in normalized source coordinates to normalized canvas coordinates. */
+export function boxToCanvas(
+  box: NormBox,
+  crop: ControlCrop,
+  srcW: number,
+  srcH: number
+): NormBox {
+  return [
+    (box[0] * srcW - crop.x) / crop.w,
+    (box[1] * srcH - crop.y) / crop.h,
+    (box[2] * srcW - crop.x) / crop.w,
+    (box[3] * srcH - crop.y) / crop.h,
+  ];
 }
 
 export async function renderOpenPoseMp4(opts: {
