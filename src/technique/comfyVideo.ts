@@ -425,14 +425,11 @@ export async function generatePoseRetargetVideoComfy(opts: {
   if (!positive?.inputs) {
     throw new Error("Fun Control workflow missing CLIPTextEncode node 99");
   }
-  const useCoachingPrompt = hasCoachingVideoContext(opts.coaching);
-  positive.inputs.text = useCoachingPrompt
-    ? buildWanFunControlCoachingPrompt(
-        opts.shotName,
-        opts.handedness,
-        opts.coaching as CoachingVideoContext
-      )
-    : buildWanFunControlPrompt(opts.shotName, opts.handedness);
+  // Coaching dumps (diagnosis + PRIORITY BODY CHANGES coords) bring back the Fun Control
+  // token lattice on good bf16 weights. Pose already carries the correction; keep CLIP text
+  // on the short generic shot prompt. See docs/texture-investigation/coaching-prompt-lattice.md.
+  const hadCoachingContext = hasCoachingVideoContext(opts.coaching);
+  positive.inputs.text = buildWanFunControlPrompt(opts.shotName, opts.handedness);
   const negative = workflow[FUN_NEGATIVE_NODE_ID];
   if (negative?.inputs) {
     negative.inputs.text = buildWanFunControlNegativePrompt();
@@ -509,7 +506,8 @@ export async function generatePoseRetargetVideoComfy(opts: {
       model: String(workflow["101"]?.inputs?.unet_name ?? "?").includes("fp8")
         ? "fp8"
         : "bf16",
-      prompt: useCoachingPrompt ? "coaching" : "generic",
+      prompt: "generic",
+      coachingContextSkipped: hadCoachingContext,
       timeoutMs,
     });
 
