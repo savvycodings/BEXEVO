@@ -4,6 +4,7 @@ import {
   buildWanFunControlCoachingPrompt,
   buildWanFunControlNegativePrompt,
   buildWanFunControlPrompt,
+  buildWanI2vPrompt,
 } from "./comfyVideo";
 
 const coaching = buildWanFunControlCoachingPrompt("forehand volley", "right-handed", {
@@ -33,6 +34,18 @@ test("coaching Fun Control prompt keeps its coaching sections and the ball", () 
   assert.match(coaching, /stopping at the ball/);
 });
 
+test("prompts spell out a padel racket and only keep a ball the frame already shows", () => {
+  for (const p of [
+    buildWanFunControlPrompt("forehand volley", "right-handed"),
+    coaching,
+    buildWanI2vPrompt("forehand volley", "right-handed"),
+  ]) {
+    assert.match(p, /padel racket/);
+    assert.match(p, /no strings/);
+    assert.match(p, /no ball appears/);
+  }
+});
+
 test("Fun Control negative prompt rejects a second ball, not softness", () => {
   const n = buildWanFunControlNegativePrompt();
   for (const term of [
@@ -41,6 +54,9 @@ test("Fun Control negative prompt rejects a second ball, not softness", () => {
     "incorrect ball contact",
     "changed face",
     "camera movement",
+    "tennis racket",
+    "racket strings",
+    "elongated arms",
   ]) {
     assert.ok(n.includes(term), `missing "${term}"`);
   }

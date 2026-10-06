@@ -18,6 +18,7 @@ type ApiWorkflow = Record<string, { class_type?: string; inputs?: Record<string,
 const LOAD_IMAGE_NODE_ID = "59";
 const KSAMPLER_NODE_ID = "3";
 const POSITIVE_NODE_ID = "6";
+const NEGATIVE_NODE_ID = "7";
 const LATENT_NODE_ID = "55";
 const SAVE_VIDEO_NODE_ID = "58";
 
@@ -88,8 +89,10 @@ export function buildWanI2vPrompt(shotName: string, handedness: string): string 
   const hand = handedness.trim() && handedness !== "unknown" ? `${handedness} ` : "";
   return (
     `Photorealistic padel tennis, ${hand}${shot}. ` +
-    `Same person as the start frame, same clothing, same court and lighting. ` +
-    `Natural athletic motion, camera locked, keep the racket and ball if visible.`
+    `Same person as the start frame, same face, same clothing, same court and lighting. ` +
+    `Natural athletic motion, camera locked. ` +
+    racketSentence("start") +
+    `Keep the ball only if it is visible in the start frame; otherwise no ball appears.`
   );
 }
 
@@ -137,6 +140,8 @@ export async function generateCorrectedVideoComfy(opts: {
   const positive = workflow[POSITIVE_NODE_ID];
   if (!positive?.inputs) throw new Error("WAN workflow missing CLIPTextEncode node 6");
   positive.inputs.text = buildWanI2vPrompt(opts.shotName, opts.handedness);
+  const negative = workflow[NEGATIVE_NODE_ID];
+  if (negative?.inputs) negative.inputs.text = buildWanFunControlNegativePrompt();
 
   const startName = `xevo_wan_start_${prefixId}_${opts.frameNumber}.png`;
   try {
@@ -214,11 +219,23 @@ function funControlSteps(): number {
   return 20;
 }
 
+/** Video models default to a strung tennis racket unless the padel racket is spelled out. */
+function racketSentence(frame: "start" | "reference"): string {
+  return (
+    `The player holds exactly one padel racket, the same one as in the ${frame} frame: a solid perforated face with no strings, a short handle, normal size, and the same color and design throughout. `
+  );
+}
+
+/**
+ * Conditional on the frame: asserting a ball "visible in the start frame" when there is none
+ * makes the model invent one mid-clip.
+ */
 function ballContinuitySentence(frame: "start" | "reference", shot: string): string {
   return (
-    `The player holds exactly one normal-sized professional padel racket with realistic proportions. ` +
-    `Ball continuity — critical. There is exactly ONE padel ball in the entire scene at all times. It must be the same physical ball visible in the ${frame} frame. Preserve its identity and visual continuity throughout the motion. ` +
+    racketSentence(frame) +
+    `Ball continuity — critical. If a padel ball is visible in the ${frame} frame, there is exactly ONE padel ball in the entire scene at all times, the same physical ball. Preserve its identity and visual continuity throughout the motion. ` +
     `The player must make realistic racket contact with that exact same ball during the ${shot}. The ball may naturally change position according to the action, but never duplicate, replace, regenerate, or introduce another ball. ` +
+    `If no ball is visible in the ${frame} frame, no ball appears at any point. ` +
     `At no point may two balls appear simultaneously, including during motion blur, racket contact, or immediately before/after impact. `
   );
 }
@@ -358,10 +375,10 @@ export function hasCoachingVideoContext(ctx?: CoachingVideoContext | null): bool
 export function buildWanFunControlNegativePrompt(): string {
   return (
     "extra ball, multiple balls, duplicate ball, cloned ball, ghost ball, floating ball, ball trail, invented ball, inconsistent ball identity, ball appearing from nowhere, " +
-    "extra racket, duplicate racket, deformed racket, warped racket, oversized racket, oversized paddle, tiny racket, " +
+    "extra racket, duplicate racket, deformed racket, warped racket, oversized racket, oversized paddle, tiny racket, tennis racket, strung racket, racket strings, racket changing color, " +
     "different person, changed face, changed identity, changed clothing, changed shoes, changed court, changed background, changed lighting, changed camera angle, " +
     "camera movement, camera shake, zoom, crop, reframing, perspective shift, " +
-    "incorrect grip, impossible racket angle, incorrect handedness, anatomically impossible pose, broken wrist, twisted arm, extra arm, extra hand, extra fingers, missing fingers, malformed hands, duplicated limbs, distorted anatomy, " +
+    "incorrect grip, impossible racket angle, incorrect handedness, anatomically impossible pose, broken wrist, twisted arm, elongated arms, stretched limbs, extra arm, extra hand, extra fingers, missing fingers, malformed hands, duplicated limbs, distorted anatomy, " +
     "incorrect ball contact, ball far from racket, unrealistic contact point, unrealistic padel technique, " +
     "cartoon, illustration, CGI, 3D render, artificial skin, unrealistic proportions"
   );
