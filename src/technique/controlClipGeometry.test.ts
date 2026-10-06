@@ -11,6 +11,7 @@ import {
   inferSwingSideFromLandmarks,
   retargetProToUser,
   userLandmarksForFrames,
+  windowRetargetScale,
   type NamedLandmarks,
 } from "./openPoseVideo";
 import { pickImpactAlignedProPoseFrame } from "./proTimeAlign";
@@ -274,4 +275,33 @@ test("pickImpactAlignedProPoseFrame rescales the offset when fps differ", () => 
     proFps: 60,
   });
   assert.equal(picked?.frame_idx, 70);
+});
+
+/** Pro pose with ankles below the hips; `torso` alone shrinks when the trunk foreshortens. */
+function proWithLegs(torso: number): NamedLandmarks {
+  const lm = body({ hx: 0.5, hy: 0.5, torso });
+  lm.LEFT_ANKLE = { x: 0.45, y: 0.9 };
+  lm.RIGHT_ANKLE = { x: 0.55, y: 0.9 };
+  return lm;
+}
+
+test("coachedControlLandmarkFrames keeps the pro size constant when one torso foreshortens", () => {
+  const user = body({ hx: 0.5, hy: 0.6, torso: 0.2 });
+  const proFrames = [proWithLegs(0.4), proWithLegs(0.4), proWithLegs(0.34), proWithLegs(0.4), proWithLegs(0.4)];
+  const out = coachedControlLandmarkFrames({
+    userFrames: proFrames.map(() => user),
+    proFrames,
+    blend: 1,
+  });
+  const legSpan = (lm: NamedLandmarks) => (lm.LEFT_ANKLE?.y ?? 0) - (lm.LEFT_HIP?.y ?? 0);
+  for (const i of [1, 2, 3]) {
+    assert.ok(Math.abs(legSpan(out[i]!) - legSpan(out[0]!)) < 1e-9, `frame ${i} leg ${legSpan(out[i]!)}`);
+  }
+  // Median pro torso is 0.4, user 0.2, so legs (0.4 long on the pro) come out at 0.2.
+  assert.ok(Math.abs(legSpan(out[2]!) - 0.2) < 1e-9);
+});
+
+test("windowRetargetScale is null without a torso on both sides", () => {
+  assert.equal(windowRetargetScale([{}], [proWithLegs(0.4)]), null);
+  assert.ok(Math.abs((windowRetargetScale([body({ hx: 0.5, hy: 0.5, torso: 0.1 })], [proWithLegs(0.4)]) ?? 0) - 0.25) < 1e-9);
 });

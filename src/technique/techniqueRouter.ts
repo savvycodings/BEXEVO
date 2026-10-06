@@ -51,18 +51,24 @@ import {
 import {
   alignedProLandmarksByImpact,
   alignedProLandmarksForUserFrames,
+  boxToCanvas,
   coachedControlLandmarkFrames,
   controlCanvasSize,
   controlOverlaysForWindow,
   correctionFunLength,
   correctionPoseBlend,
+  framesToCanvas,
   inferSwingSideFromLandmarks,
+  pickControlCrop,
   renderOpenPoseMp4,
   sampleImpactWindowFrameIndices,
   userLandmarksForFrames,
+  windowRetargetScale,
+  type ControlCrop,
   type PoseYoloRow,
 } from './openPoseVideo'
 import { generateCorrectedImageComfy, isComfyCorrectionConfigured } from './comfyCorrection'
+import sharp from 'sharp'
 import { readImageDimensions } from './poseMask'
 import { generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured, comfyBaseHost, type CoachingVideoContext } from './comfyVideo'
 import {
@@ -3773,6 +3779,8 @@ router.post('/correction-videos', async (req, res) => {
 
     let videoBuffer: Buffer
     let poseVideoBuffer: Buffer | undefined
+    /** What the video model was given as its start/ref image; persisted as `startImage`. */
+    let startImageBuffer: Buffer = frameBuffer
     let pipeline: 'fun-control' | 'ti2v-i2v' | 'veo-i2v' = 'fun-control'
     /** Span of the source clip the generated video covers, for the before/after compare. */
     let sourceWindow: { startMs: number; endMs: number } | null = null
@@ -3858,9 +3866,10 @@ router.post('/correction-videos', async (req, res) => {
 
       // Control clip matches the user's framing so the skeleton stays in their camera space.
       let canvas = controlCanvasSize(null, null)
+      let source: { width: number; height: number } | null = null
       try {
-        const dims = await readImageDimensions(frameBuffer)
-        canvas = controlCanvasSize(dims.width, dims.height)
+        source = await readImageDimensions(frameBuffer)
+        canvas = controlCanvasSize(source.width, source.height)
       } catch (err) {
         console.warn('[Technique][correction-videos] start frame dimensions failed', {
           analysisId,
@@ -3868,12 +3877,49 @@ router.post('/correction-videos', async (req, res) => {
         })
       }
 
-      const userLandmarkFrames = userLandmarksForFrames(
+      const userLandmarkFramesRaw = userLandmarksForFrames(
         userFrameIndices,
         Array.isArray(metrics.pose_data)
           ? (metrics.pose_data as Array<{ frame?: number; landmarks?: unknown }>)
           : []
       )
+
+      // One crop for the start image and every control landmark. Fun Control center-crops a
+      // non-canvas-sized ref_image on its own, while the skeleton was stretched over the whole
+      // frame, so portrait clips got a skeleton ~56% of the player's height.
+      let crop: ControlCrop | null = null
+      let userLandmarkFrames = userLandmarkFramesRaw
+      let mapBox = (box: [number, number, number, number]) => box
+      if (source) {
+        const src = source
+        const picked = pickControlCrop({
+          srcW: src.width,
+          srcH: src.height,
+          canvasW: canvas.width,
+          canvasH: canvas.height,
+          userFrames: userLandmarkFramesRaw,
+        })
+        try {
+          startImageBuffer = await sharp(frameBuffer)
+            .extract({ left: picked.x, top: picked.y, width: picked.w, height: picked.h })
+            .resize(canvas.width, canvas.height, { fit: 'fill' })
+            .png()
+            .toBuffer()
+          crop = picked
+          userLandmarkFrames = framesToCanvas(userLandmarkFramesRaw, picked, src.width, src.height)
+          mapBox = (box) => boxToCanvas(box, picked, src.width, src.height)
+        } catch (err) {
+          console.warn('[Technique][correction-videos] start frame crop failed', {
+            analysisId,
+            message: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+      const mapYoloRow = (r: PoseYoloRow): PoseYoloRow => ({
+        ...r,
+        racket_bbox: r.racket_bbox ? mapBox(r.racket_bbox) : r.racket_bbox,
+        ball_bbox: r.ball_bbox ? mapBox(r.ball_bbox) : r.ball_bbox,
+      })
       // Both sides must be measured the same way. MediaPipe's LEFT_/RIGHT_ naming does not
       // reliably track real-world handedness, so mixing the user's profile handedness into this
       // comparison flips the pro pose on a naming mismatch rather than a genuine side mismatch.
@@ -3883,18 +3929,20 @@ router.post('/correction-videos', async (req, res) => {
       const mirrorPro = Boolean(proSide && userSide && proSide !== userSide)
 
       const poseBlend = correctionPoseBlend()
+      const proScale = windowRetargetScale(userLandmarkFrames, proLandmarks, canvasAspect)
       const controlLandmarks = coachedControlLandmarkFrames({
         userFrames: userLandmarkFrames,
         proFrames: proLandmarks,
         aspect: canvasAspect,
         mirror: mirrorPro,
         blend: poseBlend,
+        scale: proScale,
       })
       const landmarkFrames = controlLandmarks.length ? controlLandmarks : proLandmarks
 
       const overlays = controlOverlaysForWindow({
         userFrameIndices,
-        poseRows: windowRows.length ? windowRows : yoloSource,
+        poseRows: (windowRows.length ? windowRows : yoloSource).map(mapYoloRow),
         controlLandmarks: landmarkFrames,
         handedness,
         width: canvas.width,
@@ -3924,12 +3972,16 @@ router.post('/correction-videos', async (req, res) => {
         // Logged for visibility only; deliberately not an input to mirrorPro.
         profileHandedness: handedness,
         canvas: `${canvas.width}x${canvas.height}`,
+        source: source ? `${source.width}x${source.height}` : null,
+        crop,
+        proScale: proScale != null ? Math.round(proScale * 1000) / 1000 : null,
         comfyHost: comfyBaseHost(),
       })
       const coaching = buildCorrectionVideoCoachingContext({
         metrics,
         userFrameIndices,
-        userLandmarkFrames,
+        // Raw on both sides: the coaching deltas compare user against pro in source space.
+        userLandmarkFrames: userLandmarkFramesRaw,
         proLandmarkFrames: proLandmarks,
         userImpactFrame,
         handedness,
@@ -3946,7 +3998,7 @@ router.post('/correction-videos', async (req, res) => {
       videoBuffer = await generatePoseRetargetVideoComfy({
         analysisId,
         frameNumber: frameRow.frame,
-        imageBuffer: frameBuffer,
+        imageBuffer: startImageBuffer,
         poseVideoBuffer,
         shotName,
         handedness,
@@ -3982,7 +4034,7 @@ router.post('/correction-videos', async (req, res) => {
       analysisId,
       frame: frameRow.frame,
       videoBuffer,
-      startImageBuffer: frameBuffer,
+      startImageBuffer,
       poseVideoBuffer,
       videoFileName: pipeline === 'veo-i2v' ? 'corrected-veo.mp4' : 'corrected.mp4',
       ...(sourceWindow
