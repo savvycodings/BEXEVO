@@ -9,6 +9,7 @@ import {
   correctionFunLength,
   smoothLandmarkTrack,
   inferSwingSideFromLandmarks,
+  rejectBodySizeOutliers,
   retargetProToUser,
   userLandmarksForFrames,
   windowRetargetScale,
@@ -304,4 +305,42 @@ test("coachedControlLandmarkFrames keeps the pro size constant when one torso fo
 test("windowRetargetScale is null without a torso on both sides", () => {
   assert.equal(windowRetargetScale([{}], [proWithLegs(0.4)]), null);
   assert.ok(Math.abs((windowRetargetScale([body({ hx: 0.5, hy: 0.5, torso: 0.1 })], [proWithLegs(0.4)]) ?? 0) - 0.25) < 1e-9);
+});
+
+/** The same pose shrunk about a new hip point, like a tracker that jumped to a smaller background figure. */
+function shrunk(lm: NamedLandmarks, k: number, hx: number, hy: number): NamedLandmarks {
+  const out: NamedLandmarks = {};
+  const ox = ((lm.LEFT_HIP?.x ?? 0) + (lm.RIGHT_HIP?.x ?? 0)) / 2;
+  const oy = ((lm.LEFT_HIP?.y ?? 0) + (lm.RIGHT_HIP?.y ?? 0)) / 2;
+  for (const [name, p] of Object.entries(lm)) {
+    if (p) out[name] = { x: hx + (p.x - ox) * k, y: hy + (p.y - oy) * k };
+  }
+  return out;
+}
+
+test("rejectBodySizeOutliers rebuilds a frame where the whole body shrinks", () => {
+  const frames = [0.50, 0.52, 0.54, 0.56, 0.58].map((hx) => body({ hx, hy: 0.6, torso: 0.2 }));
+  frames[2] = shrunk(frames[2]!, 0.6, 0.15, 0.4);
+  const { frames: out, replaced } = rejectBodySizeOutliers(frames, { tolerance: 0.2 });
+  assert.deepEqual(replaced, [2]);
+  // Halfway between its neighbours: hips back at x 0.54, torso back to 0.2.
+  const hipX = ((out[2]!.LEFT_HIP?.x ?? 0) + (out[2]!.RIGHT_HIP?.x ?? 0)) / 2;
+  assert.ok(Math.abs(hipX - 0.54) < 1e-9, `hip x ${hipX}`);
+  assert.ok(Math.abs((out[2]!.LEFT_HIP!.y - out[2]!.LEFT_SHOULDER!.y) - 0.2) < 1e-9);
+  assert.equal(out[1], frames[1]);
+});
+
+test("rejectBodySizeOutliers keeps a frame where only the torso foreshortens", () => {
+  const frames = [0.2, 0.2, 0.17, 0.2, 0.2].map((torso) => body({ hx: 0.5, hy: 0.6, torso }));
+  const res = rejectBodySizeOutliers(frames, { tolerance: 0.2 });
+  assert.deepEqual(res.replaced, []);
+  assert.equal(res.frames, frames);
+});
+
+test("rejectBodySizeOutliers copies the nearest good frame at the ends", () => {
+  const frames = [0, 1, 2, 3].map(() => body({ hx: 0.5, hy: 0.6, torso: 0.2 }));
+  frames[3] = shrunk(frames[3]!, 0.55, 0.2, 0.3);
+  const { frames: out, replaced } = rejectBodySizeOutliers(frames, { tolerance: 0.2 });
+  assert.deepEqual(replaced, [3]);
+  assert.equal(out[3], frames[2]);
 });
