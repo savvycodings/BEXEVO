@@ -712,6 +712,109 @@ export function windowRetargetScale(
   return u / p;
 }
 
+const BODY_SIZE_BONES: ReadonlyArray<readonly [string, string]> = [
+  ["LEFT_SHOULDER", "RIGHT_SHOULDER"],
+  ["LEFT_HIP", "RIGHT_HIP"],
+  ["LEFT_SHOULDER", "LEFT_HIP"],
+  ["RIGHT_SHOULDER", "RIGHT_HIP"],
+  ["LEFT_SHOULDER", "LEFT_ELBOW"],
+  ["RIGHT_SHOULDER", "RIGHT_ELBOW"],
+  ["LEFT_HIP", "LEFT_KNEE"],
+  ["RIGHT_HIP", "RIGHT_KNEE"],
+  ["LEFT_KNEE", "LEFT_ANKLE"],
+  ["RIGHT_KNEE", "RIGHT_ANKLE"],
+];
+
+/** Fractional deviation of a frame's body size from the window's before it counts as a bad detection. */
+export function correctionBodySizeTolerance(): number {
+  const n = Number(process.env.CORRECTION_BODY_SIZE_TOLERANCE);
+  if (Number.isFinite(n) && n > 0 && n < 1) return n;
+  return 0.2;
+}
+
+/**
+ * Each frame's body size relative to the window: for every bone, its length on this frame over
+ * its median length across the window, then the median of those ratios. A real swing shortens
+ * some bones through foreshortening while others hold, so the median stays near 1. A frame
+ * where the tracker jumped to a smaller figure shrinks every bone at once. Null when too few
+ * bones resolve to judge.
+ */
+export function bodySizeRatios(frames: NamedLandmarks[], aspect = 1): Array<number | null> {
+  const lengths = frames.map((lm) =>
+    BODY_SIZE_BONES.map(([a, b]) => {
+      const p = lm[a];
+      const q = lm[b];
+      if (!isVisible(p) || !isVisible(q)) return null;
+      return Math.hypot((p.x - q.x) * aspect, p.y - q.y);
+    })
+  );
+  const boneMedians = BODY_SIZE_BONES.map((_, k) =>
+    median(lengths.map((row) => row[k]).filter((n): n is number => n != null))
+  );
+  return lengths.map((row) => {
+    const ratios: number[] = [];
+    row.forEach((len, k) => {
+      const ref = boneMedians[k];
+      if (len != null && ref != null && ref > 0) ratios.push(len / ref);
+    });
+    return ratios.length >= 4 ? median(ratios) : null;
+  });
+}
+
+/**
+ * Rebuild frames whose body size is off the window's by more than `tolerance`, interpolating
+ * every joint from the nearest good frames on each side (or copying the nearest at the ends).
+ * Pose tracks occasionally lock onto a background figure for a frame or two; retargeting and
+ * smoothing then shrink the control skeleton across several frames. Returns the input
+ * unchanged when no frame is flagged, or when every frame is.
+ */
+export function rejectBodySizeOutliers(
+  frames: NamedLandmarks[],
+  opts?: { aspect?: number; tolerance?: number }
+): { frames: NamedLandmarks[]; replaced: number[] } {
+  const tolerance = opts?.tolerance ?? correctionBodySizeTolerance();
+  const ratios = bodySizeRatios(frames, opts?.aspect ?? 1);
+  const bad = ratios.map((r) => r != null && Math.abs(r - 1) > tolerance);
+  const replaced = bad.flatMap((b, i) => (b ? [i] : []));
+  if (!replaced.length || replaced.length === frames.length) return { frames, replaced: [] };
+
+  const goodBefore = (i: number) => {
+    for (let j = i - 1; j >= 0; j--) if (!bad[j]) return j;
+    return null;
+  };
+  const goodAfter = (i: number) => {
+    for (let j = i + 1; j < frames.length; j++) if (!bad[j]) return j;
+    return null;
+  };
+  const out = frames.map((frame, i) => {
+    if (!bad[i]) return frame;
+    const lo = goodBefore(i);
+    const hi = goodAfter(i);
+    if (lo == null) return frames[hi!]!;
+    if (hi == null) return frames[lo]!;
+    const t = (i - lo) / (hi - lo);
+    const a = frames[lo]!;
+    const b = frames[hi]!;
+    const lm: NamedLandmarks = {};
+    for (const name of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      const p = a[name];
+      const q = b[name];
+      if (isVisible(p) && isVisible(q)) {
+        lm[name] = {
+          ...p,
+          x: p.x + (q.x - p.x) * t,
+          y: p.y + (q.y - p.y) * t,
+          visibility: Math.min(p.visibility ?? 1, q.visibility ?? 1),
+        };
+      } else {
+        lm[name] = t < 0.5 ? (p ?? q) : (q ?? p);
+      }
+    }
+    return lm;
+  });
+  return { frames: out, replaced };
+}
+
 /**
  * Per-frame control poses: retarget the pro into the user's frame, then blend the user
  * toward it so the clip reads as a correction of this athlete rather than a pose swap.

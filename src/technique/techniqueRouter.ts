@@ -60,6 +60,7 @@ import {
   framesToCanvas,
   inferSwingSideFromLandmarks,
   pickControlCrop,
+  rejectBodySizeOutliers,
   renderOpenPoseMp4,
   sampleImpactWindowFrameIndices,
   userLandmarksForFrames,
@@ -3924,21 +3925,28 @@ router.post('/correction-videos', async (req, res) => {
       // reliably track real-world handedness, so mixing the user's profile handedness into this
       // comparison flips the pro pose on a naming mismatch rather than a genuine side mismatch.
       const canvasAspect = canvas.width / canvas.height
-      const proSide = inferSwingSideFromLandmarks(proLandmarks, canvasAspect)
-      const userSide = inferSwingSideFromLandmarks(userLandmarkFrames, canvasAspect)
+      // A frame where the tracker jumped to a background figure shrinks the whole skeleton,
+      // and smoothing spreads that across its neighbours. Rebuild those frames before
+      // anything measures or scales them.
+      const userGuard = rejectBodySizeOutliers(userLandmarkFrames, { aspect: canvasAspect })
+      const proGuard = rejectBodySizeOutliers(proLandmarks, { aspect: canvasAspect })
+      const userControlFrames = userGuard.frames
+      const proControlFrames = proGuard.frames
+      const proSide = inferSwingSideFromLandmarks(proControlFrames, canvasAspect)
+      const userSide = inferSwingSideFromLandmarks(userControlFrames, canvasAspect)
       const mirrorPro = Boolean(proSide && userSide && proSide !== userSide)
 
       const poseBlend = correctionPoseBlend()
-      const proScale = windowRetargetScale(userLandmarkFrames, proLandmarks, canvasAspect)
+      const proScale = windowRetargetScale(userControlFrames, proControlFrames, canvasAspect)
       const controlLandmarks = coachedControlLandmarkFrames({
-        userFrames: userLandmarkFrames,
-        proFrames: proLandmarks,
+        userFrames: userControlFrames,
+        proFrames: proControlFrames,
         aspect: canvasAspect,
         mirror: mirrorPro,
         blend: poseBlend,
         scale: proScale,
       })
-      const landmarkFrames = controlLandmarks.length ? controlLandmarks : proLandmarks
+      const landmarkFrames = controlLandmarks.length ? controlLandmarks : proControlFrames
 
       const overlays = controlOverlaysForWindow({
         userFrameIndices,
@@ -3975,6 +3983,7 @@ router.post('/correction-videos', async (req, res) => {
         source: source ? `${source.width}x${source.height}` : null,
         crop,
         proScale: proScale != null ? Math.round(proScale * 1000) / 1000 : null,
+        sizeOutliers: { user: userGuard.replaced, pro: proGuard.replaced },
         comfyHost: comfyBaseHost(),
       })
       const coaching = buildCorrectionVideoCoachingContext({
