@@ -22,7 +22,7 @@ import {
   type TechniqueCorrectionFrameInsight,
 } from '../db'
 import { randomUUID, createHash } from 'crypto'
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import {
   extractFrame,
   extractProReferenceFrame,
@@ -2360,6 +2360,56 @@ function ti2vCorrectionCache(metrics: Record<string, unknown>): boolean {
   return (ctx as { pipeline?: unknown }).pipeline === 'ti2v-i2v'
 }
 
+type CorrectionVideoJob = {
+  status: 'running' | 'done' | 'failed'
+  startedAt: string
+  finishedAt?: string
+  error?: string
+}
+
+/** A job still `running` after this long was lost, e.g. to a server restart mid-generation. */
+const CORRECTION_VIDEO_JOB_STALE_MS = 30 * 60 * 1000
+
+class CorrectionVideoJobError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message)
+  }
+}
+
+function readCorrectionVideoJob(metrics: Record<string, unknown>): CorrectionVideoJob | null {
+  const raw = metrics.correction_video_job
+  if (!raw || typeof raw !== 'object') return null
+  const job = raw as Partial<CorrectionVideoJob>
+  if (job.status !== 'running' && job.status !== 'done' && job.status !== 'failed') return null
+  const startedAt = typeof job.startedAt === 'string' ? job.startedAt : ''
+  const startedMs = Date.parse(startedAt)
+  if (
+    job.status === 'running' &&
+    (!Number.isFinite(startedMs) || Date.now() - startedMs > CORRECTION_VIDEO_JOB_STALE_MS)
+  ) {
+    return { status: 'failed', startedAt, error: 'Generation did not finish. Please try again.' }
+  }
+  return {
+    status: job.status,
+    startedAt,
+    ...(typeof job.finishedAt === 'string' ? { finishedAt: job.finishedAt } : {}),
+    ...(typeof job.error === 'string' ? { error: job.error } : {}),
+  }
+}
+
+/** Merges only the job key so a concurrent metrics write elsewhere is not overwritten. */
+async function writeCorrectionVideoJob(analysisId: string, job: CorrectionVideoJob) {
+  await db
+    .update(techniqueAnalysis)
+    .set({
+      metrics: sql`coalesce(${techniqueAnalysis.metrics}, '{}'::jsonb) || jsonb_build_object('correction_video_job', ${JSON.stringify(job)}::jsonb)`,
+    })
+    .where(eq(techniqueAnalysis.id, analysisId))
+}
+
 /** Cached WAN I2V clip (URLs, not bytes) — fetch separately from analysis poll. */
 router.get('/analysis/:id/correction-videos', async (req, res) => {
   try {
@@ -2382,8 +2432,20 @@ router.get('/analysis/:id/correction-videos', async (req, res) => {
     const cached = ti2vCorrectionCache(metrics)
       ? null
       : parseCachedCorrectionVideo(metrics.correction_videos_comfy)
+    const job = readCorrectionVideoJob(metrics)
+    const status =
+      job?.status === 'running'
+        ? 'running'
+        : cached?.video
+          ? 'done'
+          : job?.status === 'failed'
+            ? 'failed'
+            : 'idle'
     return res.json({
       analysisId: id,
+      status,
+      startedAt: job?.startedAt ?? null,
+      error: status === 'failed' ? (job?.error ?? null) : null,
       frame: cached?.frame ?? null,
       startImage: cached?.startImage ?? null,
       video: cached?.video ?? null,
@@ -3629,18 +3691,103 @@ router.post('/correction-videos', async (req, res) => {
         elapsedMs: Date.now() - routeT0,
       })
       return res.json({
+        status: 'done',
         frame: cached.frame,
         startImage: cached.startImage,
         video: cached.video,
+        poseVideo: cached.poseVideo ?? null,
+        windowStartMs: cached.windowStartMs ?? null,
+        windowEndMs: cached.windowEndMs ?? null,
       })
     }
 
+    const existingJob = readCorrectionVideoJob(metrics)
+    if (existingJob?.status === 'running') {
+      return res.status(202).json({ status: 'running', startedAt: existingJob.startedAt })
+    }
+
+    const startedAt = new Date().toISOString()
+    await writeCorrectionVideoJob(analysisId, { status: 'running', startedAt })
+    res.status(202).json({ status: 'running', startedAt })
+
+    // Generation takes minutes. It runs detached from the request so leaving the app, or the
+    // phone dropping the connection, does not lose the result; the app polls the GET route.
+    void runCorrectionVideoJob({
+      analysisId,
+      userId,
+      analysis,
+      metrics,
+      videoProvider,
+      wantFun,
+      ti2vConfigured,
+      routeT0,
+    })
+      .then(() => writeCorrectionVideoJob(analysisId, {
+        status: 'done',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+      }))
+      .catch(async (e: any) => {
+        const message = e?.message || 'Failed to generate correction video'
+        const stack =
+          typeof e?.stack === 'string' ? e.stack.split('\n').slice(0, 12).join('\n') : undefined
+        console.error('[Technique][correction-videos] error', {
+          analysisId,
+          message,
+          status: e instanceof CorrectionVideoJobError ? e.status : 500,
+          name: e?.name,
+          promptId: e?.promptId ?? e?.prompt_id,
+          statusText: e?.statusText,
+          elapsedMs: Date.now() - routeT0,
+          stack,
+        })
+        await writeCorrectionVideoJob(analysisId, {
+          status: 'failed',
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          error: message,
+        }).catch((writeErr) =>
+          console.error('[Technique][correction-videos] failed to record job failure', writeErr)
+        )
+      })
+  } catch (e: any) {
+    const message = e?.message || 'Failed to generate correction video'
+    console.error('[Technique][correction-videos] error', {
+      analysisId: analysisIdForLog,
+      message,
+      name: e?.name,
+      elapsedMs: Date.now() - routeT0,
+    })
+    if (!res.headersSent) return res.status(500).json({ error: message })
+  }
+})
+
+async function runCorrectionVideoJob({
+  analysisId,
+  userId,
+  analysis,
+  metrics,
+  videoProvider,
+  wantFun,
+  ti2vConfigured,
+  routeT0,
+}: {
+  analysisId: string
+  userId: string
+  analysis: typeof techniqueAnalysis.$inferSelect
+  metrics: Record<string, unknown>
+  videoProvider: ReturnType<typeof resolveVideoProvider>
+  wantFun: boolean
+  ti2vConfigured: boolean
+  routeT0: number
+}): Promise<void> {
+  {
     const poseData: PoseFrameRow[] = Array.isArray(metrics.pose_data)
       ? (metrics.pose_data as PoseFrameRow[])
       : []
     if (poseData.length === 0) {
       console.warn('[Technique][correction-videos] no pose data', { analysisId })
-      return res.status(400).json({ error: 'No pose data available' })
+      throw new CorrectionVideoJobError(400, 'No pose data available')
     }
 
     let impactFrameResolved: number | null =
@@ -3686,7 +3833,7 @@ router.post('/correction-videos', async (req, res) => {
     const frameRow = picked[0]
     if (!frameRow) {
       console.warn('[Technique][correction-videos] no matching frames', { analysisId })
-      return res.status(400).json({ error: 'No matching frames found' })
+      throw new CorrectionVideoJobError(400, 'No matching frames found')
     }
 
     const video = await db.query.techniqueVideo.findFirst({
@@ -3694,7 +3841,7 @@ router.post('/correction-videos', async (req, res) => {
     })
     if (!video?.cloudinaryPublicId) {
       console.warn('[Technique][correction-videos] video file not found', { analysisId })
-      return res.status(404).json({ error: 'Video file not found' })
+      throw new CorrectionVideoJobError(404, 'Video file not found')
     }
     const videoPath = resolveVideoPath(video.cloudinaryPublicId)
     if (!fs.existsSync(videoPath)) {
@@ -3702,7 +3849,7 @@ router.post('/correction-videos', async (req, res) => {
         analysisId,
         videoPath,
       })
-      return res.status(404).json({ error: 'Video file missing from disk' })
+      throw new CorrectionVideoJobError(404, 'Video file missing from disk')
     }
 
     const shotName = resolveCanonicalShotFromMetrics(metrics).shotName
@@ -3788,9 +3935,7 @@ router.post('/correction-videos', async (req, res) => {
 
     if (videoProvider === 'gemini') {
       if (!isGeminiVideoConfigured()) {
-        return res.status(503).json({
-          error: 'XEVO_VIDEO_PROVIDER=gemini requires GEMINI_API_KEY',
-        })
+        throw new CorrectionVideoJobError(503, 'XEVO_VIDEO_PROVIDER=gemini requires GEMINI_API_KEY')
       }
       console.log('[Technique][correction-videos] branch=veo-i2v', {
         analysisId,
@@ -3852,9 +3997,10 @@ router.post('/correction-videos', async (req, res) => {
           analysisId,
           trainSampleId: topNeighbor?.train_sample_id,
         })
-        return res.status(400).json({
-          error: 'Pro pose sequence has no usable landmarks for Fun Control',
-        })
+        throw new CorrectionVideoJobError(
+          400,
+          'Pro pose sequence has no usable landmarks for Fun Control'
+        )
       }
       const windowLo = Math.min(...userFrameIndices)
       const windowHi = Math.max(...userFrameIndices)
@@ -4021,9 +4167,7 @@ router.post('/correction-videos', async (req, res) => {
         analysisId,
         trainSampleId: topNeighbor?.train_sample_id ?? null,
       })
-      return res.status(400).json({
-        error: 'No pro pose sequence for Fun Control.',
-      })
+      throw new CorrectionVideoJobError(400, 'No pro pose sequence for Fun Control.')
     } else {
       console.error('[Technique][correction-videos] no pipeline available', {
         analysisId,
@@ -4032,10 +4176,10 @@ router.post('/correction-videos', async (req, res) => {
         ti2vConfigured,
         comfyHost: comfyBaseHost(),
       })
-      return res.status(503).json({
-        error:
-          'ComfyUI video is not configured. Set COMFYUI_FUN_CONTROL_WORKFLOW_PATH or COMFYUI_VIDEO_WORKFLOW_PATH, or set XEVO_VIDEO_PROVIDER=gemini.',
-      })
+      throw new CorrectionVideoJobError(
+        503,
+        'ComfyUI video is not configured. Set COMFYUI_FUN_CONTROL_WORKFLOW_PATH or COMFYUI_VIDEO_WORKFLOW_PATH, or set XEVO_VIDEO_PROVIDER=gemini.'
+      )
     }
 
     const previousCached = parseCachedCorrectionVideo(metrics.correction_videos_comfy)
@@ -4073,11 +4217,16 @@ router.post('/correction-videos', async (req, res) => {
           }
         : {}),
     }
+    const freshAnalysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { eq: _eq }) => _eq(ta.id, analysisId),
+      columns: { metrics: true },
+    })
+    const latestMetrics = (freshAnalysis?.metrics ?? metrics) as Record<string, unknown>
     await db
       .update(techniqueAnalysis)
       .set({
         metrics: {
-          ...metrics,
+          ...latestMetrics,
           // Veo writes corrected-veo.mp4; keep prior Fun Control cache URL for A/B when present.
           correction_videos_comfy:
             pipeline === 'veo-i2v' && previousCached?.video && !previousCached.video.includes('corrected-veo')
@@ -4097,8 +4246,8 @@ router.post('/correction-videos', async (req, res) => {
         id: randomUUID(),
         userId,
         kind: 'correction_videos_ready',
-        title: 'Corrected video ready',
-        body: 'Your generated clip is ready in AI Coach.',
+        title: 'Magic Shot',
+        body: 'Video generated',
         refType: 'technique_analysis',
         refId: analysisId,
         createdAt: new Date(),
@@ -4115,31 +4264,8 @@ router.post('/correction-videos', async (req, res) => {
       bytes: videoBuffer.length,
       elapsedMs: Date.now() - routeT0,
     })
-
-    return res.json({
-      frame: persisted.frame,
-      startImage: persisted.startImage,
-      video: persisted.video,
-      poseVideo: persisted.poseVideo ?? null,
-      windowStartMs: persisted.windowStartMs ?? null,
-      windowEndMs: persisted.windowEndMs ?? null,
-    })
-  } catch (e: any) {
-    const message = e?.message || 'Failed to generate correction video'
-    const stack =
-      typeof e?.stack === 'string' ? e.stack.split('\n').slice(0, 12).join('\n') : undefined
-    console.error('[Technique][correction-videos] error', {
-      analysisId: analysisIdForLog,
-      message,
-      name: e?.name,
-      promptId: e?.promptId ?? e?.prompt_id,
-      statusText: e?.statusText,
-      elapsedMs: Date.now() - routeT0,
-      stack,
-    })
-    return res.status(500).json({ error: message })
   }
-})
+}
 
 /**
  * Extract the same up-to-5 pose frames as correction-images (no Gemini/fal).

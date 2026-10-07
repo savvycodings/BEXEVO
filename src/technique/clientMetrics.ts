@@ -9,6 +9,7 @@ const CORRECTION_METRIC_KEYS = [
   'correction_context_comfy',
   'correction_videos_comfy',
   'correction_context_videos_comfy',
+  'correction_video_job',
 ] as const
 
 const MAX_POSE_SAMPLES_CLIENT = 80
