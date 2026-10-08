@@ -9,3 +9,6 @@ uploads/technique/
 uploads/technique/*.mp4
 uploads/profile/
 uploads/club/
+.env.bak*
+.pnpm-store/
+uploads/technique-correction-videos/
