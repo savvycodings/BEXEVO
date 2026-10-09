@@ -17,7 +17,9 @@ import {
   coachedControlLandmarkFrames,
   controlCanvasSize,
   correctionFunLength,
+  inferFacing,
   inferSwingSideFromLandmarks,
+  proOrientationPlan,
   sampleImpactWindowFrameIndices,
   smoothLandmarkTrack,
   userLandmarksForFrames,
@@ -100,10 +102,15 @@ async function main() {
   );
   const proSide = inferSwingSideFromLandmarks(proLandmarks, aspect);
   const userSide = inferSwingSideFromLandmarks(userFrames, aspect);
-  const mirror = Boolean(proSide && userSide && proSide !== userSide);
+  const plan = proOrientationPlan({
+    userSide,
+    proSide,
+    userFacing: inferFacing(userFrames),
+    proFacing: inferFacing(proLandmarks),
+  });
 
   console.log(
-    `analysis=${analysis.id}  frames=${userFrameIndices.length}  canvas=${canvas.width}x${canvas.height}  mirror=${mirror}\n`
+    `analysis=${analysis.id}  frames=${userFrameIndices.length}  canvas=${canvas.width}x${canvas.height}  swap=${plan.swapSides} flip=${plan.flipX}\n`
   );
 
   // Baseline: what the athlete actually did.
@@ -117,7 +124,8 @@ async function main() {
     userFrames,
     proFrames: proLandmarks,
     aspect,
-    mirror,
+    flipX: plan.flipX,
+    swapSides: plan.swapSides,
     blend: 0.4,
   });
 

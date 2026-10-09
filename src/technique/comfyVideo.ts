@@ -456,7 +456,12 @@ export async function generatePoseRetargetVideoComfy(opts: {
   const highEnd = Math.max(1, Math.round(steps / 2));
   const highSampler = workflow[FUN_HIGH_SAMPLER_NODE_ID];
   if (highSampler?.inputs) {
-    highSampler.inputs.noise_seed = Date.now() % 1_000_000_000;
+    // Fixed seed only for A/B renders; production varies it per request.
+    const fixedSeed = Number(process.env.COMFYUI_FUN_SEED);
+    highSampler.inputs.noise_seed =
+      process.env.COMFYUI_FUN_SEED && Number.isInteger(fixedSeed) && fixedSeed >= 0
+        ? fixedSeed
+        : Date.now() % 1_000_000_000;
     highSampler.inputs.steps = steps;
     highSampler.inputs.cfg = FUN_CONTROL_CFG;
     highSampler.inputs.start_at_step = 0;

@@ -9,6 +9,11 @@ import {
   correctionFunLength,
   smoothLandmarkTrack,
   inferSwingSideFromLandmarks,
+  fillJointGaps,
+  blendArmsByAngle,
+  restoreLimbLengths,
+  inferFacing,
+  proOrientationPlan,
   rejectBodySizeOutliers,
   retargetProToUser,
   userLandmarksForFrames,
@@ -54,21 +59,22 @@ test("retargetProToUser moves the pro onto the user's hips and scales to the use
   assert.ok(Math.abs(hipMidY - shoulderMidY - 0.2) < 1e-6, `torso ${hipMidY - shoulderMidY}`);
 });
 
-test("retargetProToUser mirrors about the user's hip x when handedness disagrees", () => {
+test("retargetProToUser mirrors about the user's hip x, swapping sides, for the other arm", () => {
   const pro = body({ hx: 0.3, hy: 0.5, torso: 0.3, rightWristDx: 0.2 });
   const user = body({ hx: 0.3, hy: 0.5, torso: 0.3 });
 
-  const plain = retargetProToUser(pro, user, { mirror: false });
-  const mirrored = retargetProToUser(pro, user, { mirror: true });
+  const plain = retargetProToUser(pro, user);
+  const mirrored = retargetProToUser(pro, user, { flipX: true, swapSides: true });
 
   assert.ok(Math.abs((plain.RIGHT_WRIST?.x ?? 0) - 0.5) < 1e-6);
-  // Coordinates flip about the hip. The joint keeps its name.
-  assert.ok(Math.abs((mirrored.RIGHT_WRIST?.x ?? 0) - 0.1) < 1e-6);
-  assert.ok(Math.abs((mirrored.LEFT_WRIST?.x ?? 0) - 0.4) < 1e-6);
-  assert.equal(mirrored.RIGHT_WRIST?.y, plain.RIGHT_WRIST?.y);
+  // Coordinates flip about the hip and sides swap, as in a mirror: the right-arm reach is
+  // now a left arm.
+  assert.ok(Math.abs((mirrored.LEFT_WRIST?.x ?? 0) - 0.1) < 1e-6);
+  assert.ok(Math.abs((mirrored.RIGHT_WRIST?.x ?? 0) - 0.4) < 1e-6);
+  assert.equal(mirrored.LEFT_WRIST?.y, plain.RIGHT_WRIST?.y);
 });
 
-test("coachedControlLandmarkFrames blends a mirrored pro by joint name", () => {
+test("coachedControlLandmarkFrames blends a mirrored pro's swinging arm into the user's", () => {
   // User swings with the left arm (reach 0.2), pro with the right (reach 0.3).
   const user = body({ hx: 0.5, hy: 0.5, torso: 0.3, leftWristDx: -0.2, rightWristDx: 0.05 });
   const pro = body({ hx: 0.5, hy: 0.5, torso: 0.3, leftWristDx: -0.05, rightWristDx: 0.3 });
@@ -76,13 +82,16 @@ test("coachedControlLandmarkFrames blends a mirrored pro by joint name", () => {
   const [out] = coachedControlLandmarkFrames({
     userFrames: [user],
     proFrames: [pro],
-    mirror: true,
+    flipX: true,
+    swapSides: true,
     blend: 0.5,
   });
 
-  // Names are not swapped, so each wrist blends with the same-named joint after the x flip.
-  assert.ok(Math.abs((out?.LEFT_WRIST?.x ?? 0) - 0.425) < 1e-6, `left ${out?.LEFT_WRIST?.x}`);
-  assert.ok(Math.abs((out?.RIGHT_WRIST?.x ?? 0) - 0.375) < 1e-6, `right ${out?.RIGHT_WRIST?.x}`);
+  // The pro's right-arm reach (x 0.8) mirrors to x 0.2 as LEFT_WRIST, so the user's swinging
+  // left wrist (0.3) moves halfway toward it. The free arm pairs with the pro's free arm, which
+  // mirrors onto the user's own right wrist (0.55) and so does not move.
+  assert.ok(Math.abs((out?.LEFT_WRIST?.x ?? 0) - 0.25) < 1e-6, `left ${out?.LEFT_WRIST?.x}`);
+  assert.ok(Math.abs((out?.RIGHT_WRIST?.x ?? 0) - 0.55) < 1e-6, `right ${out?.RIGHT_WRIST?.x}`);
 });
 
 test("retargetProToUser returns the pro pose unchanged when the torso basis is missing", () => {
@@ -343,4 +352,146 @@ test("rejectBodySizeOutliers copies the nearest good frame at the ends", () => {
   const { frames: out, replaced } = rejectBodySizeOutliers(frames, { tolerance: 0.2 });
   assert.deepEqual(replaced, [3]);
   assert.equal(out[3], frames[2]);
+});
+
+test("rejectBodySizeOutliers keeps a player who grows steadily toward the camera", () => {
+  // Closing on the net: torso grows 0.15 -> 0.25 over the window, well past 20% of its median.
+  const frames = Array.from({ length: 21 }, (_, i) =>
+    body({ hx: 0.5, hy: 0.6, torso: 0.15 + (0.1 * i) / 20 })
+  );
+  const res = rejectBodySizeOutliers(frames, { tolerance: 0.2 });
+  assert.deepEqual(res.replaced, []);
+});
+
+test("rejectBodySizeOutliers still catches a two-frame jump inside steady growth", () => {
+  const frames = Array.from({ length: 21 }, (_, i) =>
+    body({ hx: 0.5, hy: 0.6, torso: 0.15 + (0.1 * i) / 20 })
+  );
+  frames[10] = shrunk(frames[10]!, 0.6, 0.15, 0.4);
+  frames[11] = shrunk(frames[11]!, 0.6, 0.15, 0.4);
+  const res = rejectBodySizeOutliers(frames, { tolerance: 0.2 });
+  assert.deepEqual(res.replaced, [10, 11]);
+});
+
+test("inferSwingSideFromLandmarks ignores frames where one wrist is hidden", () => {
+  // Left arm reaches further whenever both are seen, but is occluded on most frames.
+  const both = body({ hx: 0.5, hy: 0.5, torso: 0.3, leftWristDx: -0.3, rightWristDx: 0.1 });
+  const leftHidden: NamedLandmarks = {
+    ...both,
+    LEFT_WRIST: { ...both.LEFT_WRIST!, visibility: 0.05 },
+  };
+  const frames = [both, both, leftHidden, leftHidden, leftHidden, leftHidden, leftHidden];
+  assert.equal(inferSwingSideFromLandmarks(frames), "LEFT");
+});
+
+test("fillJointGaps interpolates a short occlusion and holds at the ends", () => {
+  const at = (x: number | null): NamedLandmarks =>
+    x == null ? { LEFT_HIP: { x: 0.5, y: 0.5 } } : { LEFT_HIP: { x: 0.5, y: 0.5 }, LEFT_WRIST: { x, y: 0.4 } };
+  const { frames, filled } = fillJointGaps([at(null), at(0.2), at(null), at(null), at(0.5), at(null)]);
+  assert.equal(filled, 4);
+  assert.equal(frames[0]!.LEFT_WRIST?.x, 0.2);
+  assert.ok(Math.abs((frames[2]!.LEFT_WRIST?.x ?? 0) - 0.3) < 1e-9);
+  assert.ok(Math.abs((frames[3]!.LEFT_WRIST?.x ?? 0) - 0.4) < 1e-9);
+  assert.equal(frames[5]!.LEFT_WRIST?.x, 0.5);
+});
+
+test("fillJointGaps leaves a joint alone when it is barely seen", () => {
+  const frames: NamedLandmarks[] = Array.from({ length: 10 }, (_, i) => ({
+    LEFT_HIP: { x: 0.5, y: 0.5 },
+    ...(i === 0 ? { LEFT_ANKLE: { x: 0.5, y: 0.9 } } : {}),
+  }));
+  const res = fillJointGaps(frames);
+  assert.equal(res.filled, 0);
+  assert.equal(res.frames[5]!.LEFT_ANKLE, undefined);
+});
+
+test("retargetProToUser turns a pro filmed from behind without renaming joints", () => {
+  const pro = body({ hx: 0.3, hy: 0.5, torso: 0.3, rightWristDx: 0.2 });
+  const user = body({ hx: 0.3, hy: 0.5, torso: 0.3 });
+  const turned = retargetProToUser(pro, user, { flipX: true });
+  // The right wrist stays the right wrist; only its side of the image changes.
+  assert.ok(Math.abs((turned.RIGHT_WRIST?.x ?? 0) - 0.1) < 1e-6);
+  // Facing flips with it: hips now read left-on-the-right.
+  assert.ok((turned.LEFT_HIP?.x ?? 0) > (turned.RIGHT_HIP?.x ?? 0));
+});
+
+test("proOrientationPlan separates the swinging arm from the camera side", () => {
+  const plan = (userSide: "LEFT" | "RIGHT" | null, proSide: "LEFT" | "RIGHT" | null, uf: "FRONT" | "BACK" | null, pf: "FRONT" | "BACK" | null) =>
+    proOrientationPlan({ userSide, proSide, userFacing: uf, proFacing: pf });
+  // Same arm, same facing: leave the pro alone.
+  assert.deepEqual(plan("RIGHT", "RIGHT", "FRONT", "FRONT"), { swapSides: false, flipX: false });
+  // Other arm, same facing: a true mirror image.
+  assert.deepEqual(plan("RIGHT", "LEFT", "FRONT", "FRONT"), { swapSides: true, flipX: true });
+  // Same arm, filmed from the other side: turn round, keep names.
+  assert.deepEqual(plan("RIGHT", "RIGHT", "FRONT", "BACK"), { swapSides: false, flipX: true });
+  // Both: swapping names alone puts the racket arm right and keeps the facing.
+  assert.deepEqual(plan("LEFT", "RIGHT", "FRONT", "BACK"), { swapSides: true, flipX: false });
+  // Unknown facing counts as matching.
+  assert.deepEqual(plan("RIGHT", "LEFT", "FRONT", null), { swapSides: true, flipX: true });
+});
+
+test("inferFacing reads front from left-on-the-right and declines side-on windows", () => {
+  const front = Array.from({ length: 6 }, () => body({ hx: 0.5, hy: 0.5, torso: 0.3 }));
+  // body() puts LEFT_ at hx - 0.05, i.e. the left side on the image's left: facing away.
+  assert.equal(inferFacing(front), "BACK");
+  const turned = front.map((lm) => retargetProToUser(lm, lm, { flipX: true }));
+  assert.equal(inferFacing(turned), "FRONT");
+  const sideOn: NamedLandmarks[] = Array.from({ length: 6 }, () => ({
+    LEFT_SHOULDER: { x: 0.5, y: 0.3 },
+    RIGHT_SHOULDER: { x: 0.501, y: 0.3 },
+    LEFT_HIP: { x: 0.5, y: 0.6 },
+    RIGHT_HIP: { x: 0.502, y: 0.6 },
+  }));
+  assert.equal(inferFacing(sideOn), null);
+});
+
+test("restoreLimbLengths lengthens a collapsed forearm along its direction and carries the hand", () => {
+  const arm = (wx: number, wy: number): NamedLandmarks => ({
+    LEFT_SHOULDER: { x: 0.5, y: 0.3 },
+    LEFT_ELBOW: { x: 0.5, y: 0.4 },
+    LEFT_WRIST: { x: wx, y: wy },
+    LEFT_INDEX: { x: wx, y: wy + 0.02 },
+  });
+  // Athlete's forearm is 0.1 long on every frame.
+  const reference = Array.from({ length: 5 }, () => arm(0.5, 0.5));
+  // Blended frame: forearm collapsed to 0.03, pointing straight down.
+  const [out] = restoreLimbLengths([arm(0.5, 0.43)], reference);
+  assert.ok(Math.abs((out!.LEFT_WRIST!.y - 0.4) - 0.075) < 1e-9, `wrist y ${out!.LEFT_WRIST!.y}`);
+  assert.equal(out!.LEFT_WRIST!.x, 0.5);
+  // The hand moves with the wrist.
+  assert.ok(Math.abs(out!.LEFT_INDEX!.y - (out!.LEFT_WRIST!.y + 0.02)) < 1e-9);
+});
+
+test("restoreLimbLengths keeps ordinary foreshortening", () => {
+  const arm: NamedLandmarks = {
+    LEFT_SHOULDER: { x: 0.5, y: 0.3 },
+    LEFT_ELBOW: { x: 0.5, y: 0.4 },
+    LEFT_WRIST: { x: 0.5, y: 0.48 },
+  };
+  const reference: NamedLandmarks[] = Array.from({ length: 5 }, () => ({ ...arm, LEFT_WRIST: { x: 0.5, y: 0.5 } }));
+  // 0.08 of a 0.1 forearm is 80%, above the 75% floor: untouched.
+  assert.deepEqual(restoreLimbLengths([arm], reference)[0], arm);
+});
+
+test("blendArmsByAngle bends the elbow between the athlete's and the pro's, never straighter", () => {
+  // Athlete: nearly straight arm hanging down, bent slightly outward. Pro: elbow bent 70 degrees
+  // the other way on screen. A signed blend would pass through straight.
+  const deg = Math.PI / 180;
+  const arm = (bend: number): NamedLandmarks => {
+    const s = { x: 0.5, y: 0.3 };
+    const e = { x: 0.5, y: 0.4 };
+    const ang = Math.PI / 2 + bend * deg;
+    return { LEFT_SHOULDER: s, LEFT_ELBOW: e, LEFT_WRIST: { x: e.x + Math.cos(ang) * 0.1, y: e.y + Math.sin(ang) * 0.1 } };
+  };
+  const user = arm(14);
+  const pro = arm(-70);
+  const out = blendArmsByAngle(user, user, pro, { racketSide: "RIGHT", blend: 0.4, freeArmBlend: 0.4 });
+  const e = out.LEFT_ELBOW!;
+  const w = out.LEFT_WRIST!;
+  const bend = Math.abs(Math.atan2(w.y - e.y, w.x - e.x) - Math.PI / 2) / deg;
+  // 14 + (70 - 14) * 0.4 = 36.4 degrees of bend, toward the pro's side.
+  assert.ok(Math.abs(bend - 36.4) < 1e-6, `bend ${bend}`);
+  assert.ok(w.x > e.x, "bends toward the pro's side (pro wrist is at +x)");
+  // Forearm keeps the athlete's length.
+  assert.ok(Math.abs(Math.hypot(w.x - e.x, w.y - e.y) - 0.1) < 1e-9);
 });

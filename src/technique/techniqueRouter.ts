@@ -60,6 +60,10 @@ import {
   framesToCanvas,
   inferSwingSideFromLandmarks,
   pickControlCrop,
+  fillJointGaps,
+  inferFacing,
+  proOrientationPlan,
+  racketSideForWindow,
   rejectBodySizeOutliers,
   renderOpenPoseMp4,
   sampleImpactWindowFrameIndices,
@@ -295,17 +299,17 @@ const YOLO_DETECTION_ENABLED = process.env.YOLO_DETECTION_ENABLED === 'true'
 const YOLO_DETECTION_WRITE_ENABLED =
   process.env.YOLO_DETECTION_WRITE_ENABLED === 'true'
 const YOLO_DETECTION_LOGS = process.env.YOLO_DETECTION_LOGS === 'true'
-const YOLO_DETECTION_CONFIDENCE = (() => {
+export const YOLO_DETECTION_CONFIDENCE = (() => {
   const n = Number(process.env.YOLO_DETECTION_CONFIDENCE ?? 0.25)
   if (!Number.isFinite(n)) return 0.25
   return Math.max(0, Math.min(1, n))
 })()
-const YOLO_RACKET_CONFIDENCE = (() => {
+export const YOLO_RACKET_CONFIDENCE = (() => {
   const n = Number(process.env.YOLO_RACKET_CONFIDENCE ?? YOLO_DETECTION_CONFIDENCE)
   if (!Number.isFinite(n)) return YOLO_DETECTION_CONFIDENCE
   return Math.max(0, Math.min(1, n))
 })()
-const YOLO_BALL_CONFIDENCE = (() => {
+export const YOLO_BALL_CONFIDENCE = (() => {
   const n = Number(process.env.YOLO_BALL_CONFIDENCE ?? YOLO_DETECTION_CONFIDENCE)
   if (!Number.isFinite(n)) return YOLO_DETECTION_CONFIDENCE
   return Math.max(0, Math.min(1, n))
@@ -366,7 +370,7 @@ function normalizeYoloLabel(raw: unknown): YoloLabel | null {
   return null
 }
 
-function normalizeYoloDetections(
+export function normalizeYoloDetections(
   rawRows: unknown,
   totalFrames: unknown,
   videoDurationMs: number | undefined,
@@ -425,7 +429,7 @@ function normalizeYoloDetections(
   return out.slice(0, 5000)
 }
 
-function summarizeDetections(
+export function summarizeDetections(
   rows: DetectionRow[],
   sampledFrames: unknown,
   enabled: boolean,
@@ -615,7 +619,7 @@ function inferRacketHand(
   return dLeft <= dRight ? 'left' : 'right'
 }
 
-function enrichPoseDataWithRacket(
+export function enrichPoseDataWithRacket(
   poseDataRaw: unknown,
   detections: DetectionRow[]
 ): PoseFrameWithOptionalRacket[] | undefined {
@@ -3544,7 +3548,7 @@ router.post('/correction-images', async (req, res) => {
  * record: coach narrative, pro-gap joint targets at contact, you-vs-pro joint angles, and
  * swing timing. No extra LLM call, so it adds no latency to video generation.
  */
-function buildCorrectionVideoCoachingContext(opts: {
+export function buildCorrectionVideoCoachingContext(opts: {
   metrics: any
   userFrameIndices: number[]
   userLandmarkFrames: Array<Record<string, { x: number; y: number } | undefined>>
@@ -4076,19 +4080,36 @@ async function runCorrectionVideoJob({
       // anything measures or scales them.
       const userGuard = rejectBodySizeOutliers(userLandmarkFrames, { aspect: canvasAspect })
       const proGuard = rejectBodySizeOutliers(proLandmarks, { aspect: canvasAspect })
-      const userControlFrames = userGuard.frames
-      const proControlFrames = proGuard.frames
+      // Short occlusions would otherwise drop limbs from the skeleton and, in blending, swap in
+      // the pro's joint at full weight for those frames.
+      const userFill = fillJointGaps(userGuard.frames)
+      const proFill = fillJointGaps(proGuard.frames)
+      const userControlFrames = userFill.frames
+      const proControlFrames = proFill.frames
       const proSide = inferSwingSideFromLandmarks(proControlFrames, canvasAspect)
       const userSide = inferSwingSideFromLandmarks(userControlFrames, canvasAspect)
-      const mirrorPro = Boolean(proSide && userSide && proSide !== userSide)
+      const userFacing = inferFacing(userControlFrames)
+      const proFacing = inferFacing(proControlFrames)
+      const orientation = proOrientationPlan({ userSide, proSide, userFacing, proFacing })
 
       const poseBlend = correctionPoseBlend()
       const proScale = windowRetargetScale(userControlFrames, proControlFrames, canvasAspect)
+      const racketSide = racketSideForWindow({
+        userFrames: userControlFrames,
+        poseRows: (windowRows.length ? windowRows : yoloSource).map(mapYoloRow),
+        userFrameIndices,
+        contactFrame: userImpactFrame,
+        fps: userFps,
+        handedness,
+        aspect: canvasAspect,
+      })
       const controlLandmarks = coachedControlLandmarkFrames({
         userFrames: userControlFrames,
         proFrames: proControlFrames,
         aspect: canvasAspect,
-        mirror: mirrorPro,
+        racketSide,
+        flipX: orientation.flipX,
+        swapSides: orientation.swapSides,
         blend: poseBlend,
         scale: proScale,
       })
@@ -4101,6 +4122,9 @@ async function runCorrectionVideoJob({
         handedness,
         width: canvas.width,
         height: canvas.height,
+        fps: userFps,
+        userLandmarks: userControlFrames,
+        contactFrame: userImpactFrame,
       })
       poseVideoBuffer = await renderOpenPoseMp4({
         landmarkFrames,
@@ -4122,14 +4146,19 @@ async function runCorrectionVideoJob({
         poseBlend,
         proSide,
         userSide,
-        mirrorPro,
-        // Logged for visibility only; deliberately not an input to mirrorPro.
+        userFacing,
+        proFacing,
+        flipPro: orientation.flipX,
+        swapProSides: orientation.swapSides,
+        racketSide,
+        // Logged for visibility only; deliberately not an input to the orientation plan.
         profileHandedness: handedness,
         canvas: `${canvas.width}x${canvas.height}`,
         source: source ? `${source.width}x${source.height}` : null,
         crop,
         proScale: proScale != null ? Math.round(proScale * 1000) / 1000 : null,
         sizeOutliers: { user: userGuard.replaced, pro: proGuard.replaced },
+        filledJoints: { user: userFill.filled, pro: proFill.filled },
         comfyHost: comfyBaseHost(),
       })
       const coaching = buildCorrectionVideoCoachingContext({
