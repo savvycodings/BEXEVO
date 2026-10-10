@@ -71,6 +71,45 @@ function lerpRows(a: number[][], b: number[][], t: number): number[][] {
 }
 
 /**
+ * Drop frames where the tracker latched onto someone else: the body's center jumps sideways, or
+ * its size drops, against the median of nearby frames (e.g. a smaller player in the background).
+ * Dropped frames become gaps, which densify() fills from their neighbours.
+ */
+export function rejectPoseOutliers(track: PoseTrack, opts: { radius?: number; maxShift?: number; minScale?: number } = {}): PoseTrack {
+  const radius = opts.radius ?? 4
+  const maxShift = opts.maxShift ?? 0.35 // of body height
+  const minScale = opts.minScale ?? 0.8
+  const { width, height } = track
+  const stats = track.frames.map((f) => {
+    if (!f.image) return null
+    const px = (i: number) => [f.image![i]![0]! * width, f.image![i]![1]! * height]
+    const hip = [(px(23)[0]! + px(24)[0]!) / 2, (px(23)[1]! + px(24)[1]!) / 2]
+    const sh = [(px(11)[0]! + px(12)[0]!) / 2, (px(11)[1]! + px(12)[1]!) / 2]
+    const ankleY = Math.max(px(27)[1]!, px(28)[1]!)
+    const size = Math.max(1, Math.hypot(sh[0]! - hip[0]!, sh[1]! - hip[1]!) + Math.abs(ankleY - hip[1]!))
+    return { x: hip[0]!, y: hip[1]!, size }
+  })
+  const median = (xs: number[]) => {
+    const a = [...xs].sort((p, q) => p - q)
+    return a[Math.floor(a.length / 2)]!
+  }
+  const frames = track.frames.map((f, i) => {
+    const me = stats[i]
+    if (!me) return f
+    const near = stats.slice(Math.max(0, i - radius), i + radius + 1).filter((s): s is NonNullable<typeof s> => !!s)
+    if (near.length < 3) return f
+    const mx = median(near.map((s) => s.x))
+    const my = median(near.map((s) => s.y))
+    const ms = median(near.map((s) => s.size))
+    const jumped = Math.hypot(me.x - mx, me.y - my) > maxShift * ms
+    const shrank = me.size < minScale * ms
+    return jumped || shrank ? { t: f.t, image: null, world: null } : f
+  })
+  const detected = frames.filter((f) => f.image).length
+  return { ...track, frames, detectionRate: frames.length ? detected / frames.length : 0 }
+}
+
+/**
  * Fill frames with no detection by interpolating between the nearest detected frames (holding at
  * the ends), then smooth every coordinate with a centered moving average of `window` frames.
  */

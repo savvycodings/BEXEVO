@@ -10,7 +10,7 @@ import { randomUUID } from 'crypto'
 import { eq } from 'drizzle-orm'
 import { correctFrame, easeIn, scaleStrengths } from './engine/correct'
 import { defaultStrengths, listCorrections } from './engine/corrections'
-import { densify, mirrorTrack, sampleTrack } from './engine/landmarks'
+import { densify, mirrorTrack, rejectPoseOutliers, sampleTrack } from './engine/landmarks'
 import { fitScales, projectCorrection } from './engine/project'
 import { alignReference, detectStroke } from './engine/stroke'
 import type { Correction, DenseFrame, DenseTrack, Side, Strengths, StrokeInfo } from './engine/types'
@@ -122,7 +122,9 @@ export async function runPoseCorrectionVideoJob(opts: {
   if (!opts.videoPath || !fs.existsSync(opts.videoPath)) throw new PoseCorrectionError(404, 'Video file missing on server.')
   const clip = await probe(opts.videoPath)
   const total = typeof opts.metrics.total_frames === 'number' ? opts.metrics.total_frames : undefined
-  const player = densify(playerTrackFromStored(opts.metrics.pose_data, { fps: clip.fps, width: clip.width, height: clip.height, totalFrames: total }))
+  const player = densify(
+    rejectPoseOutliers(playerTrackFromStored(opts.metrics.pose_data, { fps: clip.fps, width: clip.width, height: clip.height, totalFrames: total })),
+  )
 
   const userShot = (opts.metrics.user_shot ?? {}) as { strokePreset?: string; shotLabel?: string }
   const stroke = String(userShot.strokePreset ?? '').trim()
@@ -134,7 +136,7 @@ export async function runPoseCorrectionVideoJob(opts: {
     .where(eq(proReference.strokePreset, stroke))
   const chosen = selectProReference(candidates, stroke, facingRatio(player))
   const row = (await db.select().from(proReference).where(eq(proReference.id, chosen.id)).limit(1))[0]!
-  const ref = densify(proTrackFromPose(row.pose as ProPose))
+  const ref = densify(rejectPoseOutliers(proTrackFromPose(row.pose as ProPose)))
 
   // BEXevo's own impact frame (YOLO / clip based) beats wrist-speed peaks on analyzer landmarks.
   const impact = opts.metrics.impact_frame_resolved

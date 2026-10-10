@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { correctFrame, easeIn } from './correct'
 import { defaultStrengths, listCorrections } from './corrections'
-import { densify, LM, mirrorTrack } from './landmarks'
+import { densify, LM, mirrorTrack, rejectPoseOutliers } from './landmarks'
 import { fitScale, projectCorrection } from './project'
 import { alignReference, detectStroke, warpTime } from './stroke'
 import { frameOf, standingPose, trackOf } from './testPoses'
@@ -212,4 +212,26 @@ test('camera angle: front vs side is refused, front vs front accepted', () => {
 
 test('racket side override wins over the fastest wrist', () => {
   assert.equal(detectStroke(swingTrack(60, 30, 'LEFT'), { racketSide: 'RIGHT' }).racketSide, 'RIGHT')
+})
+
+test('pose outliers: a jump to a smaller person in the background is dropped and filled', () => {
+  const frames = Array.from({ length: 12 }, (_, i) => frameOf(standingPose(), i / 30))
+  // frames 5–6: the tracker jumps 0.2 to the left onto a figure at 60% size
+  for (const i of [5, 6]) {
+    const small = standingPose().map((p) => [p[0] * 0.6, p[1] * 0.6, p[2]] as Vec3)
+    const f = frameOf(small, i / 30)
+    frames[i] = { ...f, image: f.image.map((p) => [p[0]! - 0.2, p[1]!, p[2]!, p[3]!]) }
+  }
+  const cleaned = rejectPoseOutliers({ ...trackOf(frames), frames: frames.map((f) => ({ t: f.t, image: f.image, world: f.world })) })
+  assert.equal(cleaned.frames[5]!.image, null)
+  assert.equal(cleaned.frames[6]!.image, null)
+  assert.ok(cleaned.frames[4]!.image && cleaned.frames[7]!.image)
+  const dense = densify(cleaned)
+  close(dense.frames[5]!.image[LM.NOSE]![0]!, frames[4]!.image[LM.NOSE]![0]!, 1e-6)
+})
+
+test('pose outliers: a steady track is untouched', () => {
+  const frames = Array.from({ length: 12 }, (_, i) => frameOf(standingPose({ kneeDeg: 150 + i }), i / 30))
+  const cleaned = rejectPoseOutliers({ ...trackOf(frames), frames: frames.map((f) => ({ t: f.t, image: f.image, world: f.world })) })
+  assert.equal(cleaned.frames.filter((f) => f.image).length, 12)
 })
