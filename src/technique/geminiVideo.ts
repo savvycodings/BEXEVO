@@ -9,13 +9,14 @@ const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_VEO_MODEL = "veo-3.1-fast-generate-preview";
 const POLL_MS = 10_000;
 
-export type VideoProvider = "comfy" | "gemini";
+export type VideoProvider = "comfy" | "gemini" | "pose-correction";
 
 export function resolveVideoProvider(): VideoProvider {
   const raw = String(process.env.XEVO_VIDEO_PROVIDER ?? "")
     .trim()
     .toLowerCase();
   if (raw === "gemini" || raw === "veo") return "gemini";
+  if (raw === "pose-correction" || raw === "pose") return "pose-correction";
   return "comfy";
 }
 

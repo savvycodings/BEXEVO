@@ -68,6 +68,9 @@ export function isVideoGenerationConfigured(): boolean {
   if (provider === "gemini" || provider === "veo") {
     return Boolean(String(process.env.GEMINI_API_KEY ?? "").trim());
   }
+  if (provider === "pose-correction" || provider === "pose") {
+    return fakesEnabled() || Boolean(String(process.env.FAL_API_KEY || process.env.FAL_KEY || "").trim());
+  }
   return isComfyVideoConfigured();
 }
 

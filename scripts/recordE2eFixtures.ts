@@ -8,6 +8,10 @@
  *   pnpm exec tsx scripts/recordE2eFixtures.ts [analysisId]
  *
  * Default analysis: 31230651…, the forehand volley in src/e2e/fixtures/player-forehand-volley.mp4.
+ *
+ * Analyses stored before the analyzer returned 3D landmarks have no `world` per frame; those are
+ * computed with the local MediaPipe script (../correction-mvp/pose, uv) on the same clip and
+ * merged by frame number.
  */
 import 'dotenv/config'
 import fs from 'fs'
@@ -18,6 +22,30 @@ import ffmpegPath from 'ffmpeg-static'
 
 const ANALYSIS_ID = process.argv[2] ?? '31230651-d7d3-4dcd-9566-5eedaf77b3ab'
 const OUT = path.join(process.cwd(), 'src', 'e2e', 'fixtures')
+
+const MP_NAMES = [
+  'NOSE', 'LEFT_EYE_INNER', 'LEFT_EYE', 'LEFT_EYE_OUTER', 'RIGHT_EYE_INNER', 'RIGHT_EYE', 'RIGHT_EYE_OUTER',
+  'LEFT_EAR', 'RIGHT_EAR', 'MOUTH_LEFT', 'MOUTH_RIGHT', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'LEFT_ELBOW',
+  'RIGHT_ELBOW', 'LEFT_WRIST', 'RIGHT_WRIST', 'LEFT_PINKY', 'RIGHT_PINKY', 'LEFT_INDEX', 'RIGHT_INDEX',
+  'LEFT_THUMB', 'RIGHT_THUMB', 'LEFT_HIP', 'RIGHT_HIP', 'LEFT_KNEE', 'RIGHT_KNEE', 'LEFT_ANKLE', 'RIGHT_ANKLE',
+  'LEFT_HEEL', 'RIGHT_HEEL', 'LEFT_FOOT_INDEX', 'RIGHT_FOOT_INDEX',
+]
+
+/** World landmarks for each recorded frame, from the local MediaPipe script on the fixture clip. */
+function addLocalWorldLandmarks(poseData: Array<{ frame: number; landmarks: unknown; world?: unknown }>) {
+  const poseDir = path.resolve(process.cwd(), '..', 'correction-mvp', 'pose')
+  const out = path.join(OUT, '.local-pose.json')
+  execFileSync('uv', ['run', '--project', poseDir, 'python', path.join(poseDir, 'analyze.py'), path.join(OUT, 'player-forehand-volley.mp4'), out], {
+    stdio: 'ignore',
+  })
+  const local = JSON.parse(fs.readFileSync(out, 'utf8')) as { frames: Array<{ world: number[][] | null }> }
+  fs.rmSync(out)
+  return poseData.map((f) => {
+    const w = local.frames[f.frame]?.world
+    if (f.world || !w) return f
+    return { ...f, world: Object.fromEntries(MP_NAMES.map((n, i) => [n, { x: w[i]![0]!, y: w[i]![1]!, z: w[i]![2]! }])) }
+  })
+}
 
 async function main() {
   const c = new Client({ connectionString: process.env.DATABASE_URL })
@@ -32,7 +60,8 @@ async function main() {
     )
 
     // Only what the Modal analyzer returns: BEXevo adds racket fields to pose_data and the rest later.
-    const poseData = (m.pose_data as any[]).map((f) => ({ frame: f.frame, landmarks: f.landmarks, ...(f.world ? { world: f.world } : {}) }))
+    let poseData = (m.pose_data as any[]).map((f) => ({ frame: f.frame, landmarks: f.landmarks, ...(f.world ? { world: f.world } : {}) }))
+    if (poseData.some((f) => !f.world)) poseData = addLocalWorldLandmarks(poseData)
     const modal = {
       status: 'success',
       analysis_id: 'e2e-fixture',
@@ -65,7 +94,9 @@ async function main() {
       '-i', path.join(OUT, 'player-forehand-volley.mp4'), '-an', '-vf', 'scale=360:-2',
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '28', path.join(OUT, 'correction-video.mp4'),
     ])
-    console.log(`Wrote fixtures for ${ANALYSIS_ID}: ${poseData.length} pose frames, ${det.rows.length} detections`)
+    console.log(
+      `Wrote fixtures for ${ANALYSIS_ID}: ${poseData.length} pose frames (${poseData.filter((f) => f.world).length} with world), ${det.rows.length} detections`,
+    )
   } finally {
     await c.end()
   }

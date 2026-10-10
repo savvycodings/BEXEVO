@@ -79,5 +79,11 @@ export async function seedE2eAccounts(): Promise<SeedResult> {
       body: 'Seeded by the e2e setup.',
     })
   }
+  // The pro reference used by the pose-correction Magic Shot video (front-view forehand volley).
+  const { upsertProReference } = await import('../technique/poseCorrection/proReferences')
+  const { readJsonFixture } = await import('./fakes')
+  const pro = readJsonFixture<any>('pro-fh-volley-front-42cf0eba.json')
+  await upsertProReference({ id: pro.id, strokePreset: pro.strokePreset, racketSide: pro.racketSide, sourceLabel: pro.sourceLabel, pose: pro.pose })
+
   return out
 }

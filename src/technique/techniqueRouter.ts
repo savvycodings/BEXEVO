@@ -202,6 +202,8 @@ import {
 } from '../lib/cloudinaryUpload'
 import { fal } from '@fal-ai/client'
 import { fakesEnabled, readJsonFixture } from '../e2e/fakes'
+import { runPoseCorrectionVideoJob } from './poseCorrection/job'
+import { PoseCorrectionError, resolveStrengths } from './poseCorrection/inputs'
 
 function resolveFalKey(): string {
   return String(process.env.FAL_API_KEY || process.env.FAL_KEY || '').trim()
@@ -327,6 +329,8 @@ type DetectionRow = {
 type PoseFrameWithOptionalRacket = {
   frame: number
   landmarks: FrameLandmarks
+  /** 3D world landmarks (meters, hip-centered) when the analyzer returned them. */
+  world?: Record<string, { x: number; y: number; z: number }>
   racket_bbox?: [number, number, number, number] | null
   racket_conf?: number | null
   racket_hand?: 'left' | 'right' | null
@@ -657,6 +661,8 @@ export function enrichPoseDataWithRacket(
     out.push({
       frame,
       landmarks,
+      // 3D world landmarks from the analyzer, kept for the pose-correction video.
+      ...(r.world && typeof r.world === 'object' ? { world: r.world as Record<string, { x: number; y: number; z: number }> } : {}),
       ...(racket_bbox
         ? {
             racket_bbox,
@@ -2540,6 +2546,11 @@ function ti2vCorrectionCache(metrics: Record<string, unknown>): boolean {
   return (ctx as { pipeline?: unknown }).pipeline === 'ti2v-i2v'
 }
 
+function rawVideoCache(metrics: Record<string, unknown>): { overlayVideo?: string; corrections?: unknown } {
+  const raw = metrics.correction_videos_comfy
+  return raw && typeof raw === 'object' ? (raw as { overlayVideo?: string; corrections?: unknown }) : {}
+}
+
 type CorrectionVideoJob = {
   status: 'running' | 'done' | 'failed'
   startedAt: string
@@ -2656,6 +2667,9 @@ router.get('/analysis/:id/correction-videos', async (req, res) => {
       windowEndMs: cached?.windowEndMs ?? null,
       correction_videos_comfy: cached,
       correction_context_videos_comfy: metrics.correction_context_videos_comfy ?? null,
+      // Pose-correction Magic Shot extras (null for other providers).
+      overlayVideo: cached ? (rawVideoCache(metrics).overlayVideo ?? null) : null,
+      corrections: cached ? (rawVideoCache(metrics).corrections ?? null) : null,
     })
   } catch (e: any) {
     console.error('[Technique] Correction-videos fetch error:', e)
@@ -3845,7 +3859,8 @@ router.post('/correction-videos', async (req, res) => {
       })
     }
 
-    const { analysisId, forceRegenerate } = req.body as {
+    const { analysisId, forceRegenerate, strengths } = req.body as {
+      strengths?: unknown
       analysisId?: string
       forceRegenerate?: boolean
     }
@@ -3908,6 +3923,13 @@ router.post('/correction-videos', async (req, res) => {
       })
     }
 
+    if (videoProvider === 'pose-correction' && strengths != null) {
+      try {
+        resolveStrengths(strengths, { racketArm: 0, freeArm: 0, trunk: 0, legs: 0 })
+      } catch (e) {
+        return res.status(400).json({ error: (e as Error).message })
+      }
+    }
     const existingJob = readCorrectionVideoJob(metrics)
     if (existingJob?.status === 'running') {
       return res.status(202).json({ status: 'running', startedAt: existingJob.startedAt })
@@ -3925,6 +3947,7 @@ router.post('/correction-videos', async (req, res) => {
       analysis,
       metrics,
       videoProvider,
+      strengths,
       wantFun,
       ti2vConfigured,
       routeT0,
@@ -3976,6 +3999,7 @@ async function runCorrectionVideoJob({
   analysis,
   metrics,
   videoProvider,
+  strengths,
   wantFun,
   ti2vConfigured,
   routeT0,
@@ -3985,10 +4009,29 @@ async function runCorrectionVideoJob({
   analysis: typeof techniqueAnalysis.$inferSelect
   metrics: Record<string, unknown>
   videoProvider: ReturnType<typeof resolveVideoProvider>
+  strengths?: unknown
   wantFun: boolean
   ti2vConfigured: boolean
   routeT0: number
 }): Promise<void> {
+  if (videoProvider === 'pose-correction') {
+    const video = await db.query.techniqueVideo.findFirst({
+      where: (tv, { eq: _eq }) => _eq(tv.id, analysis.techniqueVideoId),
+    })
+    try {
+      await runPoseCorrectionVideoJob({
+        analysisId,
+        userId,
+        metrics,
+        videoPath: video?.cloudinaryPublicId ?? '',
+        strengths,
+      })
+    } catch (e) {
+      if (e instanceof PoseCorrectionError) throw new CorrectionVideoJobError(e.status, e.message)
+      throw e
+    }
+    return
+  }
   {
     const poseData: PoseFrameRow[] = Array.isArray(metrics.pose_data)
       ? (metrics.pose_data as PoseFrameRow[])

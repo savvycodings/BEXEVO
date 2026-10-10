@@ -109,6 +109,14 @@ export function e2eRouter(): express.Router {
       res.status(500).json({ error: (e as Error).message })
     }
   })
+  // Test switches for fakes: fakeVideoFail makes the fake video provider fail; realVideo uses the real one.
+  r.post('/flags', express.json(), (req, res) => {
+    const b = (req.body ?? {}) as { fakeVideoFail?: boolean; realVideo?: boolean }
+    if (typeof b.fakeVideoFail === 'boolean') process.env.XEVO_E2E_FAKE_VIDEO_FAIL = b.fakeVideoFail ? '1' : '0'
+    // realVideo: the pose-correction video goes to the real provider (paid), the rest stays faked.
+    if (typeof b.realVideo === 'boolean') process.env.XEVO_E2E_REAL_VIDEO = b.realVideo ? '1' : '0'
+    res.json({ fakeVideoFail: process.env.XEVO_E2E_FAKE_VIDEO_FAIL === '1', realVideo: process.env.XEVO_E2E_REAL_VIDEO === '1' })
+  })
   r.delete('/outbound', (_req, res) => {
     outbound.length = 0
     res.json({ ok: true })

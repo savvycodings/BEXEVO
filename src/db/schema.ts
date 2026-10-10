@@ -1080,3 +1080,28 @@ export const falLoraTrainingRun = pgTable("fal_lora_training_run", {
   createdAt: timestamp("createdAt").notNull().defaultNow(),
   updatedAt: timestamp("updatedAt").notNull().defaultNow(),
 });
+
+/**
+ * Curated pro strokes for the pose-correction Magic Shot video: full-frame-rate MediaPipe pose
+ * (2D + 3D world) per frame, with the stroke, racket hand and camera angle used to pick a match.
+ * Loaded by scripts/loadProReferences.ts; the pro video files aren't needed at runtime.
+ */
+export const proReference = pgTable(
+  "pro_reference",
+  {
+    id: text("id").primaryKey(),
+    strokePreset: text("strokePreset").notNull(),
+    racketSide: text("racketSide").notNull(),
+    /** Median 2D shoulder width ÷ torso length: ~0.6+ front/back view, under ~0.3 side view. */
+    facingRatio: real("facingRatio").notNull(),
+    fps: real("fps").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    /** { frames: [{ t, image: number[33][4] | null, world: number[33][3] | null }] } */
+    pose: jsonb("pose").notNull(),
+    sourceLabel: text("sourceLabel"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [index("pro_reference_stroke_idx").on(table.strokePreset)]
+);

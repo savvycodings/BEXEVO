@@ -295,6 +295,13 @@
       "when": 1790005934801,
       "tag": "0042_club_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1791593868843,
+      "tag": "0043_pro_reference",
+      "breakpoints": true
     }
   ]
 }
