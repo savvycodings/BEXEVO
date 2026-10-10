@@ -24,6 +24,16 @@ import {
 import { getPrivacyPolicyHtml } from './privacyPolicyHtml'
 import { getDataDeletionHtml } from './dataDeletionHtml'
 import { warnIfXevoModelMismatch } from './lib/xevoLlm'
+import { assertFakesAllowed, mountE2eRoutes, watchOutboundFetch } from './e2e/fakes'
+
+// Refuse e2e fakes in production before anything else starts.
+try {
+  assertFakesAllowed()
+} catch (e) {
+  console.error(`[E2E fakes] ${(e as Error).message}`)
+  process.exit(1)
+}
+watchOutboundFetch()
 
 const app = express()
 
@@ -80,7 +90,8 @@ app.use('/api/auth', (req, _res, next) => {
   const hasBearerAuth =
     typeof req.headers.authorization === 'string' &&
     req.headers.authorization.toLowerCase().startsWith('bearer ')
-  if (origin === 'http://localhost:8081' || origin === 'http://127.0.0.1:8081') {
+  const webTestOrigin = (process.env.WEB_TEST_ORIGIN || '').trim().replace(/\/+$/, '')
+  if (origin === 'http://localhost:8081' || origin === 'http://127.0.0.1:8081' || (webTestOrigin && origin === webTestOrigin)) {
     _res.header('Access-Control-Allow-Origin', origin)
     _res.header('Access-Control-Allow-Credentials', 'true')
     _res.header(
@@ -160,6 +171,8 @@ function sendDataDeletion(res: express.Response) {
 
 app.get('/data-deletion', (_req, res) => sendDataDeletion(res))
 app.get('/user-data-deletion', (_req, res) => sendDataDeletion(res))
+
+mountE2eRoutes(app)
 
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
 app.use('/chat', chatRouter)

@@ -6,6 +6,7 @@
  * provider so existing call sites can keep using `choices[0].message.content`.
  */
 
+import { fakesEnabled, readJsonFixture } from "../e2e/fakes";
 import {
   xevoChatCompletion,
   type ChatCompletionRequest,
@@ -80,6 +81,7 @@ export async function runChat(
     logLabel?: string;
   }
 ): Promise<OpenAICompatResponse> {
+  if (fakesEnabled()) return fakeChatCompletion(options?.logLabel);
   const provider = pickChatProvider(options?.provider ?? null);
   if (provider === "xevo") {
     return xevoChatCompletion(req, {
@@ -89,6 +91,17 @@ export async function runChat(
     });
   }
   return openaiChatCompletion(req);
+}
+
+/**
+ * E2E fakes: the technique analysis gets the recorded write-up; every other caller gets empty
+ * content, which they already treat as "use the defaults".
+ */
+function fakeChatCompletion(logLabel?: string): OpenAICompatResponse {
+  const content = logLabel?.startsWith("technique-analyze")
+    ? JSON.stringify(readJsonFixture("llm-analyze.json"))
+    : "";
+  return { choices: [{ message: { role: "assistant", content } }] } as OpenAICompatResponse;
 }
 
 /** Convenience — pull `choices[0].message.content` from a response, returning `null` if missing. */

@@ -1,3 +1,4 @@
+import { fakeCorrectionImageBase64, fakesEnabled } from "../e2e/fakes";
 import fs from "fs/promises";
 import path from "path";
 import {
@@ -22,6 +23,7 @@ import {
 } from "./poseMask";
 
 export function isComfyCorrectionConfigured(): boolean {
+  if (fakesEnabled()) return true;
   const base = String(process.env.COMFYUI_BASE_URL ?? "").trim();
   const wf = String(process.env.COMFYUI_WORKFLOW_PATH ?? "").trim();
   return base.length > 0 && wf.length > 0;
@@ -197,6 +199,7 @@ export async function generateCorrectedImageComfy(
   referenceMimeType?: string | null,
   proLandmarks?: FrameLandmarks | null
 ): Promise<string | null> {
+  if (fakesEnabled()) return fakeCorrectionImageBase64();
   if (!isComfyCorrectionConfigured()) {
     console.error("[comfyCorrection] COMFYUI_BASE_URL and COMFYUI_WORKFLOW_PATH are required");
     return null;

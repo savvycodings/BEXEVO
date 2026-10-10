@@ -67,7 +67,9 @@ const trustedOrigins = [
         "PUBLIC_VIDEO_BASE_URL",
         "PUBLIC_BASE_URL",
         "NGROK_PUBLIC_URL",
-        "CLUB_PORTAL_URL"
+        "CLUB_PORTAL_URL",
+        // Web build of the app used by the e2e harness (e.g. http://localhost:8090).
+        "WEB_TEST_ORIGIN"
       ),
       "http://localhost:3050",
       "http://127.0.0.1:3050",

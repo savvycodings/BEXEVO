@@ -1,3 +1,4 @@
+import { fakeCorrectionVideoBuffer, fakesEnabled } from "../e2e/fakes";
 import sharp from "sharp";
 import {
   buildWanFunControlNegativePrompt,
@@ -19,6 +20,7 @@ export function resolveVideoProvider(): VideoProvider {
 }
 
 export function isGeminiVideoConfigured(): boolean {
+  if (fakesEnabled()) return true;
   return Boolean(String(process.env.GEMINI_API_KEY ?? "").trim());
 }
 
@@ -97,6 +99,7 @@ export async function generateCorrectedVideoGemini(opts: {
   shotName: string;
   handedness: string;
 }): Promise<Buffer> {
+  if (fakesEnabled()) return fakeCorrectionVideoBuffer();
   const apiKey = String(process.env.GEMINI_API_KEY ?? "").trim();
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is required for XEVO_VIDEO_PROVIDER=gemini");

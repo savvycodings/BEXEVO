@@ -49,7 +49,34 @@ upstream services.
   end-to-end, swap in a real short swing clip locally and point `makeFixtureVideo` calls at it,
   or add a second, opt-in test that reads a real fixture file from disk.
 
-## Known limitation: no mocking layer
+## Fakes mode (free, repeatable runs)
+
+`XEVO_E2E_FAKES=1` replaces the paid and home-PC AI calls with fixtures from `src/e2e/fixtures/`:
+- the Modal analyzer (recorded response; no fal staging)
+- the LLM write-up (recorded) and correction prompts (empty content, so callers use their defaults)
+- correction images (ComfyUI, Gemini, fal): `correction-image.png`
+- correction videos (ComfyUI, Veo): `correction-video.mp4`
+- Resend: emails go to an in-memory outbox
+
+Routing, auth, Postgres and file storage stay real. The server refuses to start with fakes on when `NODE_ENV=production` or `RAILWAY_ENVIRONMENT_NAME=production`.
+
+```bash
+cp .env.e2e.example .env.e2e
+pnpm db:e2e     # local Postgres + pgvector in Docker on :5444, schema pushed from schema.ts
+pnpm dev:e2e    # server with .env.e2e taking priority over .env (local DB, fakes on)
+pnpm test:e2e   # the flows; technique.flow detects fakes and asserts zero real outbound calls
+```
+
+Routes that exist only in fakes mode:
+- `GET /__e2e/health`: `{ fakes, dbEndpoint, outboundCalls }`
+- `GET /__e2e/outbox?to=`: emails, including OTP codes
+- `POST /__e2e/seed`: creates or reuses `e2e-player@xevo.test` (student), `e2e-coach@xevo.test` (coach, linked to the player) and `e2e-admin@xevo.test`, all with password `E2E-test-password-1!`. The admin hub gate password is `ADMIN_HUB_GATE_PASSWORD` in `.env.e2e`.
+
+The outbound counter only sees the global `fetch`. The fakes short-circuit every AI client at its call site, so nothing else should go out either.
+
+Fixtures come from an existing analysis of the fixture clip: `pnpm exec tsx scripts/recordE2eFixtures.ts [analysisId]` (read-only on the database in `.env`).
+
+## Without fakes mode: real upstream calls
 
 `/analyze`, `/correction-images`, and `/correction-videos` call fal.ai, an LLM (Gemini), and Comfy
 directly and inline — there's no injectable client/interface to swap in a stub. That means:

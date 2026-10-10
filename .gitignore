@@ -13,3 +13,4 @@ uploads/club/
 .pnpm-store/
 uploads/technique-correction-videos/
 uploads/technique-holograms/
+.env.e2e

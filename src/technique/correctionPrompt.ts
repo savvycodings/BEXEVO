@@ -1,3 +1,4 @@
+import { fakeCorrectionImageBase64, fakesEnabled } from "../e2e/fakes";
 import type { LabeledPoseFrame } from "./impactPoseContext";
 import { MEDIAPIPE_POSE_LANDMARK_NAMES } from "./poseEmbedding";
 import { fal } from "@fal-ai/client";
@@ -792,6 +793,7 @@ export async function generateCorrectedImage(
   shotAndHandedness?: ShotAndHandedness | null,
   proReferenceText?: string | null
 ): Promise<string | null> {
+  if (fakesEnabled()) return fakeCorrectionImageBase64();
   const instructions = deltasToInstructions(deltas);
   const { shot, handedness } = shotAndHandednessForImagePrompt(shotAndHandedness);
 
@@ -1206,6 +1208,7 @@ export async function generateCorrectedImageFal(
   shotAndHandedness?: ShotAndHandedness | null,
   proReferenceText?: string | null
 ): Promise<string | null> {
+  if (fakesEnabled()) return fakeCorrectionImageBase64();
   const apiKey = resolveFalKeyForCorrections();
   if (!apiKey) {
     console.error("[CorrectionPrompt] FAL_KEY / FAL_API_KEY missing for fal corrections");

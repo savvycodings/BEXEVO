@@ -1,3 +1,4 @@
+import { fakeCorrectionVideoBuffer, fakesEnabled } from "../e2e/fakes";
 import fs from "fs/promises";
 import path from "path";
 import {
@@ -42,12 +43,14 @@ export function comfyBaseHost(): string {
 }
 
 export function isComfyFunControlConfigured(): boolean {
+  if (fakesEnabled()) return true;
   const base = envBaseUrl();
   const wf = String(process.env.COMFYUI_FUN_CONTROL_WORKFLOW_PATH ?? "").trim();
   return base.length > 0 && wf.length > 0;
 }
 
 export function isComfyTi2vConfigured(): boolean {
+  if (fakesEnabled()) return true;
   const base = envBaseUrl();
   const wf = String(process.env.COMFYUI_VIDEO_WORKFLOW_PATH ?? "").trim();
   return base.length > 0 && wf.length > 0;
@@ -106,6 +109,7 @@ export async function generateCorrectedVideoComfy(opts: {
   shotName: string;
   handedness: string;
 }): Promise<Buffer> {
+  if (fakesEnabled()) return fakeCorrectionVideoBuffer();
   if (!isComfyTi2vConfigured()) {
     throw new Error("COMFYUI_BASE_URL and COMFYUI_VIDEO_WORKFLOW_PATH are required");
   }
@@ -511,6 +515,7 @@ export async function generatePoseRetargetVideoComfy(opts: {
   coaching?: CoachingVideoContext | null;
   poseGuidance?: PoseGuidance;
 }): Promise<Buffer> {
+  if (fakesEnabled()) return fakeCorrectionVideoBuffer();
   if (!isComfyFunControlConfigured()) {
     throw new Error("COMFYUI_BASE_URL and COMFYUI_FUN_CONTROL_WORKFLOW_PATH are required");
   }

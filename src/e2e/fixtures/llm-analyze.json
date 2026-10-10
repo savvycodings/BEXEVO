@@ -1,0 +1,116 @@
+{
+  "en": {
+    "diagnosis": "You initiated the swing with a quick [[prep_to_impact]] of 38ms and maintained a stable torso separation delta of 1.2 degrees through contact, ensuring the racket path stayed compact. Your elbow angle shifted from 80 to 85 degrees at impact, which helped keep the racket face square despite the rapid wrist acceleration of 4.54 body-lengths/s.",
+    "strengths": [
+      "You kept a stable base through contact and transferred weight cleanly into the swing, evidenced by the torso separation delta of 1.2 degrees.",
+      "Your split step timing was excellent, landing just before impact to allow for the 38ms prep_to_impact window.",
+      "The racket face stayed square at contact with a controlled follow-through, indicated by the elbow angle delta of 5 degrees."
+    ],
+    "observations": [
+      "Your split step landed early enough to set the base before the ball arrived, supporting the 38ms prep_to_impact timing.",
+      "Weight stayed centered through contact instead of falling away from the hit, aided by the elbow angle delta of 5 degrees.",
+      "Follow-through finished high with a controlled racket path, though the wrist speed peak of 4.54 body-lengths/s needs refinement."
+    ],
+    "shot_context": "Declared shot: Forehand volley.",
+    "recommendations": [
+      "Practice short compact swing feeds that keep the racket path short into contact to manage the 38ms prep_to_impact window.",
+      "Drill split step timing so you land balanced before every ball, utilizing the torso separation delta of 1.2 degrees.",
+      "Shadow the finish into a quiet ready position after each swing to improve recovery efficiency."
+    ],
+    "technical_errors": [
+      "Your contact point was slightly late relative to the ball trajectory, which reduced the efficiency of the weight transfer.",
+      "The wrist speed peak of 4.54 body-lengths/s suggests a bit of excess acceleration that could lead to loss of control.",
+      "Recovery steps crossed instead of a clean reset into ready position after the follow-through."
+    ],
+    "actionable_corrections": [
+      "Hold the racket face closed a beat longer through contact to maintain stability during the 38ms prep_to_impact phase.",
+      "Take one adjustment step earlier so contact stays out in front and matches the ball height above hip level.",
+      "Land and reset into ready position before the next ball, focusing on the torso separation delta of 1.2 degrees."
+    ]
+  },
+  "es": {
+    "diagnosis": "Iniciaste el golpe con un [[prep_to_impact]] rápido de 38ms y mantuviste una separación torácica estable de 1.2 grados durante el contacto, asegurando que la trayectoria de la pala permaneciera compacta. Tu ángulo de codo cambió de 80 a 85 grados en el impacto, lo que ayudó a mantener la cara de la pala cuadrada.",
+    "strengths": [
+      "Mantienes una base estable durante el contacto y transfieres el peso con limpieza, evidenciado por la separación torácica de 1.2 grados.",
+      "Tu [[split step]] llegó a tiempo, permitiendo la ventana de 38ms para el prep_to_impact.",
+      "La cara de la pala se mantuvo cuadrada en el contacto con un follow-through controlado, indicado por el delta de ángulo de codo de 5 grados."
+    ],
+    "observations": [
+      "Tu split step llegó a tiempo para asentar la base antes de la bola, apoyando el timing de 38ms prep_to_impact.",
+      "El peso se mantuvo centrado durante el contacto sin caer hacia atrás, ayudado por el delta de ángulo de codo de 5 grados.",
+      "El follow-through terminó alto con una trayectoria de pala controlada, aunque la velocidad pico del codo de 4.54 body-lengths/s necesita refinamiento."
+    ],
+    "shot_context": "Golpe declarado: Forehand volley.",
+    "recommendations": [
+      "Practica feeds de swing compacto que acorten la trayectoria de pala al contacto para gestionar la ventana de 38ms prep_to_impact.",
+      "Entrena el timing del split step para aterrizar equilibrado antes de cada bola, utilizando la separación torácica de 1.2 grados.",
+      "Sombrea el final del golpe hasta una posición lista tranquila después de cada swing para mejorar la eficiencia de recuperación."
+    ],
+    "technical_errors": [
+      "El punto de contacto fue ligeramente tarde respecto a la trayectoria de la bola, reduciendo la eficiencia de la transferencia de peso.",
+      "La velocidad pico del codo de 4.54 body-lengths/s sugiere un exceso de aceleración que podría causar pérdida de control.",
+      "Los pasos de recuperación se cruzaron en vez de volver a una posición lista limpia."
+    ],
+    "actionable_corrections": [
+      "Mantén la cara de la pala cerrada un instante más durante el contacto para mantener estabilidad en la fase de 38ms prep_to_impact.",
+      "Da un paso de ajuste antes para que el contacto se mantenga por delante y coincida con la altura de la bola.",
+      "Aterriza y vuelve a [[posición de listo]] antes de la siguiente bola, enfocándote en la separación torácica de 1.2 grados."
+    ]
+  },
+  "score": 81,
+  "rating": "excellent",
+  "is_padel": true,
+  "breakdown": {
+    "outcome": 79,
+    "tactics": 82,
+    "technique": 83
+  },
+  "confidence": {
+    "band": "reliable",
+    "score": 88,
+    "pose_confidence": 90,
+    "tracking_stability": 85,
+    "visibility_quality": 92,
+    "uncertainty_plus_minus": 2
+  },
+  "score_scale": "percent",
+  "outcome_score": 79,
+  "tactics_score": 82,
+  "invalid_reason": "",
+  "sport_detected": "padel",
+  "score_model_raw": 74,
+  "scoring_version": "v6.1.3",
+  "technique_score": 83,
+  "confidence_score": 88,
+  "physical_metrics": {
+    "power": 74,
+    "source": "llm",
+    "agility": 76,
+    "version": "v1",
+    "reactions": 77,
+    "stability": 78,
+    "acceleration": 75
+  },
+  "sport_confidence": 0.92,
+  "calibration_trace": {
+    "pillar_blend": 74,
+    "model_score_raw": 74,
+    "weighted_formula": "overall = avg(pillars each + round(boost * (0.88 + 0.12 * pillar/100))); boost 1–12 from merit (pillars, confidence, errors, strengths)",
+    "overall_displayed": 81,
+    "score_display_boost": 7,
+    "pro_tier_score_constraint": "disabled_v6.1.2 (no advanced-neighbor floor)",
+    "score_display_boost_merit": 0.5575,
+    "pro_library_neighbor_skill": "advanced",
+    "score_display_boost_factors": {
+      "merit": 0.5575,
+      "errorLoad": 0.75,
+      "strengthLoad": 0.21000000000000002,
+      "confidenceNorm": 0.88,
+      "rawOverallNorm": 0.74,
+      "pillarSpreadNorm": 0.04
+    },
+    "legacy_penalty_adjusted_audit": 57
+  },
+  "primary_train_category": "net_play",
+  "score_calibrated_before_pro_tier": 57
+}

@@ -18,7 +18,9 @@
     "db:push": "pnpm exec drizzle-kit push",
     "scores:backfill:v61": "pnpm exec ts-node-dev --transpile-only src/scripts/backfillTechniqueScoringV61.ts",
     "test": "tsx --test \"src/**/*.test.ts\"",
-    "test:e2e": "tsx --test \"src/e2e/**/*.e2e.ts\""
+    "test:e2e": "tsx --test \"src/e2e/**/*.e2e.ts\"",
+    "db:e2e": "tsx scripts/e2eDb.ts",
+    "dev:e2e": "tsx scripts/devE2e.ts"
   },
   "keywords": [],
   "author": "",

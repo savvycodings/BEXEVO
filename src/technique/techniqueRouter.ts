@@ -200,6 +200,8 @@ import {
   uploadLocalFileToCloudinary,
   cloudinaryStagingFailureMessage,
 } from '../lib/cloudinaryUpload'
+import { fal } from '@fal-ai/client'
+import { fakesEnabled, readJsonFixture } from '../e2e/fakes'
 
 function resolveFalKey(): string {
   return String(process.env.FAL_API_KEY || process.env.FAL_KEY || '').trim()
@@ -1329,6 +1331,7 @@ router.post('/analyze', async (req, res) => {
     }
 
     if (
+      !fakesEnabled() &&
       modalWebhook &&
       !modalWebhook.includes('localhost') &&
       !publicHttpVideo &&
@@ -1370,6 +1373,7 @@ router.post('/analyze', async (req, res) => {
     }
 
     if (
+      !fakesEnabled() &&
       process.env.MODAL_WEBHOOK_URL &&
       !process.env.MODAL_WEBHOOK_URL.includes('localhost') &&
       /localhost|127\.0\.0\.1/i.test(videoUrl)
@@ -1398,15 +1402,17 @@ router.post('/analyze', async (req, res) => {
     })
 
     const modalT0 = Date.now()
-    const modalRes = await fetch(process.env.MODAL_WEBHOOK_URL as string, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        video_url: videoUrl,
-        analysis_id: analysisId,
-        model: 'mediapipe',
-      }),
-    }).then(r => r.json() as any)
+    const modalRes = fakesEnabled()
+      ? ({ ...readJsonFixture<any>('modal-analyze.json'), analysis_id: analysisId } as any)
+      : await fetch(process.env.MODAL_WEBHOOK_URL as string, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            video_url: videoUrl,
+            analysis_id: analysisId,
+            model: 'mediapipe',
+          }),
+        }).then(r => r.json() as any)
     timer.mark('modal', { durationMs: Date.now() - modalT0 })
 
     if (modalRes?.status !== 'success' || !modalRes.metrics) {
