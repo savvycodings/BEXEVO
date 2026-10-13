@@ -5,22 +5,32 @@ import {
   blendLandmarks,
   coachedControlLandmarkFrames,
   controlCanvasSize,
-  correctionCanvasSize,
-  correctionFunLength,
+  CORRECTION_CANVAS_SIZE,
+  CORRECTION_FUN_LENGTH,
   smoothLandmarkTrack,
   inferSwingSideFromLandmarks,
   fillJointGaps,
   blendArmsByAngle,
+  blendEnvelope,
+  rejectLimbGlitches,
   restoreLimbLengths,
   inferFacing,
   proOrientationPlan,
   rejectBodySizeOutliers,
   retargetProToUser,
+  extendRacketReach,
+  racketArmPeakKeeper,
+  sampleImpactWindowFrameIndices,
   userLandmarksForFrames,
   windowRetargetScale,
   type NamedLandmarks,
 } from "./openPoseVideo";
-import { pickImpactAlignedProPoseFrame } from "./proTimeAlign";
+import {
+  interpolateProPoseAt,
+  pickImpactAlignedProPoseFrame,
+  proTrustAt,
+  proTrustByImpact,
+} from "./proTimeAlign";
 import type { TrainPoseFrame } from "../db/schema";
 
 /** Minimal torso + arms; hip mid at (hx, hy), shoulders one torso length above. */
@@ -120,61 +130,18 @@ test("blendLandmarks keeps a joint that only one side has", () => {
   assert.equal(out.RIGHT_WRIST?.x, 0.9);
 });
 
-test("controlCanvasSize is square unless aspect fitting is explicitly enabled", () => {
-  // Asserted against the resolver rather than a literal, so raising the render size for
-  // quality does not silently fail this test.
-  const cap = correctionCanvasSize();
-
+test("controlCanvasSize is square whatever the footage aspect", () => {
   // Aspect fitting lands on sizes WAN decodes with its patch grid visible, so the clip
-  // aspect is deliberately ignored by default even when we know it.
+  // aspect is deliberately ignored even when we know it.
+  const cap = CORRECTION_CANVAS_SIZE;
+  assert.equal(cap % 32, 0);
   assert.deepEqual(controlCanvasSize(1080, 1920), { width: cap, height: cap });
   assert.deepEqual(controlCanvasSize(1920, 1080), { width: cap, height: cap });
   assert.deepEqual(controlCanvasSize(null, null), { width: cap, height: cap });
 });
 
-test("controlCanvasSize aspect fitting stays on a multiple of 32 when enabled", () => {
-  const prev = process.env.CORRECTION_CANVAS_ASPECT;
-  process.env.CORRECTION_CANVAS_ASPECT = "1";
-  try {
-    const cap = correctionCanvasSize();
-
-    // Within half a 32px step of the aspect-preserving ideal is all the rounding allows.
-    const portrait = controlCanvasSize(1080, 1920);
-    assert.equal(portrait.height, cap);
-    assert.equal(portrait.width % 32, 0);
-    assert.ok(Math.abs(portrait.width - (cap * 1080) / 1920) <= 16);
-
-    const landscape = controlCanvasSize(1920, 1080);
-    assert.equal(landscape.width, cap);
-    assert.equal(landscape.height % 32, 0);
-    assert.ok(Math.abs(landscape.height - (cap * 1080) / 1920) <= 16);
-
-    // 32-alignment is what keeps the patch count even in both dimensions.
-    assert.equal((portrait.width / 16) % 2, 0);
-    assert.equal((landscape.height / 16) % 2, 0);
-
-    assert.deepEqual(controlCanvasSize(null, null), { width: cap, height: cap });
-  } finally {
-    if (prev == null) delete process.env.CORRECTION_CANVAS_ASPECT;
-    else process.env.CORRECTION_CANVAS_ASPECT = prev;
-  }
-});
-
-test("correctionFunLength snaps to the 4n+1 lengths Fun Control accepts", () => {
-  const prev = process.env.CORRECTION_FUN_LENGTH;
-  try {
-    for (const [set, want] of [["33", 33], ["17", 17], ["30", 29], ["48", 49]] as const) {
-      process.env.CORRECTION_FUN_LENGTH = set;
-      assert.equal(correctionFunLength(), want);
-      assert.equal((correctionFunLength() - 1) % 4, 0);
-    }
-    delete process.env.CORRECTION_FUN_LENGTH;
-    assert.equal(correctionFunLength(), 33);
-    assert.equal((correctionFunLength() - 1) % 4, 0);
-  } finally {
-    if (prev == null) delete process.env.CORRECTION_FUN_LENGTH;
-    else process.env.CORRECTION_FUN_LENGTH = prev;
-  }
+test("CORRECTION_FUN_LENGTH is a 4n+1 length Fun Control accepts", () => {
+  assert.equal((CORRECTION_FUN_LENGTH - 1) % 4, 0);
 });
 
 test("smoothLandmarkTrack damps a one-frame spike without moving a steady track", () => {
@@ -456,7 +423,7 @@ test("restoreLimbLengths lengthens a collapsed forearm along its direction and c
   const reference = Array.from({ length: 5 }, () => arm(0.5, 0.5));
   // Blended frame: forearm collapsed to 0.03, pointing straight down.
   const [out] = restoreLimbLengths([arm(0.5, 0.43)], reference);
-  assert.ok(Math.abs((out!.LEFT_WRIST!.y - 0.4) - 0.075) < 1e-9, `wrist y ${out!.LEFT_WRIST!.y}`);
+  assert.ok(Math.abs((out!.LEFT_WRIST!.y - 0.4) - 0.09) < 1e-9, `wrist y ${out!.LEFT_WRIST!.y}`);
   assert.equal(out!.LEFT_WRIST!.x, 0.5);
   // The hand moves with the wrist.
   assert.ok(Math.abs(out!.LEFT_INDEX!.y - (out!.LEFT_WRIST!.y + 0.02)) < 1e-9);
@@ -466,10 +433,17 @@ test("restoreLimbLengths keeps ordinary foreshortening", () => {
   const arm: NamedLandmarks = {
     LEFT_SHOULDER: { x: 0.5, y: 0.3 },
     LEFT_ELBOW: { x: 0.5, y: 0.4 },
-    LEFT_WRIST: { x: 0.5, y: 0.48 },
+    LEFT_WRIST: { x: 0.5, y: 0.492 },
+    LEFT_KNEE: { x: 0.5, y: 0.7 },
+    LEFT_HIP: { x: 0.5, y: 0.6 },
+    LEFT_ANKLE: { x: 0.5, y: 0.78 },
   };
-  const reference: NamedLandmarks[] = Array.from({ length: 5 }, () => ({ ...arm, LEFT_WRIST: { x: 0.5, y: 0.5 } }));
-  // 0.08 of a 0.1 forearm is 80%, above the 75% floor: untouched.
+  const reference: NamedLandmarks[] = Array.from({ length: 5 }, () => ({
+    ...arm,
+    LEFT_WRIST: { x: 0.5, y: 0.5 },
+    LEFT_ANKLE: { x: 0.5, y: 0.8 },
+  }));
+  // Forearm at 92% is above the arms' 90% floor; shin at 80% is above the legs' 75% floor: untouched.
   assert.deepEqual(restoreLimbLengths([arm], reference)[0], arm);
 });
 
@@ -494,4 +468,207 @@ test("blendArmsByAngle bends the elbow between the athlete's and the pro's, neve
   assert.ok(w.x > e.x, "bends toward the pro's side (pro wrist is at +x)");
   // Forearm keeps the athlete's length.
   assert.ok(Math.abs(Math.hypot(w.x - e.x, w.y - e.y) - 0.1) < 1e-9);
+});
+
+test("sampleImpactWindowFrameIndices slides the window into the clip with equal steps", () => {
+  // a10: 90 frames over 3 s, contact early at 18 so a centred 2 s window would start before 0.
+  const early = sampleImpactWindowFrameIndices({
+    impactFrame: 18,
+    totalFrames: 90,
+    videoDurationMs: 3000,
+    count: 33,
+    windowMs: 2000,
+  });
+  assert.equal(early[0], 0);
+  assert.equal(early.at(-1), 60);
+  const steps = early.slice(1).map((f, i) => f - early[i]!);
+  assert.ok(steps.every((s) => Math.abs(s - steps[0]!) < 0.002), `uneven steps ${steps.join(",")}`);
+
+  const late = sampleImpactWindowFrameIndices({
+    impactFrame: 44,
+    totalFrames: 90,
+    videoDurationMs: 3000,
+    count: 33,
+    windowMs: 2000,
+  });
+  assert.equal(late[0], 14);
+  assert.equal(late.at(-1), 74);
+
+  // Bounds narrower than the window: use the whole clip.
+  const clipped = sampleImpactWindowFrameIndices({
+    impactFrame: 44,
+    totalFrames: 90,
+    videoDurationMs: 3000,
+    count: 33,
+    windowMs: 2000,
+    bounds: { start: 30, end: 60 },
+  });
+  assert.equal(clipped[0], 30);
+  assert.equal(clipped.at(-1), 60);
+});
+
+test("userLandmarksForFrames interpolates fractional frames between close rows", () => {
+  const rows = [
+    { frame: 10, landmarks: { NOSE: { x: 0.1, y: 0.2 } } },
+    { frame: 11, landmarks: { NOSE: { x: 0.2, y: 0.2 } } },
+  ];
+  const out = userLandmarksForFrames([10.25], rows);
+  assert.ok(Math.abs((out[0]?.NOSE?.x ?? 0) - 0.125) < 1e-9);
+});
+
+test("interpolateProPoseAt blends stride-5 pro rows instead of snapping", () => {
+  const proSeq: TrainPoseFrame[] = [
+    { frame_idx: 0, landmarks: { RIGHT_WRIST: { x: 0.2, y: 0.5 } } },
+    { frame_idx: 5, landmarks: { RIGHT_WRIST: { x: 0.7, y: 0.5 } } },
+  ];
+  assert.ok(Math.abs((interpolateProPoseAt(proSeq, 2)?.landmarks.RIGHT_WRIST?.x ?? 0) - 0.4) < 1e-9);
+  assert.equal(interpolateProPoseAt(proSeq, -3)?.landmarks.RIGHT_WRIST?.x, 0.2);
+  assert.equal(interpolateProPoseAt(proSeq, 9)?.landmarks.RIGHT_WRIST?.x, 0.7);
+});
+
+test("extendRacketReach pushes a tucked racket wrist out to the athlete's reach", () => {
+  const user: NamedLandmarks = {
+    RIGHT_SHOULDER: { x: 0.5, y: 0.3 },
+    RIGHT_ELBOW: { x: 0.6, y: 0.3 },
+    RIGHT_WRIST: { x: 0.7, y: 0.3 },
+  };
+  // Blended arm folded in: wrist 0.1 from the shoulder instead of 0.2.
+  const blended: NamedLandmarks = {
+    RIGHT_SHOULDER: { x: 0.5, y: 0.3 },
+    RIGHT_ELBOW: { x: 0.55, y: 0.38 },
+    RIGHT_WRIST: { x: 0.6, y: 0.3 },
+    RIGHT_INDEX: { x: 0.62, y: 0.3 },
+  };
+  const out = extendRacketReach(blended, user, user, "RIGHT", 0.4);
+  const w = out.RIGHT_WRIST!;
+  const e = out.RIGHT_ELBOW!;
+  const reach = Math.hypot(w.x - 0.5, w.y - 0.3);
+  assert.ok(reach > 0.19 && reach <= 0.2, `reach ${reach}`);
+  assert.ok(Math.abs(w.y - 0.3) < 1e-9, "keeps the blended direction");
+  assert.ok(e.y >= 0.3, "elbow stays on the side it was bending");
+  assert.ok(Math.abs(out.RIGHT_INDEX!.x - w.x - 0.02) < 1e-9, "hand moves with the wrist");
+  // Already reaching far enough: untouched.
+  assert.deepEqual(extendRacketReach(user, user, user, "RIGHT", 0.4), user);
+});
+
+test("racketArmPeakKeeper keeps contact frames and wrist turning points", () => {
+  const xs = [0.3, 0.4, 0.5, 0.45, 0.4, 0.35, 0.3];
+  const frames: NamedLandmarks[] = xs.map((x) => ({
+    RIGHT_ELBOW: { x: 0.4, y: 0.4 },
+    RIGHT_WRIST: { x, y: 0.5 },
+    LEFT_WRIST: { x: 0.6, y: 0.5 },
+  }));
+  const keep = racketArmPeakKeeper(frames, "RIGHT", null);
+  assert.equal(keep(2, "RIGHT_WRIST"), true, "turning point");
+  assert.equal(keep(4, "RIGHT_WRIST"), false);
+  assert.equal(keep(2, "LEFT_WRIST"), false, "free arm still smoothed");
+  const keepContact = racketArmPeakKeeper(frames, "RIGHT", 5);
+  assert.equal(keepContact(4, "RIGHT_ELBOW"), true);
+  assert.equal(keepContact(2, "RIGHT_SHOULDER"), false);
+});
+
+test("blendEnvelope is full through contact, gone by the window end, and the same at any fps", () => {
+  // A 2 s window of 33 samples with contact in the middle, at 30 and at 60 fps.
+  const timesAt = (fps: number) =>
+    Array.from({ length: 33 }, (_, i) => {
+      const frame = fps + (i * 2 * fps) / 32;
+      return (frame / fps) * 1000;
+    });
+  const env30 = blendEnvelope({ frameTimesMs: timesAt(30), contactMs: 2000 });
+  const env60 = blendEnvelope({ frameTimesMs: timesAt(60), contactMs: 2000 });
+  assert.equal(env30[16], 1, "full at contact");
+  assert.equal(env30[18], 1, "held just after contact");
+  assert.ok(env30[32]! < 1e-9, `end ${env30[32]}`);
+  assert.ok(env30[0]! < 1e-9, "eases in at the start");
+  for (let i = 0; i < 33; i++) assert.ok(Math.abs(env30[i]! - env60[i]!) < 1e-9, `frame ${i}`);
+  for (let i = 18; i < 32; i++) assert.ok(env30[i + 1]! <= env30[i]!, "tapers monotonically");
+});
+
+test("pro trust is 0 on clamped frames and ramps in from the pro clip ends", () => {
+  const proSeq: TrainPoseFrame[] = Array.from({ length: 60 }, (_, i) => ({
+    frame_idx: i,
+    landmarks: { NOSE: { x: 0.5, y: 0.2 } },
+  }));
+  assert.equal(proTrustAt(proSeq, -2, 30), 0, "before the clip");
+  assert.equal(proTrustAt(proSeq, 61, 30), 0, "after the clip");
+  assert.equal(proTrustAt(proSeq, 30, 30), 1);
+  assert.equal(proTrustAt(proSeq, 59, 30), 0, "last row");
+  assert.ok(Math.abs(proTrustAt(proSeq, 57, 30) - 2 / 4.5) < 1e-9);
+  // User contact 38 maps to pro contact 27: user frame 8 lands before the pro clip, 68 near its end.
+  const trust = proTrustByImpact({
+    userFrameIndices: [8, 38, 68],
+    userImpactFrame: 38,
+    userFps: 30,
+    proSeq,
+    proImpactFrame: 27,
+    proFps: 30,
+  });
+  assert.equal(trust[0], 0);
+  assert.equal(trust[1], 1);
+  assert.ok(trust[2]! > 0 && trust[2]! < 1);
+});
+
+test("rejectLimbGlitches drops a one-frame forearm collapse and elbow fold for the gap fill", () => {
+  const arm = (i: number, wrist?: { x: number; y: number }): NamedLandmarks => ({
+    LEFT_SHOULDER: { x: 0.5, y: 0.3 },
+    LEFT_ELBOW: { x: 0.5, y: 0.4 },
+    LEFT_WRIST: wrist ?? { x: 0.5 + 0.01 * i, y: 0.5 },
+    LEFT_INDEX: wrist ? { x: wrist.x, y: wrist.y + 0.02 } : { x: 0.5 + 0.01 * i, y: 0.52 },
+  });
+  const steady = Array.from({ length: 9 }, (_, i) => arm(i));
+  assert.equal(rejectLimbGlitches(steady).dropped, 0, "a steady arm is left alone");
+
+  const frames = steady.slice();
+  frames[3] = arm(3, { x: 0.5, y: 0.41 }); // forearm collapsed onto the elbow
+  frames[6] = arm(6, { x: 0.5, y: 0.31 }); // folded back onto the shoulder
+  const { frames: cleaned, dropped } = rejectLimbGlitches(frames);
+  assert.ok(dropped >= 4, `dropped ${dropped}`);
+  assert.equal(cleaned[3]!.LEFT_WRIST, undefined);
+  assert.equal(cleaned[3]!.LEFT_INDEX, undefined, "hand goes with the wrist");
+  assert.equal(cleaned[6]!.LEFT_WRIST, undefined);
+  assert.ok(cleaned[3]!.LEFT_ELBOW, "elbow kept");
+  const filled = fillJointGaps(cleaned).frames;
+  assert.ok(Math.abs(filled[3]!.LEFT_WRIST!.x - 0.53) < 1e-9);
+  assert.ok(Math.abs(filled[6]!.LEFT_WRIST!.y - 0.5) < 1e-9);
+});
+
+test("rejectLimbGlitches drops a joint that jumps for one frame and comes back", () => {
+  const frames: NamedLandmarks[] = Array.from({ length: 9 }, (_, i) => ({
+    LEFT_HIP: { x: 0.5, y: 0.6 },
+    LEFT_KNEE: { x: 0.5 + 0.005 * i, y: 0.75 },
+    LEFT_ANKLE: { x: 0.5, y: 0.9 },
+  }));
+  frames[4] = { ...frames[4]!, LEFT_KNEE: { x: 0.62, y: 0.75 } };
+  const { frames: cleaned } = rejectLimbGlitches(frames);
+  assert.equal(cleaned[4]!.LEFT_KNEE, undefined);
+  assert.ok(cleaned[4]!.LEFT_ANKLE, "a knee spike leaves the ankle alone");
+});
+
+test("blendArmsByAngle never drops a free wrist below a tucked pro's", () => {
+  // Athlete: free arm straight out to the side at shoulder height. Pro: upper arm hanging, forearm
+  // tucked across the front at about 90 degrees. Upper-arm turn plus extra bend compounded into
+  // a wrist lower than either pose.
+  const user: NamedLandmarks = {
+    LEFT_SHOULDER: { x: 0.4, y: 0.3 },
+    LEFT_ELBOW: { x: 0.3, y: 0.3 },
+    LEFT_WRIST: { x: 0.2, y: 0.3 },
+  };
+  const pro: NamedLandmarks = {
+    LEFT_SHOULDER: { x: 0.4, y: 0.3 },
+    LEFT_ELBOW: { x: 0.38, y: 0.4 },
+    LEFT_WRIST: { x: 0.47, y: 0.42 },
+  };
+  const len = (p: NamedLandmarks, a: string, b: string) => Math.hypot(p[b]!.x - p[a]!.x, p[b]!.y - p[a]!.y);
+  const armLen = (p: NamedLandmarks) =>
+    len(p, "LEFT_SHOULDER", "LEFT_ELBOW") + len(p, "LEFT_ELBOW", "LEFT_WRIST");
+  const proDrop = (pro.LEFT_WRIST!.y - pro.LEFT_SHOULDER!.y) / armLen(pro);
+  for (const b of [0.2, 0.4, 0.6, 1]) {
+    for (const bendSigns of [undefined, { LEFT: 1 as const }, { LEFT: -1 as const }]) {
+      const out = blendArmsByAngle(user, user, pro, { racketSide: "RIGHT", blend: b, freeArmBlend: b, bendSigns });
+      const drop = (out.LEFT_WRIST!.y - out.LEFT_SHOULDER!.y) / armLen(user);
+      // 0.05 arm lengths of padding around the two poses.
+      assert.ok(drop <= proDrop + 0.05 + 1e-6, `blend ${b} signs ${JSON.stringify(bendSigns)}: ${drop} vs pro ${proDrop}`);
+      assert.ok(Math.abs(len(out, "LEFT_ELBOW", "LEFT_WRIST") - 0.1) < 1e-9, "forearm keeps its length");
+    }
+  }
 });

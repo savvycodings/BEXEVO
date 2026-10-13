@@ -55,16 +55,20 @@ import {
   coachedControlLandmarkFrames,
   controlCanvasSize,
   controlOverlaysForWindow,
-  correctionFunLength,
-  correctionPoseBlend,
+  CORRECTION_FUN_LENGTH,
+  CORRECTION_FUN_SOFT_BLUR,
+  CORRECTION_POSE_BLEND,
   framesToCanvas,
+  softControlLandmarks,
   inferSwingSideFromLandmarks,
   pickControlCrop,
   fillJointGaps,
   inferFacing,
   proOrientationPlan,
-  racketSideForWindow,
+  isConfidentHandMismatch,
+  racketHandEvidence,
   rejectBodySizeOutliers,
+  rejectLimbGlitches,
   renderOpenPoseMp4,
   sampleImpactWindowFrameIndices,
   userLandmarksForFrames,
@@ -72,10 +76,11 @@ import {
   type ControlCrop,
   type PoseYoloRow,
 } from './openPoseVideo'
+import { proTrustByImpact } from './proTimeAlign'
 import { generateCorrectedImageComfy, isComfyCorrectionConfigured } from './comfyCorrection'
 import sharp from 'sharp'
 import { readImageDimensions } from './poseMask'
-import { generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured, comfyBaseHost, type CoachingVideoContext } from './comfyVideo'
+import { funControlHandoffPlan, generatePoseRetargetVideoComfy, isComfyFunControlConfigured, isComfyTi2vConfigured, isVideoGenerationConfigured, comfyBaseHost, type CoachingVideoContext } from './comfyVideo'
 import {
   generateCorrectedVideoGemini,
   isGeminiVideoConfigured,
@@ -471,7 +476,7 @@ export function summarizeDetections(
     sports_ball_count: ballCount,
     racket_count: racketCount,
     avg_confidence: rows.length ? Number((confSum / rows.length).toFixed(6)) : 0,
-    contact_window_frames: [...contactFrames].sort((a, b) => a - b).slice(0, 24),
+    contact_window_frames: [...contactFrames].sort((a, b) => a - b).slice(0, 120),
     confidence_threshold: confidenceThreshold,
     confidence_threshold_racket: racketConfidence,
     confidence_threshold_ball: ballConfidence,
@@ -1195,10 +1200,11 @@ router.post('/analyze', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { techniqueVideoId, clips, videoDurationMs } = req.body as {
+    const { techniqueVideoId, clips, videoDurationMs, contactMs } = req.body as {
       techniqueVideoId?: string
       clips?: Array<{ startMs: number; endMs: number }>
       videoDurationMs?: number
+      contactMs?: number
     }
     if (!techniqueVideoId) {
       return res.status(400).json({ error: 'Missing techniqueVideoId' })
@@ -1382,6 +1388,18 @@ router.post('/analyze', async (req, res) => {
         video_duration_ms: vdur,
         user_clips: clipList,
         video_duration_ms_source: clientSentDuration ? 'client' : 'inferred',
+      }
+      const firstClip = clipList[0]
+      if (
+        firstClip &&
+        typeof contactMs === 'number' &&
+        Number.isFinite(contactMs) &&
+        contactMs >= Math.max(0, firstClip.startMs) &&
+        contactMs <= Math.min(vdur, firstClip.endMs)
+      ) {
+        metrics = { ...metrics, user_contact_ms: Math.round(contactMs) }
+      } else if (contactMs != null) {
+        console.warn('[Technique] Ignoring contactMs outside clip', { analysisId, contactMs, clip: firstClip })
       }
     }
 
@@ -2369,7 +2387,12 @@ type CorrectionVideoJob = {
   startedAt: string
   finishedAt?: string
   error?: string
+  code?: CorrectionVideoJobCode
+  detail?: HandednessMismatchDetail
 }
+
+type CorrectionVideoJobCode = 'handedness_mismatch'
+type HandednessMismatchDetail = { profileHand: 'left' | 'right'; videoHand: 'left' | 'right' }
 
 /** A job still `running` after this long was lost, e.g. to a server restart mid-generation. */
 const CORRECTION_VIDEO_JOB_STALE_MS = 30 * 60 * 1000
@@ -2377,10 +2400,22 @@ const CORRECTION_VIDEO_JOB_STALE_MS = 30 * 60 * 1000
 class CorrectionVideoJobError extends Error {
   constructor(
     readonly status: number,
-    message: string
+    message: string,
+    readonly code?: CorrectionVideoJobCode,
+    readonly detail?: HandednessMismatchDetail
   ) {
     super(message)
   }
+}
+
+/** `log` keeps generating on a handedness mismatch and only logs it. */
+const CORRECTION_HANDEDNESS_GUARD: 'block' | 'log' = 'block'
+
+function readHandednessMismatchDetail(raw: unknown): HandednessMismatchDetail | null {
+  if (!raw || typeof raw !== 'object') return null
+  const { profileHand, videoHand } = raw as Record<string, unknown>
+  const isHand = (v: unknown): v is 'left' | 'right' => v === 'left' || v === 'right'
+  return isHand(profileHand) && isHand(videoHand) ? { profileHand, videoHand } : null
 }
 
 function readCorrectionVideoJob(metrics: Record<string, unknown>): CorrectionVideoJob | null {
@@ -2401,6 +2436,9 @@ function readCorrectionVideoJob(metrics: Record<string, unknown>): CorrectionVid
     startedAt,
     ...(typeof job.finishedAt === 'string' ? { finishedAt: job.finishedAt } : {}),
     ...(typeof job.error === 'string' ? { error: job.error } : {}),
+    ...(job.code === 'handedness_mismatch' && readHandednessMismatchDetail(job.detail)
+      ? { code: job.code, detail: readHandednessMismatchDetail(job.detail)! }
+      : {}),
   }
 }
 
@@ -2450,6 +2488,8 @@ router.get('/analysis/:id/correction-videos', async (req, res) => {
       status,
       startedAt: job?.startedAt ?? null,
       error: status === 'failed' ? (job?.error ?? null) : null,
+      code: status === 'failed' ? (job?.code ?? null) : null,
+      detail: status === 'failed' ? (job?.detail ?? null) : null,
       frame: cached?.frame ?? null,
       startImage: cached?.startImage ?? null,
       video: cached?.video ?? null,
@@ -2489,13 +2529,18 @@ function poseDataWithinUserClips(
   return filtered.length > 0 ? filtered : poseData
 }
 
-/** Total wall-clock width (ms) of the correction still window around impact. Default 1s. */
-function correctionImpactWindowMs(): number {
-  const raw = String(process.env.CORRECTION_IMPACT_WINDOW_MS ?? '1000').trim()
-  const n = Number(raw)
-  if (Number.isFinite(n) && n >= 200) return Math.min(Math.floor(n), 4000)
-  return 1000
-}
+/** Total wall-clock width (ms) of the correction still window around impact. */
+const CORRECTION_IMPACT_WINDOW_MS = 1000
+
+/**
+ * Pro-to-user size factor range a pro clip must fall in for Fun Control. Outside it the pro was
+ * filmed at a very different distance or the tracker followed someone else, and retargeting
+ * stretches or crushes the skeleton.
+ */
+const PRO_SCALE_MIN = 0.5
+const PRO_SCALE_MAX = 2.0
+/** Further retrieval neighbours tried when the top pro clip fails the guard. */
+const PRO_GUARD_MAX_ALTERNATIVES = 3
 
 /**
  * Pick correction stills near ball contact — not spread across the whole trim.
@@ -2554,7 +2599,7 @@ function selectPoseFramesForCorrections(
   const fps = durationMs != null ? estimateFps(totalFrames, durationMs) : 30
   const halfWindowFrames = Math.max(
     1,
-    Math.round((fps * (correctionImpactWindowMs() / 1000)) / 2)
+    Math.round((fps * (CORRECTION_IMPACT_WINDOW_MS / 1000)) / 2)
   )
 
   let window = sorted.filter(
@@ -3750,6 +3795,7 @@ router.post('/correction-videos', async (req, res) => {
           startedAt,
           finishedAt: new Date().toISOString(),
           error: message,
+          ...(e instanceof CorrectionVideoJobError && e.code ? { code: e.code, detail: e.detail } : {}),
         }).catch((writeErr) =>
           console.error('[Technique][correction-videos] failed to record job failure', writeErr)
         )
@@ -3931,6 +3977,7 @@ async function runCorrectionVideoJob({
 
     let videoBuffer: Buffer
     let poseVideoBuffer: Buffer | undefined
+    let controlHandoff: ReturnType<typeof funControlHandoffPlan> | null = null
     /** What the video model was given as its start/ref image; persisted as `startImage`. */
     let startImageBuffer: Buffer = frameBuffer
     let pipeline: 'fun-control' | 'ti2v-i2v' | 'veo-i2v' = 'fun-control'
@@ -3957,14 +4004,24 @@ async function runCorrectionVideoJob({
       pipeline = 'veo-i2v'
     } else if (wantFun && proPoseSequence?.length) {
       const userImpactFrame = impactFrameResolved ?? frameRow.frame
+      const userFps =
+        videoDurationMs != null ? estimateFps(totalFrames, videoDurationMs) : 30
+      const firstClip = Array.isArray(metrics.user_clips)
+        ? (metrics.user_clips as ClipMsRange[])[0]
+        : undefined
       const userFrameIndices = sampleImpactWindowFrameIndices({
         impactFrame: userImpactFrame,
         totalFrames,
         videoDurationMs,
-        count: correctionFunLength(),
+        count: CORRECTION_FUN_LENGTH,
+        bounds:
+          firstClip && videoDurationMs != null
+            ? {
+                start: (firstClip.startMs / 1000) * userFps,
+                end: (firstClip.endMs / 1000) * userFps,
+              }
+            : undefined,
       })
-      const userFps =
-        videoDurationMs != null ? estimateFps(totalFrames, videoDurationMs) : 30
 
       // Frame indices back to source timestamps, so the app can play the same moments on the
       // "Current" side instead of starting both clips at zero.
@@ -3977,25 +4034,37 @@ async function runCorrectionVideoJob({
 
       // Contact-to-contact alignment when the pro clip has a resolved impact frame; the pro
       // clip's fps is not stored, so assume the same capture rate as the user's clip.
-      const proImpactMeta = topNeighbor?.train_sample_id
-        ? await getTrainSampleImpactMeta(topNeighbor.train_sample_id)
-        : null
-      const proImpactFrame = proImpactMeta?.impactFrame ?? null
-      const proLandmarks =
-        proImpactFrame != null
-          ? alignedProLandmarksByImpact({
-              userFrameIndices,
-              userImpactFrame,
-              userFps,
-              proSeq: proPoseSequence,
-              proImpactFrame,
-              proFps: userFps,
-            })
-          : alignedProLandmarksForUserFrames(
-              userFrameIndices,
-              totalFrames,
-              proPoseSequence
-            )
+      const alignPro = async (seq: NonNullable<typeof proPoseSequence>, sampleId: string | undefined) => {
+        const meta = sampleId ? await getTrainSampleImpactMeta(sampleId) : null
+        const impactFrame = meta?.impactFrame ?? null
+        const landmarks =
+          impactFrame != null
+            ? alignedProLandmarksByImpact({
+                userFrameIndices,
+                userImpactFrame,
+                userFps,
+                proSeq: seq,
+                proImpactFrame: impactFrame,
+                proFps: userFps,
+              })
+            : alignedProLandmarksForUserFrames(userFrameIndices, totalFrames, seq)
+        const trust =
+          impactFrame != null
+            ? proTrustByImpact({
+                userFrameIndices,
+                userImpactFrame,
+                userFps,
+                proSeq: seq,
+                proImpactFrame: impactFrame,
+                proFps: userFps,
+              })
+            : undefined
+        return { impactFrame, landmarks, trust }
+      }
+      const firstPro = await alignPro(proPoseSequence, topNeighbor?.train_sample_id)
+      let proImpactFrame = firstPro.impactFrame
+      let proLandmarks = firstPro.landmarks
+      let proTrust = firstPro.trust
       if (!proLandmarks.length) {
         console.warn('[Technique][correction-videos] pro landmarks empty', {
           analysisId,
@@ -4015,11 +4084,27 @@ async function runCorrectionVideoJob({
         (r) => typeof r.frame === 'number' && r.frame >= windowLo && r.frame <= windowHi
       )
 
+      // Wan starts from this image and skeleton frame 0 is the window's first sample, so they
+      // must be the same moment; the correction frame (often contact) made frame 1 jump.
+      const windowStartFrame = Math.max(0, Math.round(userFrameIndices[0] ?? frameRow.frame))
+      let windowStartBuffer = frameBuffer
+      if (windowStartFrame !== frameRow.frame) {
+        try {
+          windowStartBuffer = await extractFrame(videoPath, windowStartFrame)
+        } catch (err) {
+          console.warn('[Technique][correction-videos] window start frame extract failed', {
+            analysisId,
+            windowStartFrame,
+            message: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+
       // Control clip matches the user's framing so the skeleton stays in their camera space.
       let canvas = controlCanvasSize(null, null)
       let source: { width: number; height: number } | null = null
       try {
-        source = await readImageDimensions(frameBuffer)
+        source = await readImageDimensions(windowStartBuffer)
         canvas = controlCanvasSize(source.width, source.height)
       } catch (err) {
         console.warn('[Technique][correction-videos] start frame dimensions failed', {
@@ -4051,7 +4136,7 @@ async function runCorrectionVideoJob({
           userFrames: userLandmarkFramesRaw,
         })
         try {
-          startImageBuffer = await sharp(frameBuffer)
+          startImageBuffer = await sharp(windowStartBuffer)
             .extract({ left: picked.x, top: picked.y, width: picked.w, height: picked.h })
             .resize(canvas.width, canvas.height, { fit: 'fill' })
             .png()
@@ -4079,22 +4164,80 @@ async function runCorrectionVideoJob({
       // and smoothing spreads that across its neighbours. Rebuild those frames before
       // anything measures or scales them.
       const userGuard = rejectBodySizeOutliers(userLandmarkFrames, { aspect: canvasAspect })
-      const proGuard = rejectBodySizeOutliers(proLandmarks, { aspect: canvasAspect })
+      // One-frame limb collapses and spikes are dropped here and rebuilt by the gap fill.
+      const userGlitch = rejectLimbGlitches(userGuard.frames, { aspect: canvasAspect })
       // Short occlusions would otherwise drop limbs from the skeleton and, in blending, swap in
       // the pro's joint at full weight for those frames.
-      const userFill = fillJointGaps(userGuard.frames)
-      const proFill = fillJointGaps(proGuard.frames)
+      const userFill = fillJointGaps(userGlitch.frames)
       const userControlFrames = userFill.frames
-      const proControlFrames = proFill.frames
-      const proSide = inferSwingSideFromLandmarks(proControlFrames, canvasAspect)
+      const conditionPro = (landmarks: typeof proLandmarks) => {
+        const guard = rejectBodySizeOutliers(landmarks, { aspect: canvasAspect })
+        const glitch = rejectLimbGlitches(guard.frames, { aspect: canvasAspect })
+        const fill = fillJointGaps(glitch.frames)
+        return {
+          guard,
+          glitch,
+          fill,
+          frames: fill.frames,
+          side: inferSwingSideFromLandmarks(fill.frames, canvasAspect),
+          scale: windowRetargetScale(userControlFrames, fill.frames, canvasAspect),
+        }
+      }
+      const proProblem = (c: ReturnType<typeof conditionPro>): string | null => {
+        if (c.side == null) return 'unknown swing side'
+        if (c.scale != null && (c.scale < PRO_SCALE_MIN || c.scale > PRO_SCALE_MAX)) {
+          return `scale ${c.scale.toFixed(2)} outside ${PRO_SCALE_MIN}-${PRO_SCALE_MAX}`
+        }
+        return null
+      }
+      let pro = conditionPro(proLandmarks)
+      let problem = proProblem(pro)
+      if (problem) {
+        const tried = new Set([topNeighbor?.train_sample_id])
+        const alternatives = (retrievalBlock?.neighbors ?? [])
+          .filter((n) => n.train_sample_id && !tried.has(n.train_sample_id) && neighborMatchesDeclared(n))
+          .slice(0, PRO_GUARD_MAX_ALTERNATIVES)
+        console.log('[Technique][correction-videos] pro guard', {
+          analysisId,
+          trainSampleId: topNeighbor?.train_sample_id ?? null,
+          problem,
+          alternatives: alternatives.length,
+        })
+        for (const alt of alternatives) {
+          const seq = await getTrainSamplePoseSequence(alt.train_sample_id!)
+          if (!seq?.length) continue
+          const aligned = await alignPro(seq, alt.train_sample_id)
+          if (!aligned.landmarks.length) continue
+          const cand = conditionPro(aligned.landmarks)
+          const candProblem = proProblem(cand)
+          console.log('[Technique][correction-videos] pro guard candidate', {
+            analysisId,
+            trainSampleId: alt.train_sample_id,
+            problem: candProblem,
+          })
+          if (candProblem) continue
+          topNeighbor = alt
+          proPoseSequence = seq
+          proImpactFrame = aligned.impactFrame
+          proLandmarks = aligned.landmarks
+          proTrust = aligned.trust
+          pro = cand
+          problem = null
+          break
+        }
+      }
+      const proGuard = pro.guard
+      const proFill = pro.fill
+      const proControlFrames = pro.frames
+      const proSide = pro.side
       const userSide = inferSwingSideFromLandmarks(userControlFrames, canvasAspect)
       const userFacing = inferFacing(userControlFrames)
       const proFacing = inferFacing(proControlFrames)
       const orientation = proOrientationPlan({ userSide, proSide, userFacing, proFacing })
 
-      const poseBlend = correctionPoseBlend()
-      const proScale = windowRetargetScale(userControlFrames, proControlFrames, canvasAspect)
-      const racketSide = racketSideForWindow({
+      const poseBlend = CORRECTION_POSE_BLEND
+      const proScale = pro.scale
+      const racketEvidence = racketHandEvidence({
         userFrames: userControlFrames,
         poseRows: (windowRows.length ? windowRows : yoloSource).map(mapYoloRow),
         userFrameIndices,
@@ -4103,6 +4246,30 @@ async function runCorrectionVideoJob({
         handedness,
         aspect: canvasAspect,
       })
+      const racketSide = racketEvidence.side
+      // Magic Shot is built from the account's own profile, so a swing with the racket clearly in
+      // the other hand (usually a friend filmed on this phone) renders badly and skews analytics.
+      if (isConfidentHandMismatch(racketEvidence, handedness, userFacing)) {
+        const detail: HandednessMismatchDetail = {
+          profileHand: handedness.toLowerCase().includes('left') ? 'left' : 'right',
+          videoHand: racketSide === 'LEFT' ? 'left' : 'right',
+        }
+        console.log('[Technique][correction-videos] handedness mismatch', {
+          analysisId,
+          ...detail,
+          contactVotes: racketEvidence.contactVotes,
+          userFacing,
+          guard: CORRECTION_HANDEDNESS_GUARD,
+        })
+        if (CORRECTION_HANDEDNESS_GUARD === 'block') {
+          throw new CorrectionVideoJobError(
+            409,
+            `Profile is ${detail.profileHand}-handed but the video shows a ${detail.videoHand}-handed swing.`,
+            'handedness_mismatch',
+            detail
+          )
+        }
+      }
       const controlLandmarks = coachedControlLandmarkFrames({
         userFrames: userControlFrames,
         proFrames: proControlFrames,
@@ -4112,6 +4279,13 @@ async function runCorrectionVideoJob({
         swapSides: orientation.swapSides,
         blend: poseBlend,
         scale: proScale,
+        contactIndex: userFrameIndices.reduce(
+          (best, f, i) =>
+            Math.abs(f - userImpactFrame) < Math.abs(userFrameIndices[best]! - userImpactFrame) ? i : best,
+          0
+        ),
+        frameTimesMs: userFrameIndices.map((f) => (f / userFps) * 1000),
+        proTrust,
       })
       const landmarkFrames = controlLandmarks.length ? controlLandmarks : proControlFrames
 
@@ -4126,12 +4300,28 @@ async function runCorrectionVideoJob({
         userLandmarks: userControlFrames,
         contactFrame: userImpactFrame,
       })
+      // Without the outline Wan kept the racket only near where the start image had it; through a
+      // cross-body follow-through it faded to a ghost behind the shoulder, detached from the hand.
+      const racketDraw = { outline: true }
       poseVideoBuffer = await renderOpenPoseMp4({
         landmarkFrames,
         overlays,
         width: canvas.width,
         height: canvas.height,
+        racketDraw,
       })
+      controlHandoff = funControlHandoffPlan()
+      const softPoseVideoBuffer =
+        controlHandoff.active && controlHandoff.tail === 'soft'
+          ? await renderOpenPoseMp4({
+              landmarkFrames: softControlLandmarks(landmarkFrames),
+              overlays,
+              width: canvas.width,
+              height: canvas.height,
+              blurSigma: CORRECTION_FUN_SOFT_BLUR,
+              racketDraw,
+            })
+          : null
       console.log('[Technique][correction-videos] branch=fun-control', {
         analysisId,
         proFrames: proPoseSequence.length,
@@ -4159,6 +4349,7 @@ async function runCorrectionVideoJob({
         proScale: proScale != null ? Math.round(proScale * 1000) / 1000 : null,
         sizeOutliers: { user: userGuard.replaced, pro: proGuard.replaced },
         filledJoints: { user: userFill.filled, pro: proFill.filled },
+        limbGlitches: { user: userGlitch.dropped, pro: pro.glitch.dropped },
         comfyHost: comfyBaseHost(),
       })
       const coaching = buildCorrectionVideoCoachingContext({
@@ -4184,6 +4375,7 @@ async function runCorrectionVideoJob({
         frameNumber: frameRow.frame,
         imageBuffer: startImageBuffer,
         poseVideoBuffer,
+        softPoseVideoBuffer,
         shotName,
         handedness,
         width: canvas.width,
@@ -4237,6 +4429,13 @@ async function runCorrectionVideoJob({
       pipeline,
       video_provider: videoProvider,
       train_sample_id: topNeighbor?.train_sample_id ?? null,
+      ...(pipeline === 'fun-control' && controlHandoff
+        ? {
+            control_steps: controlHandoff.steps,
+            control_end_step: controlHandoff.controlEndStep,
+            control_tail: controlHandoff.active ? controlHandoff.tail : null,
+          }
+        : {}),
       ...(pipeline === 'veo-i2v'
         ? {
             veo_video: persisted.video,

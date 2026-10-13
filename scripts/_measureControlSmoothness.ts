@@ -16,7 +16,7 @@ import {
   alignedProLandmarksForUserFrames,
   coachedControlLandmarkFrames,
   controlCanvasSize,
-  correctionFunLength,
+  CORRECTION_FUN_LENGTH,
   inferFacing,
   inferSwingSideFromLandmarks,
   proOrientationPlan,
@@ -74,7 +74,7 @@ async function main() {
     impactFrame,
     totalFrames,
     videoDurationMs,
-    count: correctionFunLength(),
+    count: CORRECTION_FUN_LENGTH,
   });
   const userFps = videoDurationMs != null ? estimateFps(totalFrames, videoDurationMs) : 30;
 
@@ -117,9 +117,7 @@ async function main() {
   report("user's own motion", userFrames);
   report("raw pro (old behaviour)", proLandmarks);
 
-  // coachedControlLandmarkFrames smooths at the configured radius, so disable it via env to
-  // isolate the moving average's contribution.
-  process.env.CORRECTION_POSE_SMOOTHING = "0";
+  // Smoothing off here to isolate the moving average's contribution.
   const rawBlend = coachedControlLandmarkFrames({
     userFrames,
     proFrames: proLandmarks,
@@ -127,6 +125,7 @@ async function main() {
     flipX: plan.flipX,
     swapSides: plan.swapSides,
     blend: 0.4,
+    smoothing: 0,
   });
 
   report("blend 0.4, no smoothing", rawBlend);

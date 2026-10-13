@@ -5,8 +5,9 @@ import path from "path";
 import ffmpegStatic from "ffmpeg-static";
 import { estimateFps } from "./impactPoseContext";
 import {
+  impactAlignedProPoseAt,
+  lerpLandmarks,
   pickAlignedProPoseFrame,
-  pickImpactAlignedProPoseFrame,
 } from "./proTimeAlign";
 import type { TrainPoseFrame } from "../db/schema";
 
@@ -25,43 +26,37 @@ const VISIBILITY_MIN = 0.25;
  * level, and mirroring on a coin flip is worse than not mirroring at all.
  */
 const SWING_SIDE_MIN_MARGIN = 0.04;
-/** Longest side of the control clip and the Fun Control render. Square unless aspect fitting is on. */
-const DEFAULT_SIZE = 768;
-const DEFAULT_FPS = 16;
+/**
+ * Side of the square control clip and Fun Control render. Fitting the footage aspect lands on
+ * sizes WAN cannot resolve: 624x768 and 848x1024 are clean multiples of 16 yet decode with the
+ * DiT patch grid visible as a 16px lattice, while 768x768 is near a size it was trained on.
+ */
+export const CORRECTION_CANVAS_SIZE = 768;
+/** Playback rate of the control clip and the generated clip. */
+export const CORRECTION_FUN_FPS = 16;
 /**
  * Frames handed to Fun Control. Must stay 4n+1 or the latent packing rejects it.
- * 33 frames at 16 fps is ~2s, which matches `correctionVideoWindowMs()` so the compare lines up.
+ * 33 frames at 16 fps is ~2s, which matches `CORRECTION_VIDEO_WINDOW_MS` so the compare lines up.
  */
-const DEFAULT_LENGTH = 33;
+export const CORRECTION_FUN_LENGTH = 33;
 
-function envInt(name: string, min: number, max: number): number | null {
-  const n = Number(process.env[name]);
-  if (!Number.isFinite(n)) return null;
-  return Math.max(min, Math.min(max, Math.floor(n)));
-}
+/**
+ * Fraction of sampling steps conditioned on the full skeleton; the rest (the low-noise
+ * polishing steps) see `CORRECTION_FUN_CONTROL_TAIL` instead. 1 keeps the skeleton on every step.
+ * Never below 0.5: the high-noise expert, which lays out the motion, always gets the full skeleton.
+ * A/B on three views: 0.7 with the soft tail matched 1, 0.5 started dissolving the racket.
+ */
+export const CORRECTION_FUN_CONTROL_END = 1;
 
-/** Snap a canvas side to a multiple of 32. WAN accepts multiples of 16 but resolves them poorly. */
-function round32(n: number): number {
-  return Math.max(256, Math.round(n / 32) * 32);
-}
+/**
+ * What the polishing steps see after the hand-off. `soft`: the same skeleton without hand points
+ * and blurred, so the player stays placed but wrists and grip are left to the model. `none`: no
+ * control at all (a neutral zero latent, not black frames); it drifted the player on every view.
+ */
+export const CORRECTION_FUN_CONTROL_TAIL: "soft" | "none" = "soft";
 
-/** Longest side of the generated clip. Raising this is the main quality/VRAM dial. */
-export function correctionCanvasSize(): number {
-  const n = envInt("CORRECTION_CANVAS_SIZE", 256, 1536);
-  if (n == null) return DEFAULT_SIZE;
-  return round32(n);
-}
-
-/** Frame count for Fun Control, snapped up to the nearest 4n+1 the model accepts. */
-export function correctionFunLength(): number {
-  const n = envInt("CORRECTION_FUN_LENGTH", 5, 121) ?? DEFAULT_LENGTH;
-  return Math.round((n - 1) / 4) * 4 + 1;
-}
-
-/** Playback rate of the control clip and the generated clip. */
-export function correctionFunFps(): number {
-  return envInt("CORRECTION_FUN_FPS", 8, 60) ?? DEFAULT_FPS;
-}
+/** Gaussian blur sigma in pixels for the soft tail skeleton. */
+export const CORRECTION_FUN_SOFT_BLUR = 2.5;
 
 function resolveFfmpegBinary(): string {
   const fromEnv = process.env.FFMPEG_PATH?.trim();
@@ -217,22 +212,15 @@ const RACKET_FOREARM_MAX = 2.6;
 const BALL_RGB: [number, number, number] = [255, 220, 0];
 
 /**
- * Off by default. A saturated filled rectangle is a very strong control signal, and WAN paints
- * it in literally as a striped slab instead of a paddle. With it gone, the racket has to come
- * from the start frame and the prompt, which is what keeps it looking like the athlete's own.
+ * Racket overlays drawn into the control clip. Both off by default.
+ * `box`: a saturated filled rectangle is a very strong control signal, and WAN paints it in
+ * literally as a striped slab instead of a paddle. Without it the racket has to come from the
+ * start frame and the prompt, which is what keeps it looking like the athlete's own.
+ * `outline`: a handle line from the wrist and an unfilled oval head. It tells Fun Control where
+ * the racket points without a solid shape to paint in; off until a render confirms WAN draws a
+ * paddle from it rather than the outline.
  */
-function drawRacketBox(): boolean {
-  return String(process.env.CORRECTION_DRAW_RACKET_BOX ?? "").trim().toLowerCase() === "true";
-}
-
-/**
- * Thin outline instead of a filled box: a handle line from the wrist and an unfilled oval head.
- * It tells Fun Control where the racket points without handing it a solid shape to paint in.
- * Off by default until a render confirms WAN draws a paddle from it rather than the outline.
- */
-function drawRacketOutline(): boolean {
-  return String(process.env.CORRECTION_DRAW_RACKET_OUTLINE ?? "").trim().toLowerCase() === "true";
-}
+export type RacketDraw = { box?: boolean; outline?: boolean };
 
 function strokeRacketOutline(
   buf: Uint8Array,
@@ -320,8 +308,18 @@ export function racketSideFromBoxes(
   aspect = 1,
   around?: { index: number; radius: number }
 ): "LEFT" | "RIGHT" | null {
-  let nearLeft = 0;
-  let nearRight = 0;
+  return sideFromVotes(racketBoxVotes(frames, centres, aspect, around));
+}
+
+/** Frames whose racket box sits clearly nearer one labelled wrist, per wrist. */
+export function racketBoxVotes(
+  frames: NamedLandmarks[],
+  centres: Array<{ x: number; y: number } | null>,
+  aspect = 1,
+  around?: { index: number; radius: number }
+): { left: number; right: number } {
+  let left = 0;
+  let right = 0;
   centres.forEach((c, i) => {
     if (around && Math.abs(i - around.index) > around.radius) return;
     const lm = frames[i];
@@ -329,12 +327,16 @@ export function racketSideFromBoxes(
     const dl = Math.hypot((c.x - lm.LEFT_WRIST.x) * aspect, c.y - lm.LEFT_WRIST.y);
     const dr = Math.hypot((c.x - lm.RIGHT_WRIST.x) * aspect, c.y - lm.RIGHT_WRIST.y);
     if (Math.min(dl, dr) > RACKET_HAND_CLEAR_RATIO * Math.max(dl, dr)) return;
-    if (dl < dr) nearLeft++;
-    else nearRight++;
+    if (dl < dr) left++;
+    else right++;
   });
-  if (nearLeft + nearRight < RACKET_HAND_MIN_FRAMES) return null;
-  if (nearLeft >= 2 * nearRight) return "LEFT";
-  if (nearRight >= 2 * nearLeft) return "RIGHT";
+  return { left, right };
+}
+
+function sideFromVotes(votes: { left: number; right: number }): "LEFT" | "RIGHT" | null {
+  if (votes.left + votes.right < RACKET_HAND_MIN_FRAMES) return null;
+  if (votes.left >= 2 * votes.right) return "LEFT";
+  if (votes.right >= 2 * votes.left) return "RIGHT";
   return null;
 }
 
@@ -434,8 +436,8 @@ export function cleanBallTrack(
   rows: PoseYoloRow[],
   opts?: { width?: number; height?: number; fps?: number; contactFrame?: number }
 ): BallDetection[] {
-  const width = opts?.width ?? DEFAULT_SIZE;
-  const height = opts?.height ?? DEFAULT_SIZE;
+  const width = opts?.width ?? CORRECTION_CANVAS_SIZE;
+  const height = opts?.height ?? CORRECTION_CANVAS_SIZE;
   const fps = opts?.fps && opts.fps > 0 ? opts.fps : 30;
   const side = Math.max(width, height);
   const centre = (b: NormBox) => ({ x: ((b[0] + b[2]) / 2) * width, y: ((b[1] + b[3]) / 2) * height });
@@ -525,8 +527,8 @@ export function controlOverlaysForWindow(opts: {
    */
   contactFrame?: number;
 }): ControlOverlay[] {
-  const width = opts.width ?? DEFAULT_SIZE;
-  const height = opts.height ?? DEFAULT_SIZE;
+  const width = opts.width ?? CORRECTION_CANVAS_SIZE;
+  const height = opts.height ?? CORRECTION_CANVAS_SIZE;
   const racketWs = opts.poseRows
     .map((r) => (r.racket_bbox ? boxSize(r.racket_bbox).w : 0))
     .filter((n) => n > 0.01);
@@ -797,13 +799,14 @@ function drawHand(
 
 export function drawOpenPoseRgb(
   landmarks: NamedLandmarks,
-  width = DEFAULT_SIZE,
-  height = DEFAULT_SIZE,
-  overlay?: ControlOverlay
+  width = CORRECTION_CANVAS_SIZE,
+  height = CORRECTION_CANVAS_SIZE,
+  overlay?: ControlOverlay,
+  racketDraw: RacketDraw = {}
 ): Buffer {
   const buf = new Uint8Array(width * height * 3);
   // Under the skeleton, so the wrist joint and forearm stay intact where the handle starts.
-  if (overlay?.racketOutline && drawRacketOutline()) {
+  if (overlay?.racketOutline && racketDraw.outline) {
     strokeRacketOutline(buf, width, height, overlay.racketOutline);
   }
   for (const [a, b, color] of BONES) {
@@ -830,7 +833,7 @@ export function drawOpenPoseRgb(
     const p = toPixel(lm, width, height);
     drawDisk(buf, width, height, p.x, p.y, 6, [255, 255, 255]);
   }
-  if (overlay?.racket && drawRacketBox()) {
+  if (overlay?.racket && racketDraw.box) {
     const { cx, cy, w, h } = overlay.racket;
     fillRect(buf, width, height, cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, RACKET_RGB);
   }
@@ -862,32 +865,49 @@ function runFfmpeg(args: string[]): Promise<void> {
   });
 }
 
+/**
+ * Evenly spaced (fractional) source frame indices for the control clip. The window is slid, not
+ * clipped, to fit inside `bounds` (the user's trimmed clip), so contact stays inside it and every
+ * output frame is the same time step. Clipping the window at the start of the clip squeezed it
+ * and rounding then gave alternating 1- and 2-frame steps, which read as jerky motion.
+ */
 export function sampleImpactWindowFrameIndices(opts: {
   impactFrame: number;
   totalFrames: number;
   videoDurationMs?: number;
   count?: number;
   windowMs?: number;
+  /** Inclusive source frame range the window must stay inside; defaults to the whole video. */
+  bounds?: { start: number; end: number };
 }): number[] {
-  const count = Math.max(1, opts.count ?? correctionFunLength());
+  const count = Math.max(1, opts.count ?? CORRECTION_FUN_LENGTH);
   const total = Math.max(1, Math.round(opts.totalFrames));
   const impact = Math.max(0, Math.min(total - 1, Math.round(opts.impactFrame)));
   const windowMs = Number.isFinite(opts.windowMs) && (opts.windowMs ?? 0) > 0
     ? Number(opts.windowMs)
-    : correctionVideoWindowMs();
+    : CORRECTION_VIDEO_WINDOW_MS;
   const durationMs =
     typeof opts.videoDurationMs === "number" && opts.videoDurationMs > 0
       ? opts.videoDurationMs
       : null;
   const fps = durationMs != null ? estimateFps(total, durationMs) : 30;
-  const half = Math.max(1, Math.round((fps * (windowMs / 1000)) / 2));
-  const start = Math.max(0, impact - half);
-  const end = Math.min(total - 1, impact + half);
   if (count === 1) return [impact];
+  const length = Math.max(1, fps * (windowMs / 1000));
+  const lo = Math.max(0, Math.min(total - 1, Math.floor(opts.bounds?.start ?? 0)));
+  const hi = Math.max(lo, Math.min(total - 1, Math.ceil(opts.bounds?.end ?? total - 1)));
+  let start: number;
+  let end: number;
+  if (hi - lo <= length) {
+    start = lo;
+    end = hi;
+  } else {
+    start = Math.max(lo, Math.min(hi - length, impact - length / 2));
+    end = start + length;
+  }
   const span = Math.max(0, end - start);
   const out: number[] = [];
   for (let i = 0; i < count; i++) {
-    out.push(Math.round(start + (i / (count - 1)) * span));
+    out.push(Math.round((start + (i / (count - 1)) * span) * 1000) / 1000);
   }
   return out;
 }
@@ -949,7 +969,7 @@ export function alignedProLandmarksByImpact(opts: {
 }): NamedLandmarks[] {
   return denseLandmarkFrames(
     opts.userFrameIndices.map((idx) =>
-      pickImpactAlignedProPoseFrame({
+      impactAlignedProPoseAt({
         userVideoFrameIndex: idx,
         userImpactFrame: opts.userImpactFrame,
         userFps: opts.userFps,
@@ -961,7 +981,13 @@ export function alignedProLandmarksByImpact(opts: {
   );
 }
 
-/** User landmarks for the sampled window frames, carrying forward the last good row. */
+/** Widest gap between pose rows that is still interpolated; wider gaps snap to the nearest row. */
+const USER_LERP_MAX_GAP = 3;
+
+/**
+ * User landmarks for the sampled window frames, carrying forward the last good row. Fractional
+ * indices (from even time sampling) are interpolated between the rows either side.
+ */
 export function userLandmarksForFrames(
   userFrameIndices: number[],
   poseRows: Array<{ frame?: number; landmarks?: unknown }>
@@ -974,12 +1000,25 @@ export function userLandmarksForFrames(
   for (const idx of userFrameIndices) {
     let best: NamedLandmarks | null = null;
     let bestD = Number.POSITIVE_INFINITY;
+    let below: { frame: number; landmarks: NamedLandmarks } | null = null;
+    let above: { frame: number; landmarks: NamedLandmarks } | null = null;
     for (const row of rows) {
       const d = Math.abs(row.frame - idx);
       if (d < bestD) {
         bestD = d;
         best = row.landmarks;
       }
+      if (row.frame <= idx && (!below || row.frame > below.frame)) below = row;
+      if (row.frame >= idx && (!above || row.frame < above.frame)) above = row;
+    }
+    if (
+      bestD > 0 &&
+      below &&
+      above &&
+      above.frame > below.frame &&
+      above.frame - below.frame <= USER_LERP_MAX_GAP
+    ) {
+      best = lerpLandmarks(below.landmarks, above.landmarks, (idx - below.frame) / (above.frame - below.frame));
     }
     const lm: NamedLandmarks | null = best ?? last;
     frames.push(lm ?? {});
@@ -1181,11 +1220,7 @@ export function blendLandmarks(
  * (peak/mean 3.4 against their natural 2.9). Higher values reimport the pro's sampling jerk
  * faster than they add useful correction: 0.65 buys 47% more movement for a peak/mean of 5.1.
  */
-export function correctionPoseBlend(): number {
-  const n = Number(process.env.CORRECTION_POSE_BLEND);
-  if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
-  return 0.4;
-}
+export const CORRECTION_POSE_BLEND = 0.4;
 
 /**
  * One pro-to-user size factor for the whole window: median user torso over median pro torso.
@@ -1231,11 +1266,7 @@ const BODY_SIZE_BONES: ReadonlyArray<readonly [string, string]> = [
 const BODY_SIZE_LOCAL_RADIUS = 4;
 
 /** Fractional deviation of a frame's body size from its neighbours' before it counts as a bad detection. */
-export function correctionBodySizeTolerance(): number {
-  const n = Number(process.env.CORRECTION_BODY_SIZE_TOLERANCE);
-  if (Number.isFinite(n) && n > 0 && n < 1) return n;
-  return 0.2;
-}
+const CORRECTION_BODY_SIZE_TOLERANCE = 0.2;
 
 /**
  * Each frame's body size relative to the window: for every bone, its length on this frame over
@@ -1277,7 +1308,7 @@ export function rejectBodySizeOutliers(
   frames: NamedLandmarks[],
   opts?: { aspect?: number; tolerance?: number }
 ): { frames: NamedLandmarks[]; replaced: number[] } {
-  const tolerance = opts?.tolerance ?? correctionBodySizeTolerance();
+  const tolerance = opts?.tolerance ?? CORRECTION_BODY_SIZE_TOLERANCE;
   const ratios = bodySizeRatios(frames, opts?.aspect ?? 1);
   // Judge each frame against its neighbours, not the whole window: an athlete closing on the
   // net grows steadily through the clip (0.84 to 1.32 on one stored volley), and a window-wide
@@ -1379,6 +1410,165 @@ export function fillJointGaps(
   return { frames: out, filled };
 }
 
+/** A limb bone shorter than this share of its window median is a collapsed track. */
+const LIMB_COLLAPSE_RATIO = 0.55;
+/** Longest run of short-bone frames treated as a collapse rather than foreshortening. */
+const LIMB_COLLAPSE_MAX_RUN = 2;
+/** Inner elbow angle below which the forearm is folded onto the upper arm, which no arm can do. */
+const ELBOW_FOLD_MIN = (20 * Math.PI) / 180;
+/** A joint moving more than this many times its median step, then returning, is a one-frame spike. */
+const JOINT_SPIKE_RATIO = 4;
+/**
+ * How close (in median steps) the next frame must come back to the previous one to call a spike.
+ * Two ordinary steps already span 2, so the bound sits above that.
+ */
+const JOINT_SPIKE_RETURN_RATIO = 3;
+/** Floor on the median step so a joint that barely moves is not flagged for ordinary jitter. */
+const JOINT_SPIKE_MIN_STEP = 0.005;
+
+/** Limb bones, each with the joints that hang off it and go wrong with it. */
+const LIMB_BONES: Array<{ from: string; to: string; below: string[] }> = (["LEFT", "RIGHT"] as const).flatMap(
+  (s) => [
+    { from: `${s}_SHOULDER`, to: `${s}_ELBOW`, below: [`${s}_ELBOW`, `${s}_WRIST`, `${s}_INDEX`, `${s}_PINKY`, `${s}_THUMB`] },
+    { from: `${s}_ELBOW`, to: `${s}_WRIST`, below: [`${s}_WRIST`, `${s}_INDEX`, `${s}_PINKY`, `${s}_THUMB`] },
+    { from: `${s}_HIP`, to: `${s}_KNEE`, below: [`${s}_KNEE`, `${s}_ANKLE`, `${s}_HEEL`, `${s}_FOOT_INDEX`] },
+    { from: `${s}_KNEE`, to: `${s}_ANKLE`, below: [`${s}_ANKLE`, `${s}_HEEL`, `${s}_FOOT_INDEX`] },
+  ]
+);
+
+/**
+ * Drop limb joints on frames where the track briefly goes wrong, so `fillJointGaps` can rebuild
+ * them from the neighbouring frames. Three cases, each judged against the same joint or bone over
+ * the window so it holds for any clip size or frame rate:
+ * - a bone shorter than `LIMB_COLLAPSE_RATIO` of its median (forearm collapsed onto the elbow)
+ *   for at most `LIMB_COLLAPSE_MAX_RUN` frames;
+ * - an elbow folded flat (inner angle under `ELBOW_FOLD_MIN`), wrist back on the shoulder;
+ * - a joint that jumps `JOINT_SPIKE_RATIO` times its median step and is back on the next frame.
+ * One pro's free arm folded to 2 degrees for one frame near the end of his clip; smoothing spread
+ * it over three control frames and the generated hand folded into the athlete's belly.
+ * Joints below a bad bone go with it. Returns the frames with those joints removed.
+ */
+export function rejectLimbGlitches(
+  frames: NamedLandmarks[],
+  opts?: { aspect?: number }
+): { frames: NamedLandmarks[]; dropped: number } {
+  if (frames.length < 3) return { frames, dropped: 0 };
+  const a = opts?.aspect && opts.aspect > 0 ? opts.aspect : 1;
+  const dist = (p: NamedLandmark, q: NamedLandmark) => Math.hypot((p.x - q.x) * a, p.y - q.y);
+  const drop: Array<Set<string>> = frames.map(() => new Set());
+
+  for (const bone of LIMB_BONES) {
+    const lens = frames.map((lm) => {
+      const p = lm[bone.from];
+      const q = lm[bone.to];
+      return isVisible(p) && isVisible(q) ? dist(p, q) : null;
+    });
+    const seen = lens.filter((l): l is number => l != null);
+    if (seen.length < 3) continue;
+    const ref = median(seen)!;
+    const short = lens.map((l) => l != null && l < ref * LIMB_COLLAPSE_RATIO);
+    // A limb pointing at the camera stays short for a stretch; a tracker collapse is brief.
+    for (let i = 0; i < short.length; ) {
+      if (!short[i]) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j < short.length && short[j]) j++;
+      if (j - i <= LIMB_COLLAPSE_MAX_RUN) {
+        for (let k = i; k < j; k++) for (const n of bone.below) drop[k]!.add(n);
+      }
+      i = j;
+    }
+  }
+
+  for (const side of ["LEFT", "RIGHT"] as const) {
+    const [sn, en, wn] = ARM_CHAINS[side].joints;
+    frames.forEach((lm, i) => {
+      const s = lm[sn];
+      const e = lm[en];
+      const w = lm[wn];
+      if (!isVisible(s) || !isVisible(e) || !isVisible(w)) return;
+      const inner = Math.abs(
+        angleDelta(Math.atan2(s.y - e.y, (s.x - e.x) * a), Math.atan2(w.y - e.y, (w.x - e.x) * a))
+      );
+      if (inner < ELBOW_FOLD_MIN) for (const n of [wn, ...ARM_CHAINS[side].hand]) drop[i]!.add(n);
+    });
+  }
+
+  for (const bone of LIMB_BONES) {
+    const name = bone.to;
+    const steps: number[] = [];
+    for (let i = 1; i < frames.length; i++) {
+      const p = frames[i - 1]![name];
+      const q = frames[i]![name];
+      if (isVisible(p) && isVisible(q)) steps.push(dist(p, q));
+    }
+    if (steps.length < 3) continue;
+    const m = Math.max(median(steps)!, JOINT_SPIKE_MIN_STEP);
+    for (let i = 1; i < frames.length - 1; i++) {
+      const prev = frames[i - 1]![name];
+      const cur = frames[i]![name];
+      const next = frames[i + 1]![name];
+      if (!isVisible(prev) || !isVisible(cur) || !isVisible(next)) continue;
+      if (dist(prev, cur) > JOINT_SPIKE_RATIO * m && dist(prev, next) < JOINT_SPIKE_RETURN_RATIO * m) {
+        // An elbow or knee spike leaves the wrist or ankle alone; a wrist or ankle takes its hand or foot.
+        const mid = LIMB_BONES.some((b) => b.from === name);
+        for (const n of mid ? [name] : bone.below) drop[i]!.add(n);
+      }
+    }
+  }
+
+  let dropped = 0;
+  const out = frames.map((lm, i) => {
+    const names = drop[i]!;
+    if (!names.size) return lm;
+    const copy: NamedLandmarks = { ...lm };
+    for (const n of names) {
+      if (copy[n]) {
+        delete copy[n];
+        dropped++;
+      }
+    }
+    return copy;
+  });
+  return { frames: dropped ? out : frames, dropped };
+}
+
+/** How long after contact the blend stays at full strength. */
+const ENVELOPE_HOLD_MS = 250;
+/** Shortest end taper, so a contact late in the window still eases out instead of snapping. */
+const ENVELOPE_MIN_TAPER_MS = 300;
+/** Ease-in at the start of the window, where the clip has to match the start image. */
+const ENVELOPE_START_TAPER_MS = 200;
+/** Blend left on the free arm at the envelope's low points. */
+const ENVELOPE_FREE_ARM_FLOOR = 0.1;
+/** Blend left on the racket arm and body at the envelope's low points. */
+const ENVELOPE_RACKET_FLOOR = 0.2;
+
+/**
+ * Per-frame blend strength 0-1 from time relative to contact: 1 from preparation through contact
+ * plus `ENVELOPE_HOLD_MS`, easing (cosine) to 0 by the end of the window, with a short ease-in
+ * over the first `ENVELOPE_START_TAPER_MS`. The recovery and ready position are where pro styles
+ * differ most and there is nothing left to correct; blended there, a tucked pro free arm pulled
+ * one athlete's outstretched arm into his belly over the last frames. In milliseconds, so it is
+ * the same at any frame rate or window length.
+ */
+export function blendEnvelope(opts: { frameTimesMs: number[]; contactMs: number }): number[] {
+  const t = opts.frameTimesMs;
+  if (!t.length) return [];
+  const start = t[0]!;
+  const end = t[t.length - 1]!;
+  const holdEnd = opts.contactMs + ENVELOPE_HOLD_MS;
+  const taper = Math.max(ENVELOPE_MIN_TAPER_MS, end - holdEnd);
+  const ease = (x: number) => 0.5 - 0.5 * Math.cos(Math.PI * Math.max(0, Math.min(1, x)));
+  return t.map((ms) => {
+    const inWeight = ease((ms - start) / ENVELOPE_START_TAPER_MS);
+    const outWeight = ms <= holdEnd ? 1 : 1 - ease((ms - holdEnd) / taper);
+    return Math.min(inWeight, outWeight);
+  });
+}
+
 /**
  * Per-frame control poses: retarget the pro into the user's frame, then blend the user
  * toward it so the clip reads as a correction of this athlete rather than a pose swap.
@@ -1397,17 +1587,47 @@ export function coachedControlLandmarkFrames(opts: {
    * motion, blended only `freeArmBlend` toward the pro; without it every joint blends alike.
    */
   racketSide?: "LEFT" | "RIGHT" | null;
+  /** How far the free arm turns toward the pro's; defaults to `blend`. 0 keeps the athlete's own. */
   freeArmBlend?: number;
+  /** Moving-average half-width in frames; defaults to `CORRECTION_POSE_SMOOTHING`, 0 disables. */
+  smoothing?: number;
+  /** Index into the frames of ball contact; the racket arm is left unsmoothed around it. */
+  contactIndex?: number | null;
+  /**
+   * Source time of each frame in ms. With `contactIndex` it turns on the phase envelope (see
+   * `blendEnvelope`): full blend through the swing, tapering toward the athlete's own pose in
+   * the recovery and at the very start.
+   */
+  frameTimesMs?: number[];
+  /** Per-frame confidence in the pro pose, 0-1 (see `proTrustByImpact`); scales the blend. */
+  proTrust?: number[];
 }): NamedLandmarks[] {
-  const blend = opts.blend ?? correctionPoseBlend();
+  const blend = opts.blend ?? CORRECTION_POSE_BLEND;
   const count = Math.min(opts.userFrames.length, opts.proFrames.length);
-  const freeBlend = opts.freeArmBlend ?? correctionFreeArmBlend() ?? blend;
+  const freeBlend = opts.freeArmBlend ?? blend;
+  const envelope =
+    opts.frameTimesMs && opts.contactIndex != null && opts.frameTimesMs[opts.contactIndex] != null
+      ? blendEnvelope({ frameTimesMs: opts.frameTimesMs, contactMs: opts.frameTimesMs[opts.contactIndex]! })
+      : null;
+  const weightAt = (i: number, full: number, floor: number): number => {
+    const f = Math.min(floor, full);
+    const e = envelope?.[i] ?? 1;
+    const trust = Math.max(0, Math.min(1, opts.proTrust?.[i] ?? 1));
+    return (f + (full - f) * e) * trust;
+  };
   const scale =
     opts.scale !== undefined
       ? opts.scale
       : windowRetargetScale(opts.userFrames, opts.proFrames, opts.aspect);
   const out: NamedLandmarks[] = new Array(count);
-  const pairs: Array<{ i: number; userLm: NamedLandmarks; retargeted: NamedLandmarks; blended: NamedLandmarks }> = [];
+  const pairs: Array<{
+    i: number;
+    userLm: NamedLandmarks;
+    retargeted: NamedLandmarks;
+    blended: NamedLandmarks;
+    blend: number;
+    freeBlend: number;
+  }> = [];
   for (let i = 0; i < count; i++) {
     const userLm = opts.userFrames[i] ?? {};
     const proLm = opts.proFrames[i] ?? {};
@@ -1421,7 +1641,15 @@ export function coachedControlLandmarkFrames(opts: {
       swapSides: opts.swapSides,
       scale: scale ?? undefined,
     });
-    pairs.push({ i, userLm, retargeted, blended: blendLandmarks(userLm, retargeted, blend) });
+    const w = weightAt(i, blend, ENVELOPE_RACKET_FLOOR);
+    pairs.push({
+      i,
+      userLm,
+      retargeted,
+      blended: blendLandmarks(userLm, retargeted, w),
+      blend: w,
+      freeBlend: weightAt(i, freeBlend, ENVELOPE_FREE_ARM_FLOOR),
+    });
   }
   // One elbow-bend direction per arm for the whole window, so neighbouring frames cannot bend
   // opposite ways and be averaged into a straight or kinked arm by the smoothing below.
@@ -1431,32 +1659,123 @@ export function coachedControlLandmarkFrames(opts: {
     { aspect: opts.aspect, racketSide: opts.racketSide ?? null, blend, freeArmBlend: freeBlend }
   );
   pairs.forEach((p, k) => {
-    out[p.i] = blendArmsByAngle(p.blended, p.userLm, p.retargeted, {
+    const armed = blendArmsByAngle(p.blended, p.userLm, p.retargeted, {
       aspect: opts.aspect,
       racketSide: opts.racketSide ?? null,
-      blend,
-      freeArmBlend: freeBlend,
+      blend: p.blend,
+      freeArmBlend: p.freeBlend,
       bendSigns: bendSigns[k],
     });
+    out[p.i] = opts.racketSide
+      ? extendRacketReach(armed, p.userLm, p.retargeted, opts.racketSide, p.blend, opts.aspect)
+      : armed;
   });
   // Restore before smoothing: a bone that flips between restored and untouched on neighbouring
   // frames makes the wrist jump, and the moving average evens that out.
-  return smoothLandmarkTrack(
-    attachHands(restoreLimbLengths(out, opts.userFrames, opts.aspect), opts.userFrames, opts.aspect),
-    correctionPoseSmoothing()
-  );
+  const restored = attachHands(restoreLimbLengths(out, opts.userFrames, opts.aspect), opts.userFrames, opts.aspect);
+  const keep = opts.racketSide
+    ? racketArmPeakKeeper(restored, opts.racketSide, opts.contactIndex ?? null, opts.aspect)
+    : undefined;
+  return smoothLandmarkTrack(restored, opts.smoothing ?? CORRECTION_POSE_SMOOTHING, keep);
+}
+
+/** Frames either side of contact where the racket arm keeps its unsmoothed pose. */
+const CONTACT_KEEP_RADIUS = 2;
+
+/**
+ * Which racket-arm joints skip smoothing on which frames: around contact, and where the wrist
+ * turns back (the end of the backswing and of the follow-through). A moving average pulls those
+ * extremes toward their neighbours; on one volley it cut the wrist's travel from 1.36 to 1.08
+ * torso lengths and the swing read as stiff and short.
+ */
+export function racketArmPeakKeeper(
+  frames: NamedLandmarks[],
+  racketSide: "LEFT" | "RIGHT",
+  contactIndex: number | null,
+  aspect = 1
+): (frameIndex: number, joint: string) => boolean {
+  const a = aspect > 0 ? aspect : 1;
+  const { joints, hand } = ARM_CHAINS[racketSide];
+  const armJoints = new Set<string>([joints[1], joints[2], ...hand]);
+  const wristName = joints[2];
+  const keepFrames = new Set<number>();
+  if (contactIndex != null && Number.isFinite(contactIndex)) {
+    for (let d = -CONTACT_KEEP_RADIUS; d <= CONTACT_KEEP_RADIUS; d++) keepFrames.add(Math.round(contactIndex) + d);
+  }
+  for (let i = 1; i < frames.length - 1; i++) {
+    const p = frames[i - 1]?.[wristName];
+    const c = frames[i]?.[wristName];
+    const n = frames[i + 1]?.[wristName];
+    if (!isVisible(p) || !isVisible(c) || !isVisible(n)) continue;
+    const v1x = (c.x - p.x) * a;
+    const v1y = c.y - p.y;
+    const v2x = (n.x - c.x) * a;
+    const v2y = n.y - c.y;
+    if (v1x * v2x + v1y * v2y < 0) keepFrames.add(i);
+  }
+  return (frameIndex, joint) => keepFrames.has(frameIndex) && armJoints.has(joint);
 }
 
 /**
- * How far the free arm turns toward the pro's, separately from the body blend. Unset: same as
- * the body (`CORRECTION_POSE_BLEND`). 0 keeps the athlete's own free arm.
+ * Keep the racket arm's reach. It is blended by position (see `blendArmsByAngle`), and a straight
+ * line between two differently turned arms passes close to the shoulder: one volley measured
+ * 0.67 torso lengths of reach for the athlete, 0.32 for the pro, and 0.46 blended, so the racket
+ * was drawn tucked in against the body. The wrist keeps the blended direction from the shoulder
+ * but reaches at least as far as the athlete did (further when the pro reaches further), capped
+ * by the arm's length, and the elbow is placed to fit, on the side it was already bending.
  */
-export function correctionFreeArmBlend(): number | null {
-  const raw = process.env.CORRECTION_FREE_ARM_BLEND;
-  if (raw == null || raw.trim() === "") return null;
-  const n = Number(raw);
-  if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
-  return null;
+export function extendRacketReach(
+  frame: NamedLandmarks,
+  user: NamedLandmarks,
+  pro: NamedLandmarks,
+  racketSide: "LEFT" | "RIGHT",
+  blend: number,
+  aspect = 1
+): NamedLandmarks {
+  const a = aspect > 0 ? aspect : 1;
+  const [sN, eN, wN] = ARM_CHAINS[racketSide].joints;
+  const S = frame[sN];
+  const E = frame[eN];
+  const W = frame[wN];
+  const Su = user[sN];
+  const Eu = user[eN];
+  const Wu = user[wN];
+  if (!isVisible(S) || !isVisible(E) || !isVisible(W)) return frame;
+  if (!isVisible(Su) || !isVisible(Eu) || !isVisible(Wu)) return frame;
+  const dist = (p: NamedLandmark, q: NamedLandmark) => Math.hypot((q.x - p.x) * a, q.y - p.y);
+  const Sp = pro[sN];
+  const Wp = pro[wN];
+  const rb = dist(S, W);
+  const ru = dist(Su, Wu);
+  const rp = isVisible(Sp) && isVisible(Wp) ? dist(Sp, Wp) : ru;
+  const upper = Math.max(dist(S, E), dist(Su, Eu));
+  const fore = Math.max(dist(E, W), dist(Eu, Wu));
+  const target = Math.min(Math.max(ru, ru + (rp - ru) * Math.max(0, Math.min(1, blend))), (upper + fore) * 0.995);
+  if (rb < 1e-6 || target <= rb + 1e-6) return frame;
+
+  const dx = ((W.x - S.x) * a) / rb;
+  const dy = (W.y - S.y) / rb;
+  const ex = (E.x - S.x) * a;
+  const ey = E.y - S.y;
+  const cross = dx * ey - dy * ex;
+  const along = (upper * upper - fore * fore + target * target) / (2 * target);
+  const h = Math.sqrt(Math.max(0, upper * upper - along * along));
+  const sign = cross < 0 ? -1 : 1;
+  const out: NamedLandmarks = { ...frame };
+  const newW = { ...W, x: S.x + (dx * target) / a, y: S.y + dy * target };
+  out[eN] = {
+    ...E,
+    x: S.x + (dx * along - dy * h * sign) / a,
+    y: S.y + dy * along + dx * h * sign,
+  };
+  out[wN] = newW;
+  const shiftX = newW.x - W.x;
+  const shiftY = newW.y - W.y;
+  for (const name of ARM_CHAINS[racketSide].hand) {
+    const p = frame[name];
+    if (p) out[name] = { ...p, x: p.x + shiftX, y: p.y + shiftY };
+  }
+  return out;
 }
 
 const ARM_CHAINS = {
@@ -1544,6 +1863,134 @@ function angleDelta(a: number, b: number): number {
   return d;
 }
 
+/** Slack past the blended share of the athlete-to-pro gap before an angle-blended arm is pulled back. */
+const ARM_OVERSHOOT_SLACK = (10 * Math.PI) / 180;
+/** Padding, in arm lengths, on the box between the athlete's and the pro's wrist positions. */
+const ARM_BOX_SLACK = 0.05;
+
+/**
+ * Keep an angle-blended arm's wrist direction (from the shoulder) within `blend` of the way from
+ * the athlete's toward the pro's, plus `ARM_OVERSHOOT_SLACK`. Turning the upper arm by `blend` and
+ * then adding `blend` of the pro's extra elbow bend compounds: an athlete's arm held out level and
+ * a pro's tucked one gave a wrist 0.8 torso lengths below the shoulder, lower than either (0.0 and
+ * 0.65). The wrist position is also kept between the two poses (see `box`). The forearm bend is eased back
+ * toward the athlete's until the wrist fits; if even the athlete's bend does not, the whole arm
+ * turns about the shoulder toward the athlete's wrist until it does. Edits `out` and returns the
+ * extra turn applied to the forearm, for the hand points.
+ */
+function containArmOvershoot(
+  out: NamedLandmarks,
+  user: NamedLandmarks,
+  pro: NamedLandmarks,
+  joints: readonly [string, string, string],
+  fore: { len: number; upperAng: number; ang: number; uAng: number; uRel: number },
+  b: number,
+  a: number
+): number {
+  if (b >= 1) return 0;
+  const [sn, en, wn] = joints;
+  const s = out[sn];
+  const e = out[en];
+  const w = out[wn];
+  const uS = user[sn];
+  const uW = user[wn];
+  if (!isVisible(s) || !isVisible(e) || !isVisible(w) || !isVisible(uS) || !isVisible(uW)) return 0;
+  const dirOf = (p: NamedLandmark, q: { x: number; y: number }) => Math.atan2(q.y - p.y, (q.x - p.x) * a);
+  const span = (p: NamedLandmark, q: NamedLandmark) => Math.hypot((q.x - p.x) * a, q.y - p.y);
+  const uDir = dirOf(uS, uW);
+  const pS = pro[sn];
+  const pE = pro[en];
+  const pW = pro[wn];
+  const proSeen = isVisible(pS) && isVisible(pW);
+  const gap = proSeen ? Math.abs(angleDelta(uDir, dirOf(pS, pW))) : 0;
+  const limit = b * gap + ARM_OVERSHOOT_SLACK;
+  // Direction alone is not enough: with the athlete's wrist out wide and a tucked pro's in front,
+  // the short turn between them passes straight down, below both. So the wrist (relative to the
+  // shoulder, pro arm scaled to the athlete's length) must also stay inside the box the two
+  // wrists span, padded by `ARM_BOX_SLACK` arm lengths: never past both poses on either axis.
+  const uE = user[en];
+  const uArm = isVisible(uE) ? span(uS, uE) + span(uE, uW) : span(uS, uW);
+  const pArm = proSeen && isVisible(pE) ? span(pS!, pE) + span(pE, pW!) : null;
+  const uRelX = (uW.x - uS.x) * a;
+  const uRelY = uW.y - uS.y;
+  let box: { x0: number; x1: number; y0: number; y1: number } | null = null;
+  if (proSeen && pArm && pArm > 1e-6) {
+    // The pro's bone directions on the athlete's bone lengths, as the arm itself is built; a
+    // uniform scale put even the pure pro pose outside the box when bone proportions differ.
+    let pRelX = (pW!.x - pS!.x) * a * (uArm / pArm);
+    let pRelY = (pW!.y - pS!.y) * (uArm / pArm);
+    if (isVisible(uE) && isVisible(pE)) {
+      const up = dirOf(pS!, pE);
+      const fo = dirOf(pE, pW!);
+      pRelX = Math.cos(up) * span(uS, uE) + Math.cos(fo) * span(uE, uW);
+      pRelY = Math.sin(up) * span(uS, uE) + Math.sin(fo) * span(uE, uW);
+    }
+    const pad = ARM_BOX_SLACK * uArm;
+    box = {
+      x0: Math.min(uRelX, pRelX) - pad,
+      x1: Math.max(uRelX, pRelX) + pad,
+      y0: Math.min(uRelY, pRelY) - pad,
+      y1: Math.max(uRelY, pRelY) + pad,
+    };
+  }
+  const wristAt = (ang: number) => ({
+    x: e.x + (Math.cos(ang) * fore.len) / a,
+    y: e.y + Math.sin(ang) * fore.len,
+  });
+  const off = (q: { x: number; y: number }) => Math.abs(angleDelta(uDir, dirOf(s, q)));
+  const inBox = (q: { x: number; y: number }) => {
+    if (!box) return true;
+    const rx = (q.x - s.x) * a;
+    const ry = q.y - s.y;
+    return rx >= box.x0 && rx <= box.x1 && ry >= box.y0 && ry <= box.y1;
+  };
+  const fits = (q: { x: number; y: number }) => off(q) <= limit && inBox(q);
+  if (fits(w)) return 0;
+
+  const rel = angleDelta(fore.upperAng, fore.ang);
+  const angAt = (t: number) => fore.upperAng + fore.uRel + (rel - fore.uRel) * t;
+  let ang = angAt(0);
+  if (fits(wristAt(ang))) {
+    let lo = 0;
+    let hi = 1;
+    for (let it = 0; it < 20; it++) {
+      const mid = (lo + hi) / 2;
+      if (fits(wristAt(angAt(mid)))) lo = mid;
+      else hi = mid;
+    }
+    ang = angAt(lo);
+  }
+  let wrist = wristAt(ang);
+  let elbow = { x: e.x, y: e.y };
+  let turn = ang - fore.ang;
+  if (!fits(wrist)) {
+    // Even the athlete's own bend does not fit: turn the whole arm about the shoulder toward the
+    // athlete's wrist direction, the least that brings the wrist inside.
+    const full = angleDelta(dirOf(s, wrist), uDir);
+    const turnAbout = (q: { x: number; y: number }, rot: number) => {
+      const dx = (q.x - s.x) * a;
+      const dy = q.y - s.y;
+      const cos = Math.cos(rot);
+      const sin = Math.sin(rot);
+      return { x: s.x + (dx * cos - dy * sin) / a, y: s.y + dx * sin + dy * cos };
+    };
+    let lo = 0;
+    let hi = 1;
+    for (let it = 0; it < 20; it++) {
+      const mid = (lo + hi) / 2;
+      if (fits(turnAbout(wrist, full * mid))) hi = mid;
+      else lo = mid;
+    }
+    const rot = full * hi;
+    elbow = turnAbout(elbow, rot);
+    wrist = turnAbout(wrist, rot);
+    turn += rot;
+  }
+  out[en] = { ...e, ...elbow };
+  out[wn] = { ...w, ...wrist };
+  return turn;
+}
+
 /**
  * Rebuild each arm by turning its bones toward the pro's instead of moving its joints.
  *
@@ -1588,6 +2035,7 @@ export function blendArmsByAngle(
     let uPrevAng: number | null = null;
     let pPrevAng: number | null = null;
     let cPrevAng: number | null = null;
+    let fore: { len: number; upperAng: number; ang: number; uAng: number; uRel: number } | null = null;
     for (let k = 1; k < joints.length; k++) {
       const up = user[joints[k - 1]!];
       const uc = user[joints[k]!];
@@ -1626,6 +2074,9 @@ export function blendArmsByAngle(
       } else {
         ang = uAng + angleDelta(uAng, pAng) * b;
       }
+      if (k === 2 && cPrevAng != null && uPrevAng != null) {
+        fore = { len, upperAng: cPrevAng, ang, uAng, uRel: angleDelta(uPrevAng, uAng) };
+      }
       uPrevAng = uAng;
       pPrevAng = pAng;
       cPrevAng = ang;
@@ -1638,6 +2089,7 @@ export function blendArmsByAngle(
       turnSoFar = ang - uAng;
       parent = child;
     }
+    if (fore) turnSoFar += containArmOvershoot(out, user, pro, joints, fore, b, a);
     // Hand points follow the wrist, turned with the forearm.
     const uW = user[joints[2]];
     const cW = out[joints[2]];
@@ -1659,7 +2111,11 @@ export function blendArmsByAngle(
  * Labelled side holding the racket for this window: racket boxes near contact when they settle
  * it (see `racketSideFromBoxes`), else the profile's handedness.
  */
-export function racketSideForWindow(opts: {
+export function racketSideForWindow(opts: RacketHandOpts): "LEFT" | "RIGHT" {
+  return racketHandEvidence(opts).side;
+}
+
+type RacketHandOpts = {
   userFrames: NamedLandmarks[];
   poseRows: PoseYoloRow[];
   userFrameIndices: number[];
@@ -1667,14 +2123,26 @@ export function racketSideForWindow(opts: {
   fps: number;
   handedness: string;
   aspect?: number;
-}): "LEFT" | "RIGHT" {
+};
+
+export type RacketHandEvidence = {
+  side: "LEFT" | "RIGHT";
+  /** What decided `side`: boxes near contact, boxes over the whole window, or the profile. */
+  source: "contact" | "clip" | "profile";
+  /** Votes near contact; zero when there is no contact frame. */
+  contactVotes: { left: number; right: number };
+};
+
+/** The racket side `racketSideForWindow` uses, with what decided it and the contact votes. */
+export function racketHandEvidence(opts: RacketHandOpts): RacketHandEvidence {
+  const aspect = opts.aspect ?? 1;
   const centres = opts.userFrameIndices.map((f) => {
     const r = opts.poseRows.find((row) => Math.abs(row.frame - f) <= 1 && row.racket_bbox);
     return r?.racket_bbox
       ? { x: (r.racket_bbox[0] + r.racket_bbox[2]) / 2, y: (r.racket_bbox[1] + r.racket_bbox[3]) / 2 }
       : null;
   });
-  let side: "LEFT" | "RIGHT" | null = null;
+  let contactVotes = { left: 0, right: 0 };
   if (opts.contactFrame != null && opts.userFrameIndices.length) {
     const idx = nearestIndex(opts.userFrameIndices, opts.contactFrame);
     const step =
@@ -1682,16 +2150,75 @@ export function racketSideForWindow(opts: {
         ? Math.max(1, (opts.userFrameIndices.at(-1)! - opts.userFrameIndices[0]!) / (opts.userFrameIndices.length - 1))
         : 1;
     const radius = Math.max(2, Math.round((RACKET_HAND_CONTACT_S * opts.fps) / step));
-    side = racketSideFromBoxes(opts.userFrames, centres, opts.aspect ?? 1, { index: idx, radius });
+    contactVotes = racketBoxVotes(opts.userFrames, centres, aspect, { index: idx, radius });
+    const side = sideFromVotes(contactVotes);
+    if (side) return { side, source: "contact", contactVotes };
   }
-  side ??= racketSideFromBoxes(opts.userFrames, centres, opts.aspect ?? 1);
-  return side ?? (racketWristName(opts.handedness) === "LEFT_WRIST" ? "LEFT" : "RIGHT");
+  const clipSide = racketSideFromBoxes(opts.userFrames, centres, aspect);
+  if (clipSide) return { side: clipSide, source: "clip", contactVotes };
+  return {
+    side: racketWristName(opts.handedness) === "LEFT_WRIST" ? "LEFT" : "RIGHT",
+    source: "profile",
+    contactVotes,
+  };
+}
+
+/**
+ * Blocking a generation is worse than a weak skeleton, so the mismatch check asks more of the
+ * contact boxes than picking the skeleton's racket arm does (3 votes, 2:1).
+ */
+const HAND_MISMATCH_MIN_VOTES = 4;
+const HAND_MISMATCH_MAJORITY = 3;
+
+/**
+ * True only when the racket clearly sits in the hand the profile does not name: boxes near
+ * contact decided it with a strong majority, the body's facing is known (so the side labels are
+ * trustworthy) and the profile names a hand. Anything less lets the generation run.
+ */
+export function isConfidentHandMismatch(
+  evidence: RacketHandEvidence,
+  handedness: string,
+  facing: Facing | null
+): boolean {
+  const hand = handedness.toLowerCase();
+  const profileSide = hand.includes("left") ? "LEFT" : hand.includes("right") ? "RIGHT" : null;
+  if (!profileSide || !facing || evidence.source !== "contact") return false;
+  if (evidence.side === profileSide) return false;
+  const { left, right } = evidence.contactVotes;
+  const winner = evidence.side === "LEFT" ? left : right;
+  const loser = evidence.side === "LEFT" ? right : left;
+  return winner + loser >= HAND_MISMATCH_MIN_VOTES && winner >= HAND_MISMATCH_MAJORITY * loser;
 }
 
 function withoutHands(lm: NamedLandmarks): NamedLandmarks {
   const out: NamedLandmarks = {};
   for (const [name, v] of Object.entries(lm)) if (!name.includes("_HAND_")) out[name] = v;
   return out;
+}
+
+const HAND_STUB_JOINTS = new Set([
+  "LEFT_INDEX",
+  "LEFT_PINKY",
+  "LEFT_THUMB",
+  "RIGHT_INDEX",
+  "RIGHT_PINKY",
+  "RIGHT_THUMB",
+]);
+
+/**
+ * Control poses for the polishing steps: every hand point (the 21-point hands and MediaPipe's
+ * index/pinky/thumb stubs) removed, so the skeleton still places the body and arms but leaves the
+ * wrist angle and grip to the model. Foot points stay.
+ */
+export function softControlLandmarks(frames: NamedLandmarks[]): NamedLandmarks[] {
+  return frames.map((lm) => {
+    const out: NamedLandmarks = {};
+    for (const [name, v] of Object.entries(lm)) {
+      if (name.includes("_HAND_") || HAND_STUB_JOINTS.has(name)) continue;
+      out[name] = v;
+    }
+    return out;
+  });
 }
 
 /**
@@ -1753,8 +2280,13 @@ const LIMB_CHAINS: ReadonlyArray<{ chain: readonly string[]; carry: readonly str
   { chain: ["RIGHT_HIP", "RIGHT_KNEE", "RIGHT_ANKLE"], carry: ["RIGHT_HEEL", "RIGHT_FOOT_INDEX"] },
 ];
 
-/** A bone may foreshorten to this fraction of the athlete's typical length before it is restored. */
+/** A leg bone may foreshorten to this fraction of the athlete's typical length before it is restored. */
 const LIMB_MIN_LENGTH = 0.75;
+/**
+ * Arms get less slack than legs: blending turns arm bones much more than leg bones, and at 0.75
+ * a collapsed forearm still rendered as a short, stiff arm held against the body.
+ */
+const ARM_LIMB_MIN_LENGTH = 0.9;
 /** Percentile of the athlete's own bone lengths taken as its full, unforeshortened length. */
 const LIMB_REFERENCE_PERCENTILE = 0.8;
 
@@ -1807,7 +2339,7 @@ export function restoreLimbLengths(
         const dx = (child.x - parent.x) * a;
         const dy = child.y - parent.y;
         const len = Math.hypot(dx, dy);
-        const min = ref * LIMB_MIN_LENGTH;
+        const min = ref * (ci < 2 ? ARM_LIMB_MIN_LENGTH : LIMB_MIN_LENGTH);
         if (len >= min || len < 1e-6) continue;
         const k2 = min / len;
         const shiftX = (dx * k2 - dx) / a;
@@ -1832,7 +2364,9 @@ export function restoreLimbLengths(
  */
 export function smoothLandmarkTrack(
   frames: NamedLandmarks[],
-  radius: number
+  radius: number,
+  /** Joints to leave as they are on a frame (see `racketArmPeakKeeper`). */
+  keep?: (frameIndex: number, joint: string) => boolean
 ): NamedLandmarks[] {
   if (radius < 1 || frames.length < 3) return frames;
   return frames.map((frame, i) => {
@@ -1840,6 +2374,10 @@ export function smoothLandmarkTrack(
     for (const name of Object.keys(frame)) {
       const centre = frame[name];
       if (!isVisible(centre)) continue;
+      if (keep?.(i, name)) {
+        out[name] = centre;
+        continue;
+      }
       let sx = 0;
       let sy = 0;
       let n = 0;
@@ -1859,37 +2397,14 @@ export function smoothLandmarkTrack(
 }
 
 /** Half-width of the smoothing window, in frames. 0 disables it. */
-export function correctionPoseSmoothing(): number {
-  const n = Number(process.env.CORRECTION_POSE_SMOOTHING);
-  if (Number.isFinite(n) && n >= 0 && n <= 5) return Math.floor(n);
-  return 1;
-}
+export const CORRECTION_POSE_SMOOTHING = 1;
 
-/**
- * Control-clip canvas, square at `correctionCanvasSize()` by default.
- *
- * Matching the user's footage aspect instead lands on sizes WAN cannot resolve. Divisibility
- * is not the constraint: 624x768 and 848x1024 are both clean multiples of 16 and need no
- * latent padding, yet both decode with the DiT patch grid visible as a 16px lattice (8x VAE
- * downsample times patch_size 2). The same model at the same step count is clean at 768x768,
- * which is near a size it was trained on. Aspect fitting stays available behind
- * CORRECTION_CANVAS_ASPECT for probing candidate sizes, on a multiple of 32.
- */
+/** Control-clip canvas: always the square `CORRECTION_CANVAS_SIZE`, whatever the footage aspect. */
 export function controlCanvasSize(
-  videoWidth?: number | null,
-  videoHeight?: number | null
+  _videoWidth?: number | null,
+  _videoHeight?: number | null
 ): { width: number; height: number } {
-  const size = correctionCanvasSize();
-  if (process.env.CORRECTION_CANVAS_ASPECT !== "1") {
-    return { width: size, height: size };
-  }
-
-  const w = typeof videoWidth === "number" && videoWidth > 0 ? videoWidth : 0;
-  const h = typeof videoHeight === "number" && videoHeight > 0 ? videoHeight : 0;
-  if (!w || !h) return { width: size, height: size };
-
-  const scale = size / Math.max(w, h);
-  return { width: round32(w * scale), height: round32(h * scale) };
+  return { width: CORRECTION_CANVAS_SIZE, height: CORRECTION_CANVAS_SIZE };
 }
 
 /** Region of the source frame, in source pixels, that the start image and control clip share. */
@@ -1908,6 +2423,12 @@ export function pickControlCrop(opts: {
   canvasW: number;
   canvasH: number;
   userFrames: NamedLandmarks[];
+  /**
+   * `frame` (default) keeps the largest crop; `player` zooms to the athlete. With the whole
+   * frame, a player standing at the net can fill under half the canvas height, which leaves each
+   * hand about 12 px on a 768 canvas: under the model's 16 px patch, so it draws fists and stumps.
+   */
+  mode?: "frame" | "player";
 }): ControlCrop {
   const { srcW, srcH } = opts;
   const aspect = opts.canvasW / opts.canvasH;
@@ -1920,7 +2441,7 @@ export function pickControlCrop(opts: {
   w = Math.round(w);
   h = Math.round(h);
 
-  if (correctionCropMode() === "player") {
+  if (opts.mode === "player") {
     const fit = playerCrop(opts, w, h, aspect);
     if (fit) return fit;
   }
@@ -1939,15 +2460,6 @@ export function pickControlCrop(opts: {
   const x = Math.round(Math.max(0, Math.min(srcW - w, cx - w / 2)));
   const y = Math.round(Math.max(0, Math.min(srcH - h, cy - h / 2)));
   return { x, y, w, h };
-}
-
-/**
- * `frame` (default) keeps the largest crop; `player` zooms to the athlete. With the whole frame,
- * a player standing at the net can fill under half the canvas height, which leaves each hand
- * about 12 px on a 768 canvas: under the model's 16 px patch, so it draws fists and stumps.
- */
-export function correctionCropMode(): "frame" | "player" {
-  return String(process.env.CORRECTION_CROP ?? "").trim().toLowerCase() === "player" ? "player" : "frame";
 }
 
 /** Margin around the athlete's extent, as a fraction of its height: room for the racket head. */
@@ -2049,17 +2561,21 @@ export async function renderOpenPoseMp4(opts: {
   width?: number;
   height?: number;
   fps?: number;
+  /** Gaussian blur sigma in pixels applied to every frame; 0 or unset draws crisp lines. */
+  blurSigma?: number;
+  /** Racket overlays to draw from `overlays`; none by default. */
+  racketDraw?: RacketDraw;
 }): Promise<Buffer> {
   if (!opts.landmarkFrames.length) {
     throw new Error("OpenPose render: no landmark frames");
   }
-  const width = opts.width ?? correctionCanvasSize();
-  const height = opts.height ?? correctionCanvasSize();
-  const fps = opts.fps ?? correctionFunFps();
+  const width = opts.width ?? CORRECTION_CANVAS_SIZE;
+  const height = opts.height ?? CORRECTION_CANVAS_SIZE;
+  const fps = opts.fps ?? CORRECTION_FUN_FPS;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "xevo-openpose-"));
   try {
     opts.landmarkFrames.forEach((lm, i) => {
-      const rgb = drawOpenPoseRgb(lm, width, height, opts.overlays?.[i]);
+      const rgb = drawOpenPoseRgb(lm, width, height, opts.overlays?.[i], opts.racketDraw);
       const name = `frame_${String(i).padStart(4, "0")}.ppm`;
       writePpm(path.join(tmp, name), rgb, width, height);
     });
@@ -2072,6 +2588,7 @@ export async function renderOpenPoseMp4(opts: {
       String(fps),
       "-i",
       path.join(tmp, "frame_%04d.ppm"),
+      ...(opts.blurSigma && opts.blurSigma > 0 ? ["-vf", `gblur=sigma=${opts.blurSigma}`] : []),
       "-pix_fmt",
       "yuv444p",
       "-c:v",
@@ -2094,20 +2611,6 @@ export async function renderOpenPoseMp4(opts: {
  * Span of real action the generated clip covers, centred on contact. 2000ms reaches from
  * backswing through follow-through rather than just the contact instant, and on a typical 2s
  * upload it makes the generated clip cover the same moments as the source, so the
- * before/after compare lines up.
- *
- * Deliberately does not read `CORRECTION_IMPACT_WINDOW_MS`: that one is set to 1000 in
- * deployed env to pick image-correction stills near contact, and reusing it here would hold
- * the video at 1s wherever it is set.
+ * before/after compare lines up. Separate from the 1s window that picks image-correction stills.
  */
-export function correctionVideoWindowMs(): number {
-  const n = Number(process.env.CORRECTION_VIDEO_WINDOW_MS);
-  if (Number.isFinite(n) && n >= 200) return Math.min(Math.floor(n), 4000);
-  return 2000;
-}
-
-/**
- * Static fallbacks. Runtime code should prefer `correctionFunLength()` and
- * `correctionCanvasSize()` so the env overrides used for tuning sweeps take effect.
- */
-export { DEFAULT_LENGTH as FUN_CONTROL_LENGTH, DEFAULT_SIZE as FUN_CONTROL_SIZE };
+export const CORRECTION_VIDEO_WINDOW_MS = 2000;

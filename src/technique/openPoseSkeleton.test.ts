@@ -8,6 +8,8 @@ import {
   meetBallAtContact,
   racketOutlineAngles,
   racketSideFromBoxes,
+  racketHandEvidence,
+  isConfidentHandMismatch,
   drawOpenPoseRgb,
   type NamedLandmarks,
   type NormBox,
@@ -79,28 +81,10 @@ const OVERLAY = {
   racket: { cx: Math.round(0.1 * SIZE), cy: Math.round(0.9 * SIZE), w: 40, h: 40 },
 };
 
-function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
-  const prev = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
-  for (const [k, v] of Object.entries(vars)) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
-  try {
-    fn();
-  } finally {
-    for (const [k, v] of Object.entries(prev)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  }
-}
-
 test("drawOpenPoseRgb paints the ball marker and leaves the racket box off by default", () => {
-  withEnv({ CORRECTION_DRAW_RACKET_BOX: undefined }, () => {
-    const buf = drawOpenPoseRgb(pose(), SIZE, SIZE, OVERLAY);
-    assert.deepEqual(pixelAt(buf, 0.9, 0.1), [255, 220, 0]);
-    assert.deepEqual(pixelAt(buf, 0.1, 0.9), BLACK);
-  });
+  const buf = drawOpenPoseRgb(pose(), SIZE, SIZE, OVERLAY);
+  assert.deepEqual(pixelAt(buf, 0.9, 0.1), [255, 220, 0]);
+  assert.deepEqual(pixelAt(buf, 0.1, 0.9), BLACK);
 });
 
 test("drawOpenPoseRgb drops the shoulder line when a shoulder is hidden", () => {
@@ -117,24 +101,20 @@ const OUTLINE = {
 };
 
 test("drawOpenPoseRgb leaves the racket outline off by default", () => {
-  withEnv({ CORRECTION_DRAW_RACKET_OUTLINE: undefined }, () => {
-    const buf = drawOpenPoseRgb(pose(), SIZE, SIZE, OUTLINE);
-    // Handle midpoint: 0.33 * 200 / 2 = 33px right of the grip.
-    assert.deepEqual(pixelAt(buf, (OUTLINE.racketOutline.x + 33) / SIZE, 0.9), BLACK);
-  });
+  const buf = drawOpenPoseRgb(pose(), SIZE, SIZE, OUTLINE);
+  // Handle midpoint: 0.33 * 200 / 2 = 33px right of the grip.
+  assert.deepEqual(pixelAt(buf, (OUTLINE.racketOutline.x + 33) / SIZE, 0.9), BLACK);
 });
 
 test("drawOpenPoseRgb strokes a handle and an unfilled head when the outline is on", () => {
-  withEnv({ CORRECTION_DRAW_RACKET_OUTLINE: "true" }, () => {
-    const buf = drawOpenPoseRgb(pose(), SIZE, SIZE, OUTLINE);
-    const x0 = OUTLINE.racketOutline.x;
-    // Handle: 66px long, from the grip.
-    assert.deepEqual(pixelAt(buf, (x0 + 33) / SIZE, 0.9), GREY);
-    // Head: centre 66 + 67 = 133px out, semi-axes 67 along and 57 across.
-    assert.deepEqual(pixelAt(buf, (x0 + 133) / SIZE, 0.9), BLACK, "head is not filled");
-    assert.deepEqual(pixelAt(buf, (x0 + 200) / SIZE, 0.9), GREY, "far tip of the rim");
-    assert.deepEqual(pixelAt(buf, (x0 + 133) / SIZE, (OUTLINE.racketOutline.y - 57) / SIZE), GREY, "rim edge");
-  });
+  const buf = drawOpenPoseRgb(pose(), SIZE, SIZE, OUTLINE, { outline: true });
+  const x0 = OUTLINE.racketOutline.x;
+  // Handle: 66px long, from the grip.
+  assert.deepEqual(pixelAt(buf, (x0 + 33) / SIZE, 0.9), GREY);
+  // Head: centre 66 + 67 = 133px out, semi-axes 67 along and 57 across.
+  assert.deepEqual(pixelAt(buf, (x0 + 133) / SIZE, 0.9), BLACK, "head is not filled");
+  assert.deepEqual(pixelAt(buf, (x0 + 200) / SIZE, 0.9), GREY, "far tip of the rim");
+  assert.deepEqual(pixelAt(buf, (x0 + 133) / SIZE, (OUTLINE.racketOutline.y - 57) / SIZE), GREY, "rim edge");
 });
 
 test("controlOverlaysForWindow points the racket along the forearm, sized from YOLO", () => {
@@ -376,4 +356,57 @@ test("drawOpenPoseRgb draws a full hand in place of the wrist-to-index stub", ()
   const buf = drawOpenPoseRgb(lm, SIZE, SIZE);
   // The stub would run from the wrist (0.4, 0.5) up to (0.4, 0.4): its midpoint stays black.
   assert.deepEqual(pixelAt(buf, 0.4, 0.45), BLACK);
+});
+
+/**
+ * Eleven window frames, 3 video frames apart at 60 fps, so the contact vote covers window frames
+ * 2 to 8 and no box is borrowed by a neighbour. Each `racketAt` entry puts a small racket box on
+ * that wrist, or none.
+ */
+function handWindow(racketAt: Array<"LEFT" | "RIGHT" | null>) {
+  const userFrames = racketAt.map(() => pose());
+  const frameOf = (i: number) => i * 3;
+  const poseRows: PoseYoloRow[] = racketAt.map((side, i) => {
+    if (!side) return { frame: frameOf(i), racket_bbox: null };
+    const w = side === "LEFT" ? userFrames[0]!.LEFT_WRIST! : userFrames[0]!.RIGHT_WRIST!;
+    return { frame: frameOf(i), racket_bbox: [w.x - 0.02, w.y - 0.02, w.x + 0.02, w.y + 0.02] as NormBox };
+  });
+  return (handedness: string) =>
+    racketHandEvidence({
+      userFrames,
+      poseRows,
+      userFrameIndices: racketAt.map((_, i) => frameOf(i)),
+      contactFrame: frameOf(5),
+      fps: 60,
+      handedness,
+    });
+}
+
+test("isConfidentHandMismatch flags a clear left-hand racket on a right-handed profile", () => {
+  const evidence = handWindow(Array(11).fill("LEFT"))("right-handed");
+  assert.equal(evidence.source, "contact");
+  assert.equal(evidence.side, "LEFT");
+  assert.equal(isConfidentHandMismatch(evidence, "right-handed", "FRONT"), true);
+  assert.equal(isConfidentHandMismatch(evidence, "left-handed", "FRONT"), false);
+});
+
+test("isConfidentHandMismatch lets the generation run when it is not sure", () => {
+  const clear = handWindow(Array(11).fill("LEFT"))("right-handed");
+  assert.equal(isConfidentHandMismatch(clear, "right-handed", null), false, "facing unknown");
+  assert.equal(isConfidentHandMismatch(clear, "unknown", "FRONT"), false, "profile names no hand");
+
+  const split = handWindow([null, null, "LEFT", "LEFT", "RIGHT", "LEFT", "RIGHT", "LEFT", null, null, null]);
+  const splitEvidence = split("right-handed");
+  assert.equal(splitEvidence.source, "contact");
+  assert.equal(splitEvidence.side, "LEFT", "2:1 still picks the skeleton's racket arm");
+  assert.equal(isConfidentHandMismatch(splitEvidence, "right-handed", "FRONT"), false, "below 3:1");
+
+  const few = handWindow([null, null, null, "LEFT", "LEFT", "LEFT", null, null, null, null, null]);
+  const fewEvidence = few("right-handed");
+  assert.equal(fewEvidence.source, "contact");
+  assert.equal(isConfidentHandMismatch(fewEvidence, "right-handed", "FRONT"), false, "3 votes");
+
+  const none = handWindow(Array(11).fill(null))("right-handed");
+  assert.equal(none.source, "profile");
+  assert.equal(isConfidentHandMismatch(none, "right-handed", "FRONT"), false);
 });

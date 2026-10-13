@@ -255,7 +255,12 @@ async function runImpactYolo(): Promise<TestRunResult> {
     if (!hasYoloContacts(row.metrics)) continue;
     eligible += 1;
     const src = impactFrameSource(row.metrics);
-    const modern = src === "yolo_median" || src === "yolo_global_median" || src === "clip_center";
+    const modern =
+      src === "user_marked" ||
+      src === "yolo_cluster" ||
+      src === "yolo_median" ||
+      src === "yolo_global_median" ||
+      src === "clip_center";
     if (modern) ok += 1;
     samples.push({ id: row.id, source: src, yolo: modern });
   }

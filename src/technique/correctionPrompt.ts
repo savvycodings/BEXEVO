@@ -111,14 +111,6 @@ const DEFAULT_SHOT_AND_HANDEDNESS: ShotAndHandedness = {
   },
 };
 
-/**
- * When `CORRECTION_IMAGES_ASSUME_RIGHT_HANDED=true`, correction images always use a right-handed striker
- * (legacy escape hatch). Default is off; prefer `mergeCorrectionShotAndHandedness` with profile + geometry hints.
- */
-export function correctionImagesAssumeRightHanded(): boolean {
-  return String(process.env.CORRECTION_IMAGES_ASSUME_RIGHT_HANDED ?? "").trim() === "true";
-}
-
 export type HandednessMergeHints = {
   /** From `user.dominantHand` when set to left or right. */
   profileDominantHand: DominantHand | null;
@@ -154,7 +146,7 @@ export function computeRacketHandConsensusForFrames(
 }
 
 /**
- * Order: env force-right (legacy) → user profile → pose racket_hand consensus → GPT classification → unknown.
+ * Order: user profile → pose racket_hand consensus → GPT classification → unknown.
  * Shot text always comes from `classified` when present.
  */
 export function mergeCorrectionShotAndHandedness(
@@ -162,17 +154,6 @@ export function mergeCorrectionShotAndHandedness(
   hints?: HandednessMergeHints | null
 ): ShotAndHandedness {
   const shot = classified?.shot ?? DEFAULT_SHOT_AND_HANDEDNESS.shot;
-
-  if (correctionImagesAssumeRightHanded()) {
-    return {
-      shot,
-      handedness: {
-        dominant_hand: "right-handed",
-        confidence: 1,
-        evidence: ["assumed_right_handed_env_override"],
-      },
-    };
-  }
 
   const p = hints?.profileDominantHand;
   if (p === "left-handed" || p === "right-handed") {

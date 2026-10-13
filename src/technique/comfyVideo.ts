@@ -8,9 +8,11 @@ import {
   comfyWaitForOutputMedia,
 } from "./comfyClient";
 import {
-  correctionCanvasSize,
-  correctionFunFps,
-  correctionFunLength,
+  CORRECTION_CANVAS_SIZE,
+  CORRECTION_FUN_CONTROL_END,
+  CORRECTION_FUN_CONTROL_TAIL,
+  CORRECTION_FUN_FPS,
+  CORRECTION_FUN_LENGTH,
 } from "./openPoseVideo";
 
 type ApiWorkflow = Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
@@ -211,12 +213,100 @@ const FUN_CONTROL_CFG = 3.5;
  *
  * 30 was tried against the blocky texture and did not touch it, because the texture came from
  * the canvas size rather than under-sampling; it only tripled the runtime. Back to 20, which is
- * what the clean output was sampled at. Env-overridable for tuning sweeps.
+ * what the clean output was sampled at.
  */
-function funControlSteps(): number {
-  const n = Number(process.env.CORRECTION_FUN_STEPS);
-  if (Number.isFinite(n) && n >= 4 && n <= 80) return Math.floor(n);
-  return 20;
+const FUN_CONTROL_STEPS = 20;
+
+const FUN_TAIL_CONTROL_NODE_ID = "161";
+const FUN_TAIL_LOAD_VIDEO_NODE_ID = "162";
+const FUN_TAIL_COMPONENTS_NODE_ID = "163";
+const FUN_TAIL_SAMPLER_NODE_ID = "164";
+
+/**
+ * Step at which the full skeleton hands over to the tail conditioning. Clamped to the high/low
+ * expert switch at the earliest, so the motion is always laid out under the full skeleton.
+ */
+export function funControlEndStep(steps: number, highEnd: number, fraction = CORRECTION_FUN_CONTROL_END): number {
+  return Math.max(highEnd, Math.min(steps, Math.round(steps * fraction)));
+}
+
+/** Fraction of steps on the full skeleton, and what the remaining steps see. */
+export type FunControlHandoff = { end: number; tail: "soft" | "none" };
+
+/** Sampling steps, expert switch and skeleton hand-off a Fun Control render will use. */
+export function funControlHandoffPlan(
+  handoff: FunControlHandoff = { end: CORRECTION_FUN_CONTROL_END, tail: CORRECTION_FUN_CONTROL_TAIL }
+): {
+  steps: number;
+  highEnd: number;
+  controlEndStep: number;
+  tail: "soft" | "none";
+  /** True when some steps run without the full skeleton. */
+  active: boolean;
+} {
+  const steps = FUN_CONTROL_STEPS;
+  const highEnd = Math.max(1, Math.round(steps / 2));
+  const controlEndStep = funControlEndStep(steps, highEnd, Math.max(0.5, Math.min(1, handoff.end)));
+  return { steps, highEnd, controlEndStep, tail: handoff.tail, active: controlEndStep < steps };
+}
+
+/**
+ * Splits the low-noise pass at `controlEndStep`: steps up to it keep node 160's full skeleton,
+ * the rest run on a copy of node 160 (same prompts, same reference image) whose control is the
+ * soft skeleton video, or omitted for `none`. Whatever read the low sampler's latent (the VAE
+ * decode) reads the tail sampler's instead. No-op when the hand-off is at the last step.
+ */
+export function applyControlHandoff(
+  workflow: ApiWorkflow,
+  opts: { steps: number; controlEndStep: number; tail: "soft" | "none"; softVideoName?: string | null }
+): void {
+  if (opts.controlEndStep >= opts.steps) return;
+  const control = workflow[FUN_CONTROL_NODE_ID];
+  const low = workflow[FUN_LOW_SAMPLER_NODE_ID];
+  if (!control?.inputs || !low?.inputs) {
+    throw new Error("Fun Control workflow missing node 160 or low sampler 95 for the control hand-off");
+  }
+
+  const tailControl = deepClone(control);
+  const tailInputs = tailControl.inputs!;
+  if (opts.tail === "soft" && opts.softVideoName) {
+    workflow[FUN_TAIL_LOAD_VIDEO_NODE_ID] = {
+      class_type: "LoadVideo",
+      inputs: { file: opts.softVideoName },
+    };
+    workflow[FUN_TAIL_COMPONENTS_NODE_ID] = {
+      class_type: "GetVideoComponents",
+      inputs: { video: [FUN_TAIL_LOAD_VIDEO_NODE_ID, 0] },
+    };
+    tailInputs.control_video = [FUN_TAIL_COMPONENTS_NODE_ID, 0];
+  } else {
+    delete tailInputs.control_video;
+  }
+  workflow[FUN_TAIL_CONTROL_NODE_ID] = tailControl;
+
+  for (const [id, node] of Object.entries(workflow)) {
+    if (id === FUN_LOW_SAMPLER_NODE_ID || !node.inputs) continue;
+    for (const [key, v] of Object.entries(node.inputs)) {
+      if (Array.isArray(v) && v[0] === FUN_LOW_SAMPLER_NODE_ID && v[1] === 0) {
+        node.inputs[key] = [FUN_TAIL_SAMPLER_NODE_ID, 0];
+      }
+    }
+  }
+
+  const tailSampler = deepClone(low);
+  Object.assign(tailSampler.inputs!, {
+    add_noise: "disable",
+    start_at_step: opts.controlEndStep,
+    end_at_step: opts.steps,
+    return_with_leftover_noise: "disable",
+    positive: [FUN_TAIL_CONTROL_NODE_ID, 0],
+    negative: [FUN_TAIL_CONTROL_NODE_ID, 1],
+    latent_image: [FUN_LOW_SAMPLER_NODE_ID, 0],
+  });
+  workflow[FUN_TAIL_SAMPLER_NODE_ID] = tailSampler;
+
+  low.inputs.end_at_step = opts.controlEndStep;
+  low.inputs.return_with_leftover_noise = "enable";
 }
 
 /** Video models default to a strung tennis racket unless the padel racket is spelled out. */
@@ -389,6 +479,10 @@ export async function generatePoseRetargetVideoComfy(opts: {
   frameNumber: number;
   imageBuffer: Buffer;
   poseVideoBuffer: Buffer;
+  /** Hand-less, blurred control clip for the polishing steps when the tail is `soft`. */
+  softPoseVideoBuffer?: Buffer | null;
+  /** Skeleton hand-off; defaults to `CORRECTION_FUN_CONTROL_END` / `CORRECTION_FUN_CONTROL_TAIL`. */
+  controlHandoff?: FunControlHandoff;
   shotName: string;
   handedness: string;
   length?: number;
@@ -410,7 +504,7 @@ export async function generatePoseRetargetVideoComfy(opts: {
   // killed the render it was waiting for. Video gets its own floor rather than sharing the
   // image pipeline's shorter one.
   const timeoutMs = Math.max(Number(process.env.COMFYUI_TIMEOUT_MS) || 0, 900_000);
-  const length = opts.length ?? correctionFunLength();
+  const length = opts.length ?? CORRECTION_FUN_LENGTH;
   const t0 = Date.now();
   const prefixId = opts.analysisId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12);
 
@@ -428,8 +522,8 @@ export async function generatePoseRetargetVideoComfy(opts: {
   if (!control?.inputs) {
     throw new Error("Fun Control workflow missing Wan22FunControlToVideo node 160");
   }
-  const outWidth = opts.width && opts.width > 0 ? opts.width : correctionCanvasSize();
-  const outHeight = opts.height && opts.height > 0 ? opts.height : correctionCanvasSize();
+  const outWidth = opts.width && opts.width > 0 ? opts.width : CORRECTION_CANVAS_SIZE;
+  const outHeight = opts.height && opts.height > 0 ? opts.height : CORRECTION_CANVAS_SIZE;
   control.inputs.width = outWidth;
   control.inputs.height = outHeight;
   control.inputs.length = length;
@@ -452,8 +546,8 @@ export async function generatePoseRetargetVideoComfy(opts: {
     negative.inputs.text = buildWanFunControlNegativePrompt();
   }
 
-  const steps = funControlSteps();
-  const highEnd = Math.max(1, Math.round(steps / 2));
+  const handoff = funControlHandoffPlan(opts.controlHandoff);
+  const { steps, highEnd } = handoff;
   const highSampler = workflow[FUN_HIGH_SAMPLER_NODE_ID];
   if (highSampler?.inputs) {
     // Fixed seed only for A/B renders; production varies it per request.
@@ -477,7 +571,7 @@ export async function generatePoseRetargetVideoComfy(opts: {
 
   // The control clip is encoded at this rate, so the output has to match or the swing
   // plays back at the wrong speed.
-  const fps = correctionFunFps();
+  const fps = CORRECTION_FUN_FPS;
   const createVideo = workflow[FUN_CREATE_VIDEO_NODE_ID];
   if (createVideo?.inputs) createVideo.inputs.fps = fps;
 
@@ -515,6 +609,32 @@ export async function generatePoseRetargetVideoComfy(opts: {
       control.inputs.control_video = ["156", 0];
     }
 
+    // Without a soft clip the tail falls back to no control rather than the full skeleton.
+    let tail: "soft" | "none" = handoff.tail;
+    let softVideoName: string | null = null;
+    if (handoff.active && tail === "soft") {
+      if (opts.softPoseVideoBuffer?.length) {
+        const uploadedSoft = await comfyUploadVideo(
+          baseUrl,
+          opts.softPoseVideoBuffer,
+          `xevo_fun_pose_soft_${prefixId}_${opts.frameNumber}.mp4`
+        );
+        softVideoName = uploadedSoft.subfolder
+          ? `${uploadedSoft.subfolder.replace(/\/+$/, "")}/${uploadedSoft.name}`
+          : uploadedSoft.name;
+      } else {
+        tail = "none";
+      }
+    }
+    if (handoff.active) {
+      applyControlHandoff(workflow, {
+        steps,
+        controlEndStep: handoff.controlEndStep,
+        tail,
+        softVideoName,
+      });
+    }
+
     console.log("[comfyVideo] Fun Control queue", {
       analysisId: opts.analysisId,
       comfyHost: comfyBaseHost(),
@@ -525,6 +645,8 @@ export async function generatePoseRetargetVideoComfy(opts: {
       size: `${outWidth}x${outHeight}`,
       fps,
       steps,
+      controlEndStep: handoff.controlEndStep,
+      controlTail: handoff.active ? tail : null,
       model: String(workflow["101"]?.inputs?.unet_name ?? "?").includes("fp8")
         ? "fp8"
         : "bf16",

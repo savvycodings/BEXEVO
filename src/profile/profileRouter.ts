@@ -751,6 +751,30 @@ router.post("/game", async (req, res) => {
   }
 });
 
+router.post("/hand", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const dominantHand = String(req.body?.dominantHand ?? "").trim().toLowerCase();
+    if (dominantHand !== "left" && dominantHand !== "right") {
+      return res.status(400).json({ error: "dominantHand must be left or right." });
+    }
+
+    const updated = await db
+      .update(userProfile)
+      .set({ dominantHand, updatedAt: new Date() })
+      .where(eq(userProfile.userId, userId))
+      .returning({ userId: userProfile.userId });
+    if (!updated.length) return res.status(404).json({ error: "Profile not found" });
+
+    return res.json({ ok: true, dominantHand });
+  } catch (e: any) {
+    console.error("[Profile] hand update error", e);
+    return res.status(500).json({ error: "Failed to update dominant hand" });
+  }
+});
+
 router.get("/directory", async (req, res) => {
   try {
     const requesterId = await resolveUserId(req);

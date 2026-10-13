@@ -130,6 +130,7 @@ export function applyUserClipImpactToMetrics(
     detection_summary?: { contact_window_frames?: number[] };
     impact_frame_resolved?: number;
     impact_frame_source?: ImpactFrameSource;
+    user_contact_ms?: number;
   },
   clips: ClipMsRange[],
   videoDurationMs: number
@@ -148,6 +149,8 @@ export function applyUserClipImpactToMetrics(
     totalFrames,
     videoDurationMs,
     contactFrames: metrics.detection_summary?.contact_window_frames,
+    userContactMs: metrics.user_contact_ms,
+    poseData: metrics.pose_data,
   });
 
   const seq = buildImpactPoseSequenceForMetrics(

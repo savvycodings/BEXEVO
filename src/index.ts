@@ -4,6 +4,7 @@ import cors from 'cors'
 import { toNodeHandler } from 'better-auth/node'
 import { auth } from './auth'
 import chatRouter from './chat/chatRouter'
+import coachCharacterRouter from './coachCharacter/coachCharacterRouter'
 import imagesRouter from './images/imagesRouter'
 import techniqueRouter from './technique/techniqueRouter'
 import trainRouter from './train/trainRouter'
@@ -41,6 +42,8 @@ app.use(cors({
     'ngrok-skip-browser-warning',
   ],
 }))
+
+app.use(['/coach-character', '/api/auth/coach-character'], coachCharacterRouter)
 
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))

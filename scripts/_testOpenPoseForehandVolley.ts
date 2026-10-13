@@ -29,9 +29,9 @@ import {
   coachedControlLandmarkFrames,
   controlCanvasSize,
   controlOverlaysForWindow,
-  correctionFunLength,
-  correctionPoseBlend,
-  correctionPoseSmoothing,
+  CORRECTION_FUN_LENGTH,
+  CORRECTION_POSE_BLEND,
+  CORRECTION_POSE_SMOOTHING,
   smoothLandmarkTrack,
   drawOpenPoseRgb,
   fillJointGaps,
@@ -176,7 +176,7 @@ async function checkAnalysis(
   if (!Number.isFinite(userImpactFrame) || !trainSampleId) return checks;
 
   // 1. Window sampling.
-  const count = correctionFunLength();
+  const count = CORRECTION_FUN_LENGTH;
   const userFrameIndices = sampleImpactWindowFrameIndices({
     impactFrame: userImpactFrame,
     totalFrames,
@@ -317,7 +317,7 @@ async function checkAnalysis(
     flipX: plan.flipX,
     swapSides: plan.swapSides,
     racketSide,
-    blend: correctionPoseBlend(),
+    blend: CORRECTION_POSE_BLEND,
     scale,
   });
   add(
@@ -410,7 +410,7 @@ async function checkAnalysis(
     if (d > 180) d = 360 - d;
     return d;
   };
-  const smoothed = (frames: NamedLandmarks[]) => smoothLandmarkTrack(frames, correctionPoseSmoothing());
+  const smoothed = (frames: NamedLandmarks[]) => smoothLandmarkTrack(frames, CORRECTION_POSE_SMOOTHING);
   const userSm = smoothed(userGuard.frames);
   const proSm = smoothed(
     userGuard.frames.map((u, i) =>
