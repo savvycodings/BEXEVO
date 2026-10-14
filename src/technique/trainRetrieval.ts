@@ -31,7 +31,9 @@ import {
 } from "../train/trainShotDisplay";
 import { buildShotHypothesis, selectShotLabel } from "./shotHypothesis";
 import {
+  declaredShotConstraints,
   filterTrainNeighborsForRetrieval,
+  type RetrievalCandidateFilter,
   type TrainNeighborCandidate,
 } from "./trainRetrievalHygiene";
 export { buildShotHypothesis } from "./shotHypothesis";
@@ -224,10 +226,7 @@ export async function replaceTrainSampleEmbeddings(
   }
 }
 
-export type RetrievalCandidateFilter = {
-  strokePreset?: string | null;
-  category?: string | null;
-};
+export { declaredShotConstraints, type RetrievalCandidateFilter };
 
 async function queryFilteredTrainCandidates(
   queryVector: number[],
@@ -270,6 +269,7 @@ async function queryFilteredTrainCandidates(
       AND ($5::text IS NULL OR ts.id != $5)
       AND ($6::text IS NULL OR tv."strokePreset"::text = $6)
       AND ($7::text IS NULL OR tv.category::text = $7)
+      AND ($8::text IS NULL OR tv."skillLevel"::text = $8)
     ORDER BY tse.embedding <=> $1::vector
     LIMIT $3`,
     [
@@ -280,6 +280,7 @@ async function queryFilteredTrainCandidates(
       excludeTrainSampleId ?? null,
       constraint?.strokePreset?.trim() || null,
       constraint?.category?.trim() || null,
+      constraint?.skillLevel?.trim() || null,
     ]
   );
 
@@ -661,26 +662,18 @@ export async function retrieveForTechniqueMetrics(
   try {
     // Redundancy: if a channel is empty (no library rows / low conf), the other still answers.
     const declared = readUserDeclaredShot(metricsRecord);
-    const preset = declared?.strokePreset ?? null;
-    const declaredCategory = declared?.category ?? null;
-    let constraint: RetrievalCandidateFilter | undefined = preset
-      ? { strokePreset: preset }
-      : declaredCategory
-        ? { category: declaredCategory }
-        : undefined;
-    let run = await runEnsembleRetrieval(poseQuery, meshQuery, k, undefined, constraint);
-    if (declared && preset && run.neighbors.length === 0 && declaredCategory) {
-      console.log(
-        "[TrainRetrieval] no clips for declared stroke preset; falling back to category",
-        { strokePreset: preset, category: declaredCategory }
-      );
-      constraint = { category: declaredCategory };
+    const constraints = declaredShotConstraints(declared);
+    let run = await runEnsembleRetrieval(poseQuery, meshQuery, k, undefined, constraints[0]);
+    for (const constraint of constraints.slice(1)) {
+      if (run.neighbors.length > 0) break;
+      console.log("[TrainRetrieval] no pro clips for constraint; relaxing", constraint);
       run = await runEnsembleRetrieval(poseQuery, meshQuery, k, undefined, constraint);
     }
     if (declared && run.neighbors.length === 0) {
       console.log("[TrainRetrieval] no pro clips for declared shot", {
-        strokePreset: preset,
-        category: declaredCategory,
+        category: declared.category,
+        strokePreset: declared.strokePreset,
+        skillLevel: declared.skillLevel,
       });
     }
     const { poseHasNeighbors, meshHasNeighbors } = run;

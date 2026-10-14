@@ -63,3 +63,37 @@ export function filterTrainNeighborsForRetrieval(
 ): TrainNeighborCandidate[] {
   return rows.filter((r) => !isExcludedTrainNeighbor(r));
 }
+
+export type RetrievalCandidateFilter = {
+  strokePreset?: string | null;
+  category?: string | null;
+  skillLevel?: string | null;
+};
+
+/**
+ * Filters to try for a declared shot, strictest first: category + stroke preset + skill level,
+ * then without skill level (the library is mostly `advanced`), then preset alone, then category.
+ */
+export function declaredShotConstraints(declared: {
+  category?: string | null;
+  strokePreset?: string | null;
+  skillLevel?: string | null;
+} | null): RetrievalCandidateFilter[] {
+  const category = declared?.category?.trim() || null;
+  const strokePreset = declared?.strokePreset?.trim() || null;
+  const skillLevel = declared?.skillLevel?.trim() || null;
+  const steps: RetrievalCandidateFilter[] = [
+    { category, strokePreset, skillLevel },
+    { category, strokePreset },
+    { strokePreset },
+    { category },
+  ];
+  const seen = new Set<string>();
+  return steps.filter((c) => {
+    if (!c.category && !c.strokePreset) return false;
+    const key = JSON.stringify([c.category ?? null, c.strokePreset ?? null, c.skillLevel ?? null]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
