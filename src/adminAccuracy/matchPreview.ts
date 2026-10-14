@@ -2,6 +2,7 @@ import { db, techniqueAnalysis, techniqueVideo } from "../db";
 import { eq } from "drizzle-orm";
 import { poseDataForOverlayFetch } from "../technique/poseOverlay";
 import { getTrainSamplePoseSequence } from "../technique/trainRetrieval";
+import { explainScore, type ScoreExplanation } from "./scoreExplanation";
 
 export type BenchMatchPreviewClip = {
   label: string;
@@ -20,6 +21,8 @@ export type BenchMatchPreview = {
     stroke_label: string;
     distance: number | null;
   }) | null;
+  /** How the displayed technique score was built; null when the analysis has no score. */
+  scoreExplanation: ScoreExplanation | null;
 };
 
 function absolutePublicUrl(pathOrUrl: string): string {
@@ -139,9 +142,11 @@ export async function getBenchMatchPreview(analysisId: string): Promise<BenchMat
       video_duration_ms: durationMs,
     },
     match: null,
+    scoreExplanation: null,
   };
 
   const neighbor = resolveTopNeighbor(metrics);
+  preview.scoreExplanation = explainScore(metrics, neighbor);
   if (!neighbor) return preview;
 
   let trainVideoId = neighbor.trainVideoId;

@@ -290,7 +290,7 @@ export function computeDynamicScoreDisplayBoost(
   }
 }
 
-function pillarDisplayBoostAmount(pillarScore: number, baseBoost: number): number {
+export function pillarDisplayBoostAmount(pillarScore: number, baseBoost: number): number {
   const b = Math.round(baseBoost)
   if (b <= 0) return 0
   return Math.round(b * (0.88 + 0.12 * (pillarScore / 100)))
