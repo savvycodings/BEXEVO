@@ -25,3 +25,14 @@ test("declaredShotConstraints drops duplicate and empty steps", () => {
   assert.deepEqual(declaredShotConstraints({ skillLevel: "advanced" }), []);
   assert.deepEqual(declaredShotConstraints(null), []);
 });
+
+test("declaredShotConstraints maps the app's display skill label to the enum", () => {
+  assert.deepEqual(
+    declaredShotConstraints({ category: "overhead", strokePreset: "bandeja", skillLevel: "Advanced" })[0],
+    { category: "overhead", strokePreset: "bandeja", skillLevel: "advanced" }
+  );
+  assert.deepEqual(
+    declaredShotConstraints({ category: "overhead", strokePreset: "bandeja", skillLevel: "—" })[0],
+    { category: "overhead", strokePreset: "bandeja", skillLevel: null }
+  );
+});

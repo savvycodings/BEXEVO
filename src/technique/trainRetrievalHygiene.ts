@@ -70,6 +70,8 @@ export type RetrievalCandidateFilter = {
   skillLevel?: string | null;
 };
 
+const TRAIN_SKILL_LEVELS = new Set(["beginner", "intermediate", "advanced"]);
+
 /**
  * Filters to try for a declared shot, strictest first: category + stroke preset + skill level,
  * then without skill level (the library is mostly `advanced`), then preset alone, then category.
@@ -81,7 +83,9 @@ export function declaredShotConstraints(declared: {
 } | null): RetrievalCandidateFilter[] {
   const category = declared?.category?.trim() || null;
   const strokePreset = declared?.strokePreset?.trim() || null;
-  const skillLevel = declared?.skillLevel?.trim() || null;
+  // The app sends the display label ("Advanced"); train_video stores the lowercase enum.
+  const rawSkill = declared?.skillLevel?.trim().toLowerCase() ?? "";
+  const skillLevel = TRAIN_SKILL_LEVELS.has(rawSkill) ? rawSkill : null;
   const steps: RetrievalCandidateFilter[] = [
     { category, strokePreset, skillLevel },
     { category, strokePreset },
