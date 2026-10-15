@@ -15,6 +15,8 @@
  *   k14soft      base, full skeleton for steps 0-14, soft (hand-less, blurred) skeleton for 14-20
  *   k10soft      base, full skeleton for the high-noise steps only, soft skeleton after
  *   k10none      base, full skeleton for the high-noise steps only, no control after
+ *   softall      base, but every step sees the soft skeleton (no hand points, light blur)
+ *   softprompt   base, prompt says "guided by" the skeleton instead of "accurately following"
  * `base` pins the full skeleton on every step whatever CORRECTION_FUN_CONTROL_END is set to.
  * --base-pro runs `base` against --pro instead of the analysis's own nearest pro.
  * --skeletons writes the user's own and the full-pro skeletons next to the control clip and
@@ -80,12 +82,30 @@ import {
   getTrainSamplePoseSequence,
 } from "../src/technique/trainRetrieval";
 
-type Variant = "base" | "nooutline" | "outline" | "plan" | "old" | "k14soft" | "k10soft" | "k10none";
+type Variant =
+  | "base"
+  | "nooutline"
+  | "outline"
+  | "plan"
+  | "old"
+  | "k14soft"
+  | "k10soft"
+  | "k10none"
+  | "softall"
+  | "softprompt";
+
+/**
+ * Blur for `softall`. Lighter than the tail's `CORRECTION_FUN_SOFT_BLUR` because this clip also
+ * lays out the motion in the high-noise steps.
+ */
+const SOFT_ALL_BLUR = 1.5;
 
 /** Skeleton hand-off per variant: fraction of steps on the full skeleton, and the tail. */
 const HANDOFF: Partial<Record<Variant, { end: number; tail: "soft" | "none" }>> = {
   base: { end: 1, tail: "soft" },
   nooutline: { end: 1, tail: "soft" },
+  softall: { end: 1, tail: "soft" },
+  softprompt: { end: 1, tail: "soft" },
   k14soft: { end: 0.7, tail: "soft" },
   k10soft: { end: 0.5, tail: "soft" },
   k10none: { end: 0.5, tail: "none" },
@@ -380,7 +400,10 @@ async function main() {
     });
 
     const handoff = HANDOFF[variant];
-    const racketDraw = { outline: variant === "base" || !handoff };
+    const racketDraw = {
+      outline: variant === "base" || variant === "softall" || variant === "softprompt" || !handoff,
+    };
+    const softAll = variant === "softall";
     const overlays = controlOverlaysForWindow({
       userFrameIndices,
       poseRows: yoloRows,
@@ -393,10 +416,11 @@ async function main() {
       contactFrame: userImpactFrame,
     });
     const poseVideoBuffer = await renderOpenPoseMp4({
-      landmarkFrames: control,
+      landmarkFrames: softAll ? softControlLandmarks(control) : control,
       overlays,
       width: canvas.width,
       height: canvas.height,
+      blurSigma: softAll ? SOFT_ALL_BLUR : undefined,
       racketDraw,
     });
     fs.writeFileSync(path.join(outDir, `${name}-control.mp4`), poseVideoBuffer);
@@ -482,6 +506,7 @@ async function main() {
       width: canvas.width,
       height: canvas.height,
       coaching,
+      poseGuidance: variant === "softprompt" ? "loose" : "strict",
     });
     fs.writeFileSync(path.join(outDir, `${name}-corrected.mp4`), video);
     console.log(`[${name}] done in ${Math.round((Date.now() - t0) / 1000)}s -> ${outDir}`);

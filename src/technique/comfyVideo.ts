@@ -330,13 +330,27 @@ function ballContinuitySentence(frame: "start" | "reference", shot: string): str
   );
 }
 
-export function buildWanFunControlPrompt(shotName: string, handedness: string): string {
+/**
+ * How hard the prompt tells the model to obey the skeleton. `strict` asks for exact copying;
+ * `loose` lets its sense of natural movement override small skeleton errors.
+ */
+export type PoseGuidance = "strict" | "loose";
+
+export function buildWanFunControlPrompt(
+  shotName: string,
+  handedness: string,
+  poseGuidance: PoseGuidance = "strict"
+): string {
   const shot = shotName.trim() || "padel shot";
   const hand =
     handedness.trim() && handedness !== "unknown" ? handedness.trim() : "right-handed";
+  const follow =
+    poseGuidance === "loose"
+      ? "guided by the pose skeleton, with natural padel movement"
+      : "accurately following the provided pose skeleton";
   return (
     `Photorealistic professional padel tennis action. The exact same player from the start frame, with identical face, body proportions, hairstyle, clothing, shoes, accessories, court environment, lighting, shadows, and camera perspective. ` +
-    `The player is ${hand} and performs a realistic ${shot}, accurately following the provided pose skeleton. Natural biomechanics, correct body rotation, believable weight transfer, realistic arm and wrist position, and anatomically correct hands. ` +
+    `The player is ${hand} and performs a realistic ${shot}, ${follow}. Natural biomechanics, correct body rotation, believable weight transfer, realistic arm and wrist position, and anatomically correct hands. ` +
     `Camera remains completely locked: no camera movement, zoom, reframing, perspective change, or lens change. ` +
     ballContinuitySentence("start", shot) +
     `Maintain strict temporal consistency and photorealism throughout.`
@@ -491,6 +505,7 @@ export async function generatePoseRetargetVideoComfy(opts: {
   height?: number;
   /** Coaching text; falls back to the generic shot prompt when empty. */
   coaching?: CoachingVideoContext | null;
+  poseGuidance?: PoseGuidance;
 }): Promise<Buffer> {
   if (!isComfyFunControlConfigured()) {
     throw new Error("COMFYUI_BASE_URL and COMFYUI_FUN_CONTROL_WORKFLOW_PATH are required");
@@ -540,7 +555,7 @@ export async function generatePoseRetargetVideoComfy(opts: {
   // token lattice on good bf16 weights. Pose already carries the correction; keep CLIP text
   // on the short generic shot prompt. See docs/texture-investigation/coaching-prompt-lattice.md.
   const hadCoachingContext = hasCoachingVideoContext(opts.coaching);
-  positive.inputs.text = buildWanFunControlPrompt(opts.shotName, opts.handedness);
+  positive.inputs.text = buildWanFunControlPrompt(opts.shotName, opts.handedness, opts.poseGuidance);
   const negative = workflow[FUN_NEGATIVE_NODE_ID];
   if (negative?.inputs) {
     negative.inputs.text = buildWanFunControlNegativePrompt();
@@ -651,6 +666,7 @@ export async function generatePoseRetargetVideoComfy(opts: {
         ? "fp8"
         : "bf16",
       prompt: "generic",
+      poseGuidance: opts.poseGuidance ?? "strict",
       coachingContextSkipped: hadCoachingContext,
       timeoutMs,
     });
