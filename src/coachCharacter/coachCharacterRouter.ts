@@ -9,13 +9,12 @@
  *
  * Env:
  * - XEVO_TTS_BASE_URL     EN voice Studio OpenAI base (default http://127.0.0.1:8889/v1)
- * - XEVO_TTS_ES_BASE_URL  ES voice Studio OpenAI base (default http://127.0.0.1:8890/v1)
- * - XEVO_TTS_API_KEY      voice Studio key (falls back to XEVO_LLM_API_KEY)
+ * - XEVO_TTS_ES_BASE_URL  ES Chatterbox OpenAI base (default http://127.0.0.1:8890/v1)
+ * - XEVO_TTS_API_KEY      voice Studio key (falls back to XEVO_LLM_API_KEY; unused by Chatterbox)
  * - XEVO_TTS_MODEL        EN Orpheus id (default vinhnx90/VT-Orpheus-3B-TTS-Ceylia-Q4KM-GGUFF)
  * - XEVO_TTS_VOICE        EN Orpheus voice (default ceylia)
- * - XEVO_TTS_ES_MODEL     ES/IT Orpheus id (default freddyaboulton/3b-es_it-ft-research_release-Q4_K_M-GGUF)
- * - XEVO_TTS_ES_VOICE     ES Orpheus voice (default maria)
- * - XEVO_TTS_ES_VARIANT   GGUF variant for ES load (default Q4_K_M)
+ * - XEVO_TTS_ES_MODEL     ES Chatterbox id (default ResembleAI/chatterbox)
+ * - XEVO_TTS_ES_VOICE     ES voice label (default chatterbox-es)
  *
  * Mounted ahead of the global 100kb JSON parser because dictation audio is larger.
  */
@@ -65,7 +64,7 @@ type TtsTarget = {
   locale: CoachLocale;
 };
 
-/** English Ceylia on :8889; Spanish Maria on :8890 (separate Studio so both stay hot). */
+/** English Ceylia on :8889 (Orpheus); Spanish Chatterbox on :8890. */
 function ttsTarget(locale: CoachLocale): TtsTarget {
   if (locale === "es") {
     return {
@@ -73,11 +72,9 @@ function ttsTarget(locale: CoachLocale): TtsTarget {
       baseUrl: trimBase(
         String(process.env.XEVO_TTS_ES_BASE_URL ?? "").trim() || "http://127.0.0.1:8890/v1"
       ),
-      model:
-        String(process.env.XEVO_TTS_ES_MODEL ?? "").trim() ||
-        "freddyaboulton/3b-es_it-ft-research_release-Q4_K_M-GGUF",
-      voice: String(process.env.XEVO_TTS_ES_VOICE ?? "").trim() || "maria",
-      variant: String(process.env.XEVO_TTS_ES_VARIANT ?? "").trim() || "Q4_K_M",
+      model: String(process.env.XEVO_TTS_ES_MODEL ?? "").trim() || "ResembleAI/chatterbox",
+      voice: String(process.env.XEVO_TTS_ES_VOICE ?? "").trim() || "chatterbox-es",
+      variant: "",
     };
   }
   return {
