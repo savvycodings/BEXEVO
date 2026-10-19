@@ -406,7 +406,7 @@ export function probeVideoDimensions(
 }
 
 /**
- * Below this on the short side, the AI correction pipeline has too little detail to work
- * with: the render upscales the frame and the model invents texture rather than preserving it.
+ * Hard floor on the short side (720p). Below this we refuse the upload and do not render
+ * correction video — the pipeline only invents soft texture from upscaled frames.
  */
 export const MIN_RECOMMENDED_SHORT_SIDE = 720;

@@ -781,9 +781,7 @@ router.post('/upload', upload.single('video'), async (req, res) => {
     console.log('[Technique] Writing video to disk...', { filePath })
     await fs.promises.writeFile(filePath, req.file.buffer)
 
-    // Resolution caps everything downstream: the correction render upscales this frame, so a
-    // small upload can only ever produce invented texture. Surface it instead of silently
-    // generating a soft clip.
+    // Hard 720p floor: refuse low-res clips before they enter analysis / render.
     const dims = await probeVideoDimensions(filePath).catch(() => null)
     const shortSide = dims ? Math.min(dims.width, dims.height) : null
     const lowResolution = shortSide != null && shortSide < MIN_RECOMMENDED_SHORT_SIDE
@@ -792,8 +790,18 @@ router.post('/upload', upload.single('video'), async (req, res) => {
       dimensions: dims ? `${dims.width}x${dims.height}` : 'unknown',
       shortSide,
       lowResolution,
-      minRecommended: MIN_RECOMMENDED_SHORT_SIDE,
+      minRequired: MIN_RECOMMENDED_SHORT_SIDE,
     })
+    if (lowResolution) {
+      await fs.promises.unlink(filePath).catch(() => {})
+      return res.status(400).json({
+        error: 'Please use a video of at least 720p.',
+        code: 'LOW_RESOLUTION',
+        shortSide,
+        minRecommendedShortSide: MIN_RECOMMENDED_SHORT_SIDE,
+        ...(dims ? { width: dims.width, height: dims.height } : {}),
+      })
+    }
 
     const publicPath = `/technique/video/${id}`
 
@@ -846,7 +854,7 @@ router.post('/upload', upload.single('video'), async (req, res) => {
       publicId: filePath,
       coachReviewCreated,
       ...(dims ? { width: dims.width, height: dims.height } : {}),
-      lowResolution,
+      lowResolution: false,
       minRecommendedShortSide: MIN_RECOMMENDED_SHORT_SIDE,
     }
     console.log('[Technique] Sending success response')
@@ -3900,6 +3908,20 @@ async function runCorrectionVideoJob({
         videoPath,
       })
       throw new CorrectionVideoJobError(404, 'Video file missing from disk')
+    }
+
+    const sourceDims = await probeVideoDimensions(videoPath).catch(() => null)
+    const sourceShortSide = sourceDims
+      ? Math.min(sourceDims.width, sourceDims.height)
+      : null
+    if (sourceShortSide != null && sourceShortSide < MIN_RECOMMENDED_SHORT_SIDE) {
+      console.warn('[Technique][correction-videos] source below 720p', {
+        analysisId,
+        dimensions: sourceDims ? `${sourceDims.width}x${sourceDims.height}` : 'unknown',
+        shortSide: sourceShortSide,
+        minRequired: MIN_RECOMMENDED_SHORT_SIDE,
+      })
+      throw new CorrectionVideoJobError(400, 'Please use a video of at least 720p.')
     }
 
     const shotName = resolveCanonicalShotFromMetrics(metrics).shotName
