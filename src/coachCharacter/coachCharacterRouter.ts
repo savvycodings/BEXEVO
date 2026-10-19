@@ -4,14 +4,18 @@
  *
  * - POST /context     { message, analysisId?, locale? } -> CoachContext (facts shown as the thinking trace)
  * - POST /chat        { messages, analysisId?, locale? } -> { reply }  (Qwen via xevoChatCompletion)
- * - POST /speech      { text }                  -> { audioBase64, mimeType }  (voice Studio)
+ * - POST /speech      { text, locale? }         -> { audioBase64, mimeType }  (voice Studio)
  * - POST /transcribe  { audioBase64, language? } -> { text }       (main Studio STT sidecar)
  *
  * Env:
- * - XEVO_TTS_BASE_URL  voice Studio OpenAI base (default http://127.0.0.1:8889/v1)
- * - XEVO_TTS_API_KEY   voice Studio key (falls back to XEVO_LLM_API_KEY)
- * - XEVO_TTS_MODEL     loaded TTS model id (default vinhnx90/VT-Orpheus-3B-TTS-Ceylia-Q4KM-GGUFF)
- * - XEVO_TTS_VOICE     Orpheus voice (default ceylia)
+ * - XEVO_TTS_BASE_URL     EN voice Studio OpenAI base (default http://127.0.0.1:8889/v1)
+ * - XEVO_TTS_ES_BASE_URL  ES voice Studio OpenAI base (default http://127.0.0.1:8890/v1)
+ * - XEVO_TTS_API_KEY      voice Studio key (falls back to XEVO_LLM_API_KEY)
+ * - XEVO_TTS_MODEL        EN Orpheus id (default vinhnx90/VT-Orpheus-3B-TTS-Ceylia-Q4KM-GGUFF)
+ * - XEVO_TTS_VOICE        EN Orpheus voice (default ceylia)
+ * - XEVO_TTS_ES_MODEL     ES/IT Orpheus id (default freddyaboulton/3b-es_it-ft-research_release-Q4_K_M-GGUF)
+ * - XEVO_TTS_ES_VOICE     ES Orpheus voice (default maria)
+ * - XEVO_TTS_ES_VARIANT   GGUF variant for ES load (default Q4_K_M)
  *
  * Mounted ahead of the global 100kb JSON parser because dictation audio is larger.
  */
@@ -46,10 +50,6 @@ function trimBase(raw: string): string {
   return raw.replace(/\/+$/, "");
 }
 
-function ttsBaseUrl(): string {
-  return trimBase(String(process.env.XEVO_TTS_BASE_URL ?? "").trim() || "http://127.0.0.1:8889/v1");
-}
-
 function ttsApiKey(): string {
   return (
     String(process.env.XEVO_TTS_API_KEY ?? "").trim() ||
@@ -57,15 +57,38 @@ function ttsApiKey(): string {
   );
 }
 
-function ttsModel(): string {
-  return (
-    String(process.env.XEVO_TTS_MODEL ?? "").trim() ||
-    "vinhnx90/VT-Orpheus-3B-TTS-Ceylia-Q4KM-GGUFF"
-  );
-}
+type TtsTarget = {
+  baseUrl: string;
+  model: string;
+  voice: string;
+  variant: string;
+  locale: CoachLocale;
+};
 
-function ttsVoice(): string {
-  return String(process.env.XEVO_TTS_VOICE ?? "").trim() || "ceylia";
+/** English Ceylia on :8889; Spanish Maria on :8890 (separate Studio so both stay hot). */
+function ttsTarget(locale: CoachLocale): TtsTarget {
+  if (locale === "es") {
+    return {
+      locale,
+      baseUrl: trimBase(
+        String(process.env.XEVO_TTS_ES_BASE_URL ?? "").trim() || "http://127.0.0.1:8890/v1"
+      ),
+      model:
+        String(process.env.XEVO_TTS_ES_MODEL ?? "").trim() ||
+        "freddyaboulton/3b-es_it-ft-research_release-Q4_K_M-GGUF",
+      voice: String(process.env.XEVO_TTS_ES_VOICE ?? "").trim() || "maria",
+      variant: String(process.env.XEVO_TTS_ES_VARIANT ?? "").trim() || "Q4_K_M",
+    };
+  }
+  return {
+    locale,
+    baseUrl: trimBase(String(process.env.XEVO_TTS_BASE_URL ?? "").trim() || "http://127.0.0.1:8889/v1"),
+    model:
+      String(process.env.XEVO_TTS_MODEL ?? "").trim() ||
+      "vinhnx90/VT-Orpheus-3B-TTS-Ceylia-Q4KM-GGUFF",
+    voice: String(process.env.XEVO_TTS_VOICE ?? "").trim() || "ceylia",
+    variant: String(process.env.XEVO_TTS_VARIANT ?? "").trim() || "Q4_K_M",
+  };
 }
 
 /** Studio root (no /v1) for the main instance, used by the STT sidecar route. */
@@ -200,8 +223,10 @@ router.post("/speech", async (req, res) => {
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
   const input = speechText(typeof req.body?.text === "string" ? req.body.text : "");
   if (!input) return res.status(400).json({ error: "text is required" });
+  const locale = readLocale(req.body?.locale);
+  const target = ttsTarget(locale);
 
-  const url = `${ttsBaseUrl()}/audio/speech`;
+  const url = `${target.baseUrl}/audio/speech`;
   const key = ttsApiKey();
   try {
     const r = await undiciFetch(url, {
@@ -210,19 +235,34 @@ router.post("/speech", async (req, res) => {
         "Content-Type": "application/json",
         ...(key ? { Authorization: `Bearer ${key}` } : {}),
       }),
-      body: JSON.stringify({ input, model: ttsModel(), voice: ttsVoice(), response_format: "wav" }),
+      body: JSON.stringify({
+        input,
+        model: target.model,
+        voice: target.voice,
+        response_format: "wav",
+      }),
       dispatcher: new Agent({ headersTimeout: 90_000, bodyTimeout: 90_000, connectTimeout: 5_000 }),
     });
     if (!r.ok) {
       const detail = (await r.text()).slice(0, 200);
-      console.warn("[CoachCharacter] speech HTTP error", { status: r.status, detail });
+      console.warn("[CoachCharacter] speech HTTP error", {
+        status: r.status,
+        detail,
+        locale: target.locale,
+        model: target.model,
+        voice: target.voice,
+      });
       return res.status(503).json({ error: "Voice is offline" });
     }
     const buf = Buffer.from(await r.arrayBuffer());
     const mimeType = r.headers.get("content-type")?.split(";")[0]?.trim() || "audio/wav";
-    return res.json({ audioBase64: buf.toString("base64"), mimeType });
+    return res.json({ audioBase64: buf.toString("base64"), mimeType, locale: target.locale, voice: target.voice });
   } catch (e) {
-    console.warn("[CoachCharacter] speech unavailable", e instanceof Error ? e.message : e);
+    console.warn("[CoachCharacter] speech unavailable", {
+      locale: target.locale,
+      model: target.model,
+      err: e instanceof Error ? e.message : e,
+    });
     return res.status(503).json({ error: "Voice is offline" });
   }
 });
