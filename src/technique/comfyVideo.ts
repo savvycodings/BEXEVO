@@ -6,6 +6,7 @@ import {
   comfyUploadVideo,
   comfyViewToBuffer,
   comfyWaitForOutputMedia,
+  withComfyVideoModelSession,
 } from "./comfyClient";
 import {
   CORRECTION_CANVAS_SIZE,
@@ -130,10 +131,11 @@ export async function generateCorrectedVideoComfy(opts: {
   ksampler.inputs.steps = 8;
 
   const latent = workflow[LATENT_NODE_ID];
-  if (!latent?.inputs) throw new Error("WAN workflow missing Wan22ImageToVideoLatent node 55");
-  latent.inputs.width = 832;
-  latent.inputs.height = 480;
-  latent.inputs.length = 17;
+  const latentInputs = latent?.inputs;
+  if (!latentInputs) throw new Error("WAN workflow missing Wan22ImageToVideoLatent node 55");
+  latentInputs.width = 832;
+  latentInputs.height = 480;
+  latentInputs.length = 17;
 
   const save = workflow[SAVE_VIDEO_NODE_ID];
   if (!save?.inputs) throw new Error("WAN workflow missing SaveVideo node 58");
@@ -146,55 +148,57 @@ export async function generateCorrectedVideoComfy(opts: {
   if (negative?.inputs) negative.inputs.text = buildWanFunControlNegativePrompt();
 
   const startName = `xevo_wan_start_${prefixId}_${opts.frameNumber}.png`;
-  try {
-    const uploaded = await comfyUploadImage(baseUrl, opts.imageBuffer, startName);
-    const loadName = uploaded.subfolder
-      ? `${uploaded.subfolder.replace(/\/+$/, "")}/${uploaded.name}`
-      : uploaded.name;
+  return withComfyVideoModelSession(baseUrl, async () => {
+    try {
+      const uploaded = await comfyUploadImage(baseUrl, opts.imageBuffer, startName);
+      const loadName = uploaded.subfolder
+        ? `${uploaded.subfolder.replace(/\/+$/, "")}/${uploaded.name}`
+        : uploaded.name;
 
-    workflow[LOAD_IMAGE_NODE_ID] = {
-      class_type: "LoadImage",
-      inputs: { image: loadName },
-    };
-    latent.inputs.start_image = [LOAD_IMAGE_NODE_ID, 0];
+      workflow[LOAD_IMAGE_NODE_ID] = {
+        class_type: "LoadImage",
+        inputs: { image: loadName },
+      };
+      latentInputs.start_image = [LOAD_IMAGE_NODE_ID, 0];
 
-    console.log("[comfyVideo] TI2V queue", {
-      analysisId: opts.analysisId,
-      comfyHost: comfyBaseHost(),
-      workflow: path.basename(workflowPath),
-      startImage: loadName,
-      timeoutMs,
-    });
+      console.log("[comfyVideo] TI2V queue", {
+        analysisId: opts.analysisId,
+        comfyHost: comfyBaseHost(),
+        workflow: path.basename(workflowPath),
+        startImage: loadName,
+        timeoutMs,
+      });
 
-    const queued = await comfyQueuePrompt(baseUrl, workflow);
-    console.log("[comfyVideo] TI2V queued", {
-      analysisId: opts.analysisId,
-      promptId: queued.prompt_id,
-    });
-    const media = await comfyWaitForOutputMedia(baseUrl, queued.prompt_id, { timeoutMs });
-    const viewed = await comfyViewToBuffer(baseUrl, media.filename, media.subfolder, media.type);
-    if (!viewed.buffer.length) {
-      throw new Error("ComfyUI /view returned an empty video");
+      const queued = await comfyQueuePrompt(baseUrl, workflow);
+      console.log("[comfyVideo] TI2V queued", {
+        analysisId: opts.analysisId,
+        promptId: queued.prompt_id,
+      });
+      const media = await comfyWaitForOutputMedia(baseUrl, queued.prompt_id, { timeoutMs });
+      const viewed = await comfyViewToBuffer(baseUrl, media.filename, media.subfolder, media.type);
+      if (!viewed.buffer.length) {
+        throw new Error("ComfyUI /view returned an empty video");
+      }
+      console.log("[comfyVideo] TI2V done", {
+        analysisId: opts.analysisId,
+        promptId: queued.prompt_id,
+        filename: media.filename,
+        bytes: viewed.buffer.length,
+        elapsedMs: Date.now() - t0,
+      });
+      return viewed.buffer;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[comfyVideo] TI2V failed", {
+        analysisId: opts.analysisId,
+        comfyHost: comfyBaseHost(),
+        workflow: path.basename(workflowPath),
+        message: msg,
+        elapsedMs: Date.now() - t0,
+      });
+      throw e;
     }
-    console.log("[comfyVideo] TI2V done", {
-      analysisId: opts.analysisId,
-      promptId: queued.prompt_id,
-      filename: media.filename,
-      bytes: viewed.buffer.length,
-      elapsedMs: Date.now() - t0,
-    });
-    return viewed.buffer;
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error("[comfyVideo] TI2V failed", {
-      analysisId: opts.analysisId,
-      comfyHost: comfyBaseHost(),
-      workflow: path.basename(workflowPath),
-      message: msg,
-      elapsedMs: Date.now() - t0,
-    });
-    throw e;
-  }
+  });
 }
 
 const FUN_LOAD_IMAGE_NODE_ID = "145";
@@ -671,24 +675,26 @@ export async function generatePoseRetargetVideoComfy(opts: {
       timeoutMs,
     });
 
-    const queued = await comfyQueuePrompt(baseUrl, workflow);
-    console.log("[comfyVideo] Fun Control queued", {
-      analysisId: opts.analysisId,
-      promptId: queued.prompt_id,
+    return withComfyVideoModelSession(baseUrl, async () => {
+      const queued = await comfyQueuePrompt(baseUrl, workflow);
+      console.log("[comfyVideo] Fun Control queued", {
+        analysisId: opts.analysisId,
+        promptId: queued.prompt_id,
+      });
+      const media = await comfyWaitForOutputMedia(baseUrl, queued.prompt_id, { timeoutMs });
+      const viewed = await comfyViewToBuffer(baseUrl, media.filename, media.subfolder, media.type);
+      if (!viewed.buffer.length) {
+        throw new Error("ComfyUI /view returned an empty Fun Control video");
+      }
+      console.log("[comfyVideo] Fun Control done", {
+        analysisId: opts.analysisId,
+        promptId: queued.prompt_id,
+        filename: media.filename,
+        bytes: viewed.buffer.length,
+        elapsedMs: Date.now() - t0,
+      });
+      return viewed.buffer;
     });
-    const media = await comfyWaitForOutputMedia(baseUrl, queued.prompt_id, { timeoutMs });
-    const viewed = await comfyViewToBuffer(baseUrl, media.filename, media.subfolder, media.type);
-    if (!viewed.buffer.length) {
-      throw new Error("ComfyUI /view returned an empty Fun Control video");
-    }
-    console.log("[comfyVideo] Fun Control done", {
-      analysisId: opts.analysisId,
-      promptId: queued.prompt_id,
-      filename: media.filename,
-      bytes: viewed.buffer.length,
-      elapsedMs: Date.now() - t0,
-    });
-    return viewed.buffer;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[comfyVideo] Fun Control failed", {

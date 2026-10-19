@@ -361,3 +361,115 @@ export async function comfyImageToDataUri(
   const ct = res.headers.get("content-type") || "image/png";
   return `data:${ct};base64,${buf.toString("base64")}`;
 }
+
+/** True when Comfy has nothing running or queued. */
+export async function comfyIsQueueIdle(baseUrl: string): Promise<boolean> {
+  const base = trimBaseUrl(baseUrl);
+  const queueUrl = `${base}/queue`;
+  try {
+    const res = await fetch(queueUrl, { headers: withNgrokHeaders(queueUrl) });
+    if (!res.ok) return false;
+    const data = (await res.json()) as {
+      queue_running?: unknown[];
+      queue_pending?: unknown[];
+    };
+    return (data.queue_running?.length ?? 0) === 0 && (data.queue_pending?.length ?? 0) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ask ComfyUI to unload resident models and soft-empty CUDA cache.
+ * The worker applies this on the next queue wake (`/free` notifies it).
+ */
+export async function comfyUnloadModels(
+  baseUrl: string,
+  options?: { freeMemory?: boolean }
+): Promise<void> {
+  const base = trimBaseUrl(baseUrl);
+  const freeUrl = `${base}/free`;
+  const res = await fetch(freeUrl, {
+    method: "POST",
+    headers: withNgrokHeaders(freeUrl, { "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      unload_models: true,
+      free_memory: options?.freeMemory !== false,
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`ComfyUI /free failed ${res.status}: ${t.slice(0, 200)}`);
+  }
+}
+
+/**
+ * Unload only when the Comfy queue is idle so we do not yank weights from another job.
+ */
+export async function comfyUnloadModelsIfIdle(
+  baseUrl: string,
+  options?: { freeMemory?: boolean; label?: string }
+): Promise<boolean> {
+  const idle = await comfyIsQueueIdle(baseUrl);
+  if (!idle) {
+    console.log("[comfyClient] skip unload — queue busy", {
+      label: options?.label ?? "unload",
+    });
+    return false;
+  }
+  await comfyUnloadModels(baseUrl, options);
+  // Let the prompt worker apply unload_models / free_memory flags.
+  await new Promise((r) => setTimeout(r, 300));
+  return true;
+}
+
+/** In-process count of video generations so concurrent jobs share one load/unload cycle. */
+let activeComfyVideoJobs = 0;
+
+/**
+ * Run a Comfy video job: purge stale weights if we are the only job, then unload after the
+ * last concurrent job finishes. Models load on the workflow itself (first use).
+ */
+export async function withComfyVideoModelSession<T>(
+  baseUrl: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const unloadEnabled =
+    String(process.env.COMFYUI_UNLOAD_AFTER_VIDEO ?? "true")
+      .trim()
+      .toLowerCase() !== "false";
+
+  activeComfyVideoJobs += 1;
+  const alone = activeComfyVideoJobs === 1;
+  try {
+    if (unloadEnabled && alone) {
+      try {
+        const purged = await comfyUnloadModelsIfIdle(baseUrl, { label: "pre-video" });
+        if (purged) {
+          console.log("[comfyClient] pre-video purge done — models will load on this run");
+        }
+      } catch (e) {
+        console.warn(
+          "[comfyClient] pre-video purge failed",
+          e instanceof Error ? e.message : e
+        );
+      }
+    }
+    return await run();
+  } finally {
+    activeComfyVideoJobs = Math.max(0, activeComfyVideoJobs - 1);
+    if (unloadEnabled && activeComfyVideoJobs === 0) {
+      try {
+        const unloaded = await comfyUnloadModelsIfIdle(baseUrl, { label: "post-video" });
+        if (unloaded) {
+          console.log("[comfyClient] post-video unload done");
+        }
+      } catch (e) {
+        console.warn(
+          "[comfyClient] post-video unload failed",
+          e instanceof Error ? e.message : e
+        );
+      }
+    }
+  }
+}
