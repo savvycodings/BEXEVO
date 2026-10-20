@@ -31,6 +31,7 @@ import {
 } from "./coachContext";
 import { readChatContent, xevoChatCompletion, type ChatMessage } from "../lib/xevoLlm";
 import { withNgrokHeaders } from "../lib/ngrokFetch";
+import { applyPronunciation } from "./pronunciation";
 
 const router = express.Router();
 router.use(express.json({ limit: "15mb" }));
@@ -230,9 +231,10 @@ router.post("/context", async (req, res) => {
 router.post("/speech", async (req, res) => {
   const userId = await resolveUserId(req);
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
-  const input = speechText(typeof req.body?.text === "string" ? req.body.text : "");
-  if (!input) return res.status(400).json({ error: "text is required" });
+  const raw = typeof req.body?.text === "string" ? req.body.text : "";
   const locale = readLocale(req.body?.locale);
+  const input = speechText(applyPronunciation(raw, locale));
+  if (!input) return res.status(400).json({ error: "text is required" });
   const target = ttsTarget(locale);
 
   const url = `${target.baseUrl}/audio/speech`;
