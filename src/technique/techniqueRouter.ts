@@ -1161,11 +1161,23 @@ router.get('/activities', async (req, res) => {
         metrics && typeof metrics === 'object' ? metrics : null
       )
       const review = reviewByVideoId.get(a.techniqueVideoId)
+      const video = videoMap.get(a.techniqueVideoId)
+      const rawVideoUrl = video?.secureUrl || video?.cloudinaryUrl || null
+      const thumbnailUrl =
+        rawVideoUrl && rawVideoUrl.includes('/upload/')
+          ? rawVideoUrl
+              .replace('/upload/', '/upload/so_0,f_jpg/')
+              .replace(/\.[a-zA-Z0-9]+($|\?)/, '.jpg$1')
+          : null
+      const durationMs =
+        typeof metrics?.video_duration_ms === 'number' ? metrics.video_duration_ms : null
       return {
         analysisId: a.id,
         techniqueVideoId: a.techniqueVideoId,
         status: a.status,
         createdAt: a.createdAt.toISOString(),
+        thumbnailUrl,
+        durationMs,
         feedbackSnippet:
           a.feedbackText && a.feedbackText.length > 0
             ? a.feedbackText.length > 200
