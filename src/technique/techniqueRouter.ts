@@ -90,6 +90,15 @@ import {
   parseCachedCorrectionVideo,
   persistCorrectionVideo,
 } from './correctionVideoStorage'
+import {
+  generateHologram,
+  HologramError,
+  isHologramConfigured,
+  parseCachedHologram,
+  readHologramJob,
+  resolveHologramMoment,
+  type HologramJob,
+} from './hologram'
 import { runChat, chatContent } from '../lib/chatProvider'
 import {
   llmContentHasJsonObject,
@@ -709,6 +718,14 @@ async function ensureGuestUser(): Promise<string | null> {
     })
     return retry?.id ?? null
   }
+}
+
+/**
+ * Whole-metrics writes go through this so a hologram that finished while they were running
+ * (POST /hologram starts before the analysis completes) is kept from the row, not the stale copy.
+ */
+function keepHologramKeys(next: unknown) {
+  return sql`${JSON.stringify(next)}::jsonb || jsonb_strip_nulls(jsonb_build_object('hologram', ${techniqueAnalysis.metrics}->'hologram', 'hologram_job', ${techniqueAnalysis.metrics}->'hologram_job'))`
 }
 
 async function resolveUserId(req: express.Request): Promise<string | null> {
@@ -2076,7 +2093,7 @@ Rules:
         .update(techniqueAnalysis)
         .set({
           status: aiAnalysis ? 'completed' : 'failed',
-          metrics: metricsForDb as any,
+          metrics: keepHologramKeys(metricsForDb),
           feedbackText,
         })
         .where(eq(techniqueAnalysis.id, analysisId))
@@ -3561,7 +3578,7 @@ router.post('/correction-images', async (req, res) => {
       }
       await db
         .update(techniqueAnalysis)
-        .set({ metrics: updatedMetrics as any })
+        .set({ metrics: keepHologramKeys(updatedMetrics) })
         .where(eq(techniqueAnalysis.id, analysisId))
 
       if (corrections.length > 0 && responseCorrections.length > 0) {
@@ -4487,7 +4504,7 @@ async function runCorrectionVideoJob({
     await db
       .update(techniqueAnalysis)
       .set({
-        metrics: {
+        metrics: keepHologramKeys({
           ...latestMetrics,
           // Veo writes corrected-veo.mp4; keep prior Fun Control cache URL for A/B when present.
           correction_videos_comfy:
@@ -4499,7 +4516,7 @@ async function runCorrectionVideoJob({
               : persisted,
           correction_context_videos_comfy: context,
           ...(pipeline === 'veo-i2v' ? { correction_videos_veo: persisted } : {}),
-        } as any,
+        }),
       })
       .where(eq(techniqueAnalysis.id, analysisId))
 
@@ -4687,6 +4704,122 @@ router.post('/correction-test-frames', async (req, res) => {
   } catch (e: any) {
     console.error('[Technique] correction-test-frames error:', e)
     return res.status(500).json({ error: 'Failed to extract test frames' })
+  }
+})
+
+/** Merges only the hologram keys so the analysis pipeline's own metrics writes are kept. */
+async function writeHologramState(analysisId: string, patch: { hologram_job: HologramJob; hologram?: unknown }) {
+  await db
+    .update(techniqueAnalysis)
+    .set({
+      metrics: sql`coalesce(${techniqueAnalysis.metrics}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb`,
+    })
+    .where(eq(techniqueAnalysis.id, analysisId))
+}
+
+function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>) {
+  const cached = parseCachedHologram(metrics.hologram)
+  const job = readHologramJob(metrics)
+  const status =
+    job?.status === 'running' ? 'running' : cached ? 'done' : job?.status === 'failed' ? 'failed' : 'idle'
+  return {
+    analysisId,
+    status,
+    startedAt: job?.startedAt ?? null,
+    error: status === 'failed' ? (job?.error ?? null) : null,
+    image: cached?.image ?? null,
+    frameImage: cached?.frameImage ?? null,
+    contactMs: cached?.contactMs ?? null,
+    frame: cached?.frame ?? null,
+  }
+}
+
+/** Hologram of the player at ball contact; poll after POST /hologram. */
+router.get('/analysis/:id/hologram', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' })
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) => and(_eq(ta.id, req.params.id), _eq(ta.userId, userId)),
+    })
+    if (!analysis) return res.status(404).json({ error: 'Analysis not found' })
+    return res.json(hologramStatusBody(analysis.id, (analysis.metrics ?? {}) as Record<string, unknown>))
+  } catch (e: any) {
+    console.error('[Technique][hologram] fetch error', e)
+    return res.status(500).json({ error: 'Failed to fetch hologram' })
+  }
+})
+
+/**
+ * Starts the hologram for the frame where the ball meets the racket. Called as soon as the user
+ * marks contact, so it does not wait for the analysis; without `contactMs` it falls back to the
+ * stored contact or the analysis' resolved impact frame. Returns 202 and runs detached.
+ */
+router.post('/hologram', async (req, res) => {
+  const routeT0 = Date.now()
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' })
+    if (!isHologramConfigured()) {
+      return res.status(503).json({ error: 'Hologram generation is not configured (COMFYUI_BASE_URL, or HOLOGRAM_PROVIDER=openai with OPENAI_API_KEY).' })
+    }
+    const { analysisId, contactMs, forceRegenerate } = req.body as {
+      analysisId?: string
+      contactMs?: number
+      forceRegenerate?: boolean
+    }
+    if (!analysisId) return res.status(400).json({ error: 'Missing analysisId' })
+
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) => and(_eq(ta.id, analysisId), _eq(ta.userId, userId)),
+    })
+    if (!analysis) return res.status(404).json({ error: 'Analysis not found' })
+
+    const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
+    const cached = parseCachedHologram(metrics.hologram)
+    const sameMoment =
+      contactMs == null || (cached?.contactMs != null && Math.abs(cached.contactMs - Math.round(contactMs)) < 1)
+    if (cached && forceRegenerate !== true && sameMoment) {
+      return res.json(hologramStatusBody(analysisId, metrics))
+    }
+    const existingJob = readHologramJob(metrics)
+    if (existingJob?.status === 'running') {
+      return res.status(202).json({ ...hologramStatusBody(analysisId, metrics), status: 'running' })
+    }
+
+    const moment = resolveHologramMoment(metrics, contactMs)
+    if (!moment) {
+      return res.status(400).json({ error: 'No ball contact marked for this shot yet' })
+    }
+    const video = await db.query.techniqueVideo.findFirst({
+      where: (tv, { eq: _eq }) => _eq(tv.id, analysis.techniqueVideoId),
+    })
+    if (!video) return res.status(404).json({ error: 'Video not found' })
+    const videoPath = resolveVideoPath(video.cloudinaryPublicId)
+
+    const startedAt = new Date().toISOString()
+    await writeHologramState(analysisId, { hologram_job: { status: 'running', startedAt } })
+    res.status(202).json({ ...hologramStatusBody(analysisId, metrics), status: 'running', startedAt, error: null })
+
+    console.log('[Technique][hologram] start', { analysisId, moment })
+    void generateHologram({ analysisId, videoPath, moment })
+      .then((result) => {
+        console.log('[Technique][hologram] done', { analysisId, image: result.image, elapsedMs: Date.now() - routeT0 })
+        return writeHologramState(analysisId, {
+          hologram: result,
+          hologram_job: { status: 'done', startedAt, finishedAt: new Date().toISOString() },
+        })
+      })
+      .catch(async (e: any) => {
+        const message = e instanceof HologramError ? e.message : 'Failed to generate the hologram'
+        console.error('[Technique][hologram] error', { analysisId, message: e?.message, elapsedMs: Date.now() - routeT0 })
+        await writeHologramState(analysisId, {
+          hologram_job: { status: 'failed', startedAt, finishedAt: new Date().toISOString(), error: message },
+        }).catch((writeErr) => console.error('[Technique][hologram] failed to record job failure', writeErr))
+      })
+  } catch (e: any) {
+    console.error('[Technique][hologram] error', { message: e?.message, elapsedMs: Date.now() - routeT0 })
+    if (!res.headersSent) return res.status(500).json({ error: 'Failed to start hologram' })
   }
 })
 
