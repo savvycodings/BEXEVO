@@ -12,14 +12,21 @@ import { comfyQueuePrompt, comfyUploadImage, comfyViewToBuffer, comfyWaitForOutp
  */
 export const HOLOGRAM_PROMPT =
   'Turn the padel player into a 3D hologram: translucent electric-blue body made of a fine wireframe mesh with ' +
-  'glowing joint nodes, cyan edge light, a glowing racket and a glowing yellow-green ball. Keep the exact pose, ' +
+  'glowing joint nodes, cyan edge light and a glowing racket. Keep the exact pose, ' +
   'body proportions, camera angle and framing of the photo. The hologram has no face: a smooth, featureless head. ' +
-  'No reflections. Remove the court fence, the glass walls and the net; keep only the blue court floor with its ' +
-  'white lines, against a dark navy background. Nothing in front of the player.'
+  'No reflections. Remove the court fence, the glass walls and the net. The player stands on a blue padel court ' +
+  'floor with glowing white lines, always visible, against a dark navy background. Nothing in front of the player. ' +
+  'This is the moment of contact: exactly one small glowing yellow-green ball, touching the face of the racket. ' +
+  'No other ball anywhere.'
+
+/** Qwen invents extra balls, glowing orbs and a floorless void without this. */
+export const HOLOGRAM_NEGATIVE_PROMPT =
+  'two balls, second ball, extra ball, multiple balls, duplicate ball, ball on the floor, floating orbs, ' +
+  'glowing spheres near the head, empty background without a court floor'
 
 const DEFAULT_COMFY_WORKFLOW = 'workflows/qwen_image_edit_2511_hologram.api.json'
-/** Node ids in the hologram workflow: frame LoadImage, positive prompt, sampler. */
-const COMFY_NODES = { frame: '10', prompt: '20', sampler: '50' }
+/** Node ids in the hologram workflow: frame LoadImage, positive and negative prompt, sampler. */
+const COMFY_NODES = { frame: '10', prompt: '20', negative: '21', sampler: '50' }
 const HOLOGRAM_UPLOAD_ROOT = path.join(process.cwd(), 'uploads', 'technique-holograms')
 
 /** Square crop centre used for the approved run; the player sits a little below centre in portrait clips. */
@@ -139,6 +146,7 @@ async function comfyImageEdit(prompt: string, frame: Buffer): Promise<Buffer> {
   const imageRef = (u: { name: string; subfolder: string }) => (u.subfolder ? `${u.subfolder}/${u.name}` : u.name)
   workflow[COMFY_NODES.frame].inputs.image = imageRef(frameUp)
   workflow[COMFY_NODES.prompt].inputs.prompt = prompt
+  workflow[COMFY_NODES.negative].inputs.prompt = HOLOGRAM_NEGATIVE_PROMPT
   workflow[COMFY_NODES.sampler].inputs.seed = Math.floor(Math.random() * 2 ** 48)
 
   const t0 = Date.now()
