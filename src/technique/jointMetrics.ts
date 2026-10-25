@@ -47,6 +47,12 @@ export const JOINT_TOLERANCE_DEG: Record<ContactJoint, number> = {
 
 const VIS_MIN = 0.5;
 
+/** Pro angle ± tolerance, kept inside 0..180. */
+function idealRange(joint: ContactJoint, pro: number): { idealMin: number; idealMax: number } {
+  const tol = JOINT_TOLERANCE_DEG[joint];
+  return { idealMin: Math.max(0, pro - tol), idealMax: Math.min(180, pro + tol) };
+}
+
 function usable(p: LandmarkPt | undefined): p is LandmarkPt {
   if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return false;
   return typeof p.visibility !== "number" || p.visibility >= VIS_MIN;
@@ -122,8 +128,7 @@ export function buildJointReading(joint: ContactJoint, you: number | null, pro: 
     return {
       you,
       pro,
-      idealMin: pro == null ? null : pro - tol,
-      idealMax: pro == null ? null : pro + tol,
+      ...(pro == null ? { idealMin: null, idealMax: null } : idealRange(joint, pro)),
       deltaDeg: null,
       status: null,
       direction: null,
@@ -137,8 +142,7 @@ export function buildJointReading(joint: ContactJoint, you: number | null, pro: 
   return {
     you,
     pro,
-    idealMin: pro - tol,
-    idealMax: pro + tol,
+    ...idealRange(joint, pro),
     deltaDeg: delta,
     status,
     direction,

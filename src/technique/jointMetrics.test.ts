@@ -51,6 +51,13 @@ test("within tolerance is a match; past twice the tolerance is bad", () => {
   assert.equal(buildJointReading("shoulder", 140, 165).direction, "arm_lower");
 });
 
+test("the ideal range stays inside 0..180", () => {
+  const torso = buildJointReading("torso", 34, 3);
+  assert.equal(torso.idealMin, 0);
+  assert.equal(torso.idealMax, 9);
+  assert.equal(buildJointReading("wrist", 170, 175).idealMax, 180);
+});
+
 test("missing pro keeps the player's angle without a verdict", () => {
   const r = buildContactJointReadings(bentArm, null, "RIGHT").elbow;
   assert.equal(r.you, 90);
