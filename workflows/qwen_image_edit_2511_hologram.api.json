@@ -263,5 +263,17 @@
       ],
       "filename_prefix": "xevo_hologram"
     }
+  },
+  "90": {
+    "class_type": "PreviewAny",
+    "inputs": {
+      "source": [
+        "81",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Contact keypoints (read back by the server)"
+    }
   }
 }

@@ -3,6 +3,7 @@ import path from 'path'
 import { randomUUID } from 'crypto'
 import sharp from 'sharp'
 import { extractFrame, extractFrameByTimestamp } from './frameExtractor'
+import { withNgrokHeaders } from '../lib/ngrokFetch'
 import { comfyQueuePrompt, comfyUploadImage, comfyViewToBuffer, comfyWaitForOutputImage } from './comfyClient'
 
 /**
@@ -27,7 +28,7 @@ export const HOLOGRAM_NEGATIVE_PROMPT =
 const DEFAULT_COMFY_WORKFLOW = 'workflows/qwen_image_edit_2511_hologram.api.json'
 const DETECT_WORKFLOW = path.join(process.cwd(), 'workflows', 'sdpose_player_box.api.json')
 /** Node ids in the hologram workflow: frame LoadImage, positive and negative prompt, sampler. */
-const COMFY_NODES = { frame: '10', prompt: '20', negative: '21', sampler: '50' }
+const COMFY_NODES = { frame: '10', prompt: '20', negative: '21', sampler: '50', keypoints: '90' }
 const HOLOGRAM_UPLOAD_ROOT = path.join(process.cwd(), 'uploads', 'technique-holograms')
 
 /** Fallback crop centre when the player is not detected; the player sits a little below centre in portrait clips. */
@@ -38,11 +39,67 @@ const SIZE = 1024
 /** A render takes a minute or two; anything still "running" well past that died with the process. */
 export const HOLOGRAM_JOB_STALE_MS = 10 * 60_000
 
+/** Joint position on the hologram image, 0..1 from the top-left; `score` is SDPose confidence. */
+export type HologramKeypoint = { x: number; y: number; score: number }
+export type HologramKeypoints = Record<string, HologramKeypoint>
+
 export type HologramResult = {
   image: string
   frameImage: string
   contactMs: number | null
   frame: number | null
+  /** Contact skeleton from the render's SDPose pass; same framing as `image`. */
+  keypoints: HologramKeypoints | null
+}
+
+/** OpenPose COCO-18 body order, then the six foot points, as SDPose writes them. Sides are the player's own. */
+const BODY_KEYPOINTS = [
+  'nose', 'neck', 'right_shoulder', 'right_elbow', 'right_wrist', 'left_shoulder', 'left_elbow', 'left_wrist',
+  'right_hip', 'right_knee', 'right_ankle', 'left_hip', 'left_knee', 'left_ankle', 'right_eye', 'left_eye',
+  'right_ear', 'left_ear',
+]
+const FOOT_KEYPOINTS = ['left_big_toe', 'left_small_toe', 'left_heel', 'right_big_toe', 'right_small_toe', 'right_heel']
+const KEYPOINT_MIN_SCORE = 0.3
+
+/** SDPose POSE_KEYPOINT as PreviewAny prints it (OpenPose JSON) -> named, normalised joints of the first person. */
+export function parseSdposeKeypoints(text: string): HologramKeypoints | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  const frame = (Array.isArray(parsed) ? parsed[0] : parsed) as
+    | { canvas_width?: number; canvas_height?: number; people?: Array<Record<string, unknown>> }
+    | undefined
+  const person = frame?.people?.[0]
+  const w = frame?.canvas_width
+  const h = frame?.canvas_height
+  if (!person || !w || !h) return null
+  const out: HologramKeypoints = {}
+  const read = (flat: unknown, names: string[]) => {
+    if (!Array.isArray(flat)) return
+    names.forEach((name, i) => {
+      const [x, y, score] = [flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]].map(Number)
+      if (![x, y, score].every(Number.isFinite) || score < KEYPOINT_MIN_SCORE || (x === 0 && y === 0)) return
+      out[name] = { x: +(x / w).toFixed(4), y: +(y / h).toFixed(4), score: +score.toFixed(3) }
+    })
+  }
+  read(person.pose_keypoints_2d, BODY_KEYPOINTS)
+  read(person.foot_keypoints_2d, FOOT_KEYPOINTS)
+  return Object.keys(out).length ? out : null
+}
+
+function parseStoredKeypoints(raw: unknown): HologramKeypoints | null {
+  if (!raw || typeof raw !== 'object') return null
+  const out: HologramKeypoints = {}
+  for (const [name, v] of Object.entries(raw as Record<string, unknown>)) {
+    const p = v as Partial<HologramKeypoint> | null
+    if (p && [p.x, p.y, p.score].every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      out[name] = { x: p.x!, y: p.y!, score: p.score! }
+    }
+  }
+  return Object.keys(out).length ? out : null
 }
 
 export type HologramJob = {
@@ -98,7 +155,13 @@ export function parseCachedHologram(raw: unknown): HologramResult | null {
   const frameImage = typeof o.frameImage === 'string' ? o.frameImage.trim() : ''
   if (!image || !frameImage) return null
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null)
-  return { image, frameImage, contactMs: num(o.contactMs), frame: num(o.frame) }
+  return {
+    image,
+    frameImage,
+    contactMs: num(o.contactMs),
+    frame: num(o.frame),
+    keypoints: parseStoredKeypoints(o.keypoints),
+  }
 }
 
 /**
@@ -185,7 +248,10 @@ async function squareCrop(png: Buffer, box: PlayerBox | null): Promise<Buffer> {
     .toBuffer()
 }
 
-async function comfyImageEdit(prompt: string, frame: Buffer): Promise<Buffer> {
+async function comfyImageEdit(
+  prompt: string,
+  frame: Buffer
+): Promise<{ image: Buffer; keypoints: HologramKeypoints | null }> {
   const baseUrl = String(process.env.COMFYUI_BASE_URL ?? '').trim()
   if (!baseUrl) throw new HologramError(503, 'COMFYUI_BASE_URL is not set')
   const workflow = JSON.parse(fs.readFileSync(comfyWorkflowPath(), 'utf8')) as Record<
@@ -207,8 +273,26 @@ async function comfyImageEdit(prompt: string, frame: Buffer): Promise<Buffer> {
     pollMs: 1500,
   })
   const { buffer } = await comfyViewToBuffer(baseUrl, out.filename, out.subfolder, out.type)
-  console.log('[Technique][hologram] comfy done', { promptId: prompt_id, elapsedMs: Date.now() - t0 })
-  return buffer
+  const keypoints = await readComfyKeypoints(baseUrl, prompt_id)
+  console.log('[Technique][hologram] comfy done', {
+    promptId: prompt_id,
+    keypoints: keypoints ? Object.keys(keypoints).length : 0,
+    elapsedMs: Date.now() - t0,
+  })
+  return { image: buffer, keypoints }
+}
+
+/** The keypoints node's text lands in the run's history next to the image; missing is not fatal. */
+async function readComfyKeypoints(baseUrl: string, promptId: string): Promise<HologramKeypoints | null> {
+  try {
+    const url = `${baseUrl.replace(/\/+$/, '')}/history/${encodeURIComponent(promptId)}`
+    const history: any = await (await fetch(url, { headers: withNgrokHeaders(url) })).json()
+    const text = history?.[promptId]?.outputs?.[COMFY_NODES.keypoints]?.text?.[0]
+    return typeof text === 'string' ? parseSdposeKeypoints(text) : null
+  } catch (e: any) {
+    console.warn('[Technique][hologram] could not read keypoints', e?.message)
+    return null
+  }
 }
 
 async function gptImageEdit(prompt: string, images: { name: string; data: Buffer }[]): Promise<Buffer> {
@@ -262,9 +346,9 @@ export async function generateHologram(opts: {
     })
   }
   const frame = await squareCrop(raw, box)
-  const hologram =
+  const { image: hologram, keypoints } =
     hologramProvider() === 'openai'
-      ? await gptImageEdit(HOLOGRAM_PROMPT, [{ name: 'frame.png', data: frame }])
+      ? { image: await gptImageEdit(HOLOGRAM_PROMPT, [{ name: 'frame.png', data: frame }]), keypoints: null }
       : await comfyImageEdit(HOLOGRAM_PROMPT, frame)
 
   const dir = path.join(HOLOGRAM_UPLOAD_ROOT, opts.analysisId)
@@ -280,5 +364,6 @@ export async function generateHologram(opts: {
     frameImage: `/uploads/technique-holograms/${opts.analysisId}/${frameName}`,
     contactMs: 'contactMs' in opts.moment ? opts.moment.contactMs : null,
     frame: 'frame' in opts.moment ? opts.moment.frame : null,
+    keypoints,
   }
 }

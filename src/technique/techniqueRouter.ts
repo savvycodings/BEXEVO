@@ -91,6 +91,12 @@ import {
   persistCorrectionVideo,
 } from './correctionVideoStorage'
 import {
+  buildContactJointReadings,
+  nearestByFrame,
+  type JointSide,
+  type Landmarks as JointLandmarks,
+} from './jointMetrics'
+import {
   generateHologram,
   HologramError,
   isHologramConfigured,
@@ -2256,6 +2262,89 @@ router.get('/analysis/:id/pose-overlay', async (req, res) => {
   } catch (e: any) {
     console.error('[Technique] Pose-overlay fetch error:', e)
     return res.status(500).json({ error: 'Failed to fetch pose overlay' })
+  }
+})
+
+/**
+ * Smart 3D joint views: racket-side shoulder / elbow / wrist / torso / knee at ball contact, the
+ * player vs the top retrieval pro at the pro's own contact frame (time-aligned frame as fallback).
+ */
+router.get('/analysis/:id/joints', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' })
+    const analysis = await db.query.techniqueAnalysis.findFirst({
+      where: (ta, { and, eq: _eq }) => and(_eq(ta.id, req.params.id), _eq(ta.userId, userId)),
+    })
+    if (!analysis) return res.status(404).json({ error: 'Analysis not found' })
+
+    const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
+    const poseRows = Array.isArray(metrics.pose_data)
+      ? (metrics.pose_data as Array<{ frame: number; landmarks?: JointLandmarks }>).filter(
+          (r) => typeof r?.frame === 'number' && r.landmarks
+        )
+      : []
+    if (!poseRows.length) {
+      return res.status(409).json({ error: 'Pose data is not ready for this shot yet' })
+    }
+    const maxPoseFrame = Math.max(...poseRows.map((r) => r.frame))
+    const totalFrames =
+      typeof metrics.total_frames === 'number' && metrics.total_frames > 0 ? metrics.total_frames : maxPoseFrame + 1
+    const biomech = metrics.biomechanics_summary as { timing?: { impact_frame?: number | null } } | undefined
+    const impactFrame =
+      typeof metrics.impact_frame_resolved === 'number'
+        ? metrics.impact_frame_resolved
+        : typeof biomech?.timing?.impact_frame === 'number'
+          ? biomech.timing.impact_frame
+          : midClipFrameIndex(totalFrames)
+    const userRow = nearestByFrame(poseRows, impactFrame, (r) => r.frame)
+
+    const profileRow = await db.query.userProfile.findFirst({
+      where: (up, { eq: _eq }) => _eq(up.userId, userId),
+      columns: { dominantHand: true },
+    })
+    const side: JointSide =
+      profileTextToDominantHand(profileRow?.dominantHand ?? null) === 'left-handed' ? 'LEFT' : 'RIGHT'
+
+    const retrievalBlock = metrics.retrieval as
+      | { neighbors?: Array<{ train_sample_id: string; stroke_label?: string; stroke_name?: string }> }
+      | undefined
+    const topNeighbor = retrievalBlock?.neighbors?.[0]
+    let proLm: JointLandmarks | null = null
+    let proSource: { trainSampleId: string; strokeLabel: string | null; frame: number; contactAligned: boolean } | null =
+      null
+    if (topNeighbor?.train_sample_id) {
+      const seq = await getTrainSamplePoseSequence(topNeighbor.train_sample_id)
+      if (seq?.length) {
+        const meta = await getTrainSampleImpactMeta(topNeighbor.train_sample_id)
+        const proFrame =
+          meta?.impactFrame != null
+            ? nearestByFrame(seq, meta.impactFrame, (f) => f.frame_idx)
+            : pickAlignedProPoseFrame(userRow?.frame ?? impactFrame, totalFrames, seq)
+        if (proFrame?.landmarks) {
+          proLm = proFrame.landmarks
+          proSource = {
+            trainSampleId: topNeighbor.train_sample_id,
+            strokeLabel: topNeighbor.stroke_label?.trim() || topNeighbor.stroke_name?.trim() || null,
+            frame: proFrame.frame_idx,
+            contactAligned: meta?.impactFrame != null,
+          }
+        }
+      }
+    }
+
+    return res.json({
+      analysisId: analysis.id,
+      phase: 'contact',
+      shotLabel: resolveCanonicalShotFromMetrics(metrics).shotName ?? null,
+      side,
+      frame: userRow?.frame ?? impactFrame,
+      proSource,
+      joints: buildContactJointReadings(userRow?.landmarks ?? null, proLm, side),
+    })
+  } catch (e: any) {
+    console.error('[Technique][joints] error', e)
+    return res.status(500).json({ error: 'Failed to compute joint angles' })
   }
 })
 
@@ -4731,6 +4820,7 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
     frameImage: cached?.frameImage ?? null,
     contactMs: cached?.contactMs ?? null,
     frame: cached?.frame ?? null,
+    keypoints: cached?.keypoints ?? null,
   }
 }
 
