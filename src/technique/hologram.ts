@@ -25,11 +25,12 @@ export const HOLOGRAM_NEGATIVE_PROMPT =
   'glowing spheres near the head, empty background without a court floor'
 
 const DEFAULT_COMFY_WORKFLOW = 'workflows/qwen_image_edit_2511_hologram.api.json'
+const DETECT_WORKFLOW = path.join(process.cwd(), 'workflows', 'sdpose_player_box.api.json')
 /** Node ids in the hologram workflow: frame LoadImage, positive and negative prompt, sampler. */
 const COMFY_NODES = { frame: '10', prompt: '20', negative: '21', sampler: '50' }
 const HOLOGRAM_UPLOAD_ROOT = path.join(process.cwd(), 'uploads', 'technique-holograms')
 
-/** Square crop centre used for the approved run; the player sits a little below centre in portrait clips. */
+/** Fallback crop centre when the player is not detected; the player sits a little below centre in portrait clips. */
 const CROP_CX = 0.5
 const CROP_CY = 0.62
 const SIZE = 1024
@@ -115,20 +116,70 @@ export function resolveHologramMoment(
   return frame != null ? { frame } : null
 }
 
-/** Largest square around (CROP_CX, CROP_CY), scaled to 1024 like the script's ffmpeg crop. */
-async function squareCrop(png: Buffer): Promise<Buffer> {
+/** Player box as fractions of the frame: left/top/right/bottom in 0..1. */
+type PlayerBox = { x0: number; y0: number; x1: number; y1: number }
+
+/** Room around the skeleton for the ball and the feet. */
+const PLAYER_MARGIN = 0.2
+/** The skeleton stops at the wrist; the racket and ball reach about this much of its height above it. */
+const RACKET_HEADROOM = 0.3
+
+/**
+ * Finds the player with SDPose on the full frame. The drawn skeleton is the only non-black content
+ * of its image, so its pixel bounds are the player's box. Null when nothing is detected.
+ */
+async function detectPlayerBox(baseUrl: string, png: Buffer, id: string): Promise<PlayerBox | null> {
+  const workflow = JSON.parse(fs.readFileSync(DETECT_WORKFLOW, 'utf8')) as Record<string, { inputs: Record<string, unknown> }>
+  const up = await comfyUploadImage(baseUrl, png, `xevo_hologram_detect_${id}.png`)
+  workflow['1'].inputs.image = up.subfolder ? `${up.subfolder}/${up.name}` : up.name
+  const { prompt_id } = await comfyQueuePrompt(baseUrl, workflow)
+  const out = await comfyWaitForOutputImage(baseUrl, prompt_id, { timeoutMs: 180_000, pollMs: 1000 })
+  const { buffer } = await comfyViewToBuffer(baseUrl, out.filename, out.subfolder, out.type)
+
+  const { data, info } = await sharp(buffer).greyscale().raw().toBuffer({ resolveWithObject: true })
+  let x0 = info.width
+  let y0 = info.height
+  let x1 = -1
+  let y1 = -1
+  for (let y = 0; y < info.height; y++) {
+    for (let x = 0; x < info.width; x++) {
+      if (data[y * info.width + x] > 24) {
+        if (x < x0) x0 = x
+        if (x > x1) x1 = x
+        if (y < y0) y0 = y
+        if (y > y1) y1 = y
+      }
+    }
+  }
+  if (x1 < 0) return null
+  return { x0: x0 / info.width, y0: y0 / info.height, x1: (x1 + 1) / info.width, y1: (y1 + 1) / info.height }
+}
+
+/**
+ * Square around the player (box plus margin), clamped inside the frame; without a box, the largest
+ * square around (CROP_CX, CROP_CY) like the script's ffmpeg crop. Scaled to 1024.
+ */
+async function squareCrop(png: Buffer, box: PlayerBox | null): Promise<Buffer> {
   const meta = await sharp(png).metadata()
   const w = meta.width ?? 0
   const h = meta.height ?? 0
   if (!w || !h) throw new Error('Impact frame has no dimensions')
-  const side = Math.min(w, h)
+  const maxSide = Math.min(w, h)
+  let side = maxSide
+  let left = (w - side) * CROP_CX
+  let top = (h - side) * CROP_CY
+  if (box) {
+    box = { ...box, y0: Math.max(0, box.y0 - (box.y1 - box.y0) * RACKET_HEADROOM) }
+    const bw = (box.x1 - box.x0) * w
+    const bh = (box.y1 - box.y0) * h
+    side = Math.min(maxSide, Math.max(bw, bh) * (1 + PLAYER_MARGIN))
+    const cx = ((box.x0 + box.x1) / 2) * w
+    const cy = ((box.y0 + box.y1) / 2) * h
+    left = Math.min(Math.max(0, cx - side / 2), w - side)
+    top = Math.min(Math.max(0, cy - side / 2), h - side)
+  }
   return sharp(png)
-    .extract({
-      left: Math.round((w - side) * CROP_CX),
-      top: Math.round((h - side) * CROP_CY),
-      width: side,
-      height: side,
-    })
+    .extract({ left: Math.round(left), top: Math.round(top), width: Math.round(side), height: Math.round(side) })
     .resize(SIZE, SIZE)
     .png()
     .toBuffer()
@@ -201,7 +252,16 @@ export async function generateHologram(opts: {
       ? await extractFrameByTimestamp(opts.videoPath, opts.moment.contactMs / 1000)
       : await extractFrame(opts.videoPath, opts.moment.frame)
   if (!raw.length) throw new Error('Could not extract the impact frame')
-  const frame = await squareCrop(raw)
+  // Centre on the player when ComfyUI can find them; the fixed crop is the fallback.
+  let box: PlayerBox | null = null
+  const comfyBase = String(process.env.COMFYUI_BASE_URL ?? '').trim()
+  if (hologramProvider() === 'comfy' && comfyBase) {
+    box = await detectPlayerBox(comfyBase, raw, randomUUID()).catch((e) => {
+      console.warn('[Technique][hologram] player detection failed, using the fixed crop', e?.message)
+      return null
+    })
+  }
+  const frame = await squareCrop(raw, box)
   const hologram =
     hologramProvider() === 'openai'
       ? await gptImageEdit(HOLOGRAM_PROMPT, [{ name: 'frame.png', data: frame }])
