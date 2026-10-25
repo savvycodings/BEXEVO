@@ -98,12 +98,12 @@ import {
 } from './jointMetrics'
 import {
   generateHologram,
+  HOLOGRAM_PROMPT_RED,
   HologramError,
   isHologramConfigured,
   parseCachedHologram,
   readHologramJob,
   resolveHologramMoment,
-  type HologramJob,
 } from './hologram'
 import { runChat, chatContent } from '../lib/chatProvider'
 import {
@@ -1243,11 +1243,12 @@ router.post('/analyze', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { techniqueVideoId, clips, videoDurationMs, contactMs } = req.body as {
+    const { techniqueVideoId, clips, videoDurationMs, contactMs, contactFrame } = req.body as {
       techniqueVideoId?: string
       clips?: Array<{ startMs: number; endMs: number }>
       videoDurationMs?: number
       contactMs?: number
+      contactFrame?: number
     }
     if (!techniqueVideoId) {
       return res.status(400).json({ error: 'Missing techniqueVideoId' })
@@ -1443,6 +1444,16 @@ router.post('/analyze', async (req, res) => {
         metrics = { ...metrics, user_contact_ms: Math.round(contactMs) }
       } else if (contactMs != null) {
         console.warn('[Technique] Ignoring contactMs outside clip', { analysisId, contactMs, clip: firstClip })
+      }
+      if (typeof contactFrame === 'number' && Number.isFinite(contactFrame) && contactFrame >= 0) {
+        const total =
+          typeof metrics.total_frames === 'number' && metrics.total_frames > 0
+            ? metrics.total_frames
+            : contactFrame + 1
+        metrics = {
+          ...metrics,
+          user_contact_frame: Math.max(0, Math.min(Math.round(contactFrame), Math.max(0, total - 1))),
+        }
       }
     }
 
@@ -4797,7 +4808,7 @@ router.post('/correction-test-frames', async (req, res) => {
 })
 
 /** Merges only the hologram keys so the analysis pipeline's own metrics writes are kept. */
-async function writeHologramState(analysisId: string, patch: { hologram_job: HologramJob; hologram?: unknown }) {
+async function writeHologramState(analysisId: string, patch: Record<string, unknown>) {
   await db
     .update(techniqueAnalysis)
     .set({
@@ -4809,8 +4820,12 @@ async function writeHologramState(analysisId: string, patch: { hologram_job: Hol
 function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>) {
   const cached = parseCachedHologram(metrics.hologram)
   const job = readHologramJob(metrics)
+  const pro = parseCachedHologram(metrics.hologram_pro)
+  const proJob = readHologramJob({ hologram_job: metrics.hologram_pro_job })
   const status =
     job?.status === 'running' ? 'running' : cached ? 'done' : job?.status === 'failed' ? 'failed' : 'idle'
+  const proStatus =
+    proJob?.status === 'running' ? 'running' : pro ? 'done' : proJob?.status === 'failed' ? 'failed' : 'idle'
   return {
     analysisId,
     status,
@@ -4821,7 +4836,42 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
     contactMs: cached?.contactMs ?? null,
     frame: cached?.frame ?? null,
     keypoints: cached?.keypoints ?? null,
+    proStatus,
+    proImage: pro?.image ?? null,
+    proKeypoints: pro?.keypoints ?? null,
+    proError: proStatus === 'failed' ? (proJob?.error ?? null) : null,
   }
+}
+
+/** Pro-library clip matched to this shot, and a frame near contact to render in red. */
+async function resolveProHologramSource(
+  metrics: Record<string, unknown>
+): Promise<{ videoPath: string; frame: number } | null> {
+  const retrieval = metrics.retrieval as
+    | { neighbors?: Array<{ train_video_id?: string; train_sample_id?: string }> }
+    | undefined
+  const neighbor = retrieval?.neighbors?.[0]
+  if (!neighbor) return null
+  let videoId = typeof neighbor.train_video_id === 'string' ? neighbor.train_video_id : ''
+  let totalFrames: number | null = null
+  if (neighbor.train_sample_id) {
+    const sample = await db.query.trainSample.findFirst({
+      where: (ts, { eq: _eq }) => _eq(ts.id, neighbor.train_sample_id!),
+      columns: { trainVideoId: true, totalFrames: true },
+    })
+    if (!videoId && sample?.trainVideoId) videoId = sample.trainVideoId
+    if (typeof sample?.totalFrames === 'number' && sample.totalFrames > 0) totalFrames = sample.totalFrames
+  }
+  if (!videoId) return null
+  const video = await db.query.trainVideo.findFirst({
+    where: (tv, { eq: _eq }) => _eq(tv.id, videoId),
+    columns: { cloudinaryPublicId: true },
+  })
+  if (!video?.cloudinaryPublicId) return null
+  const videoPath = resolveVideoPath(video.cloudinaryPublicId)
+  if (!fs.existsSync(videoPath)) return null
+  const frame = totalFrames && totalFrames > 1 ? Math.min(totalFrames - 1, Math.round(totalFrames * 0.45)) : 0
+  return { videoPath, frame }
 }
 
 /** Hologram of the player at ball contact; poll after POST /hologram. */
@@ -4853,9 +4903,10 @@ router.post('/hologram', async (req, res) => {
     if (!isHologramConfigured()) {
       return res.status(503).json({ error: 'Hologram generation is not configured (COMFYUI_BASE_URL, or HOLOGRAM_PROVIDER=openai with OPENAI_API_KEY).' })
     }
-    const { analysisId, contactMs, forceRegenerate } = req.body as {
+    const { analysisId, contactMs, contactFrame, forceRegenerate } = req.body as {
       analysisId?: string
       contactMs?: number
+      contactFrame?: number
       forceRegenerate?: boolean
     }
     if (!analysisId) return res.status(400).json({ error: 'Missing analysisId' })
@@ -4866,9 +4917,53 @@ router.post('/hologram', async (req, res) => {
     if (!analysis) return res.status(404).json({ error: 'Analysis not found' })
 
     const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
+    const proCached = parseCachedHologram(metrics.hologram_pro)
+    const proJob = readHologramJob({ hologram_job: metrics.hologram_pro_job })
+    const proStartedAt = new Date().toISOString()
+    const proSource =
+      (forceRegenerate === true || !proCached) && proJob?.status !== 'running'
+        ? await resolveProHologramSource(metrics)
+        : null
+    if (proSource) {
+      await writeHologramState(analysisId, {
+        hologram_pro_job: { status: 'running', startedAt: proStartedAt },
+      })
+      metrics.hologram_pro_job = { status: 'running', startedAt: proStartedAt }
+      void generateHologram({
+        analysisId,
+        videoPath: proSource.videoPath,
+        moment: { frame: proSource.frame },
+        prompt: HOLOGRAM_PROMPT_RED,
+        fileStem: 'pro-hologram',
+      })
+        .then((result) => {
+          console.log('[Technique][hologram] pro done', { analysisId, image: result.image })
+          return writeHologramState(analysisId, {
+            hologram_pro: result,
+            hologram_pro_job: { status: 'done', startedAt: proStartedAt, finishedAt: new Date().toISOString() },
+          })
+        })
+        .catch(async (e: any) => {
+          console.error('[Technique][hologram] pro error', { analysisId, message: e?.message })
+          await writeHologramState(analysisId, {
+            hologram_pro_job: {
+              status: 'failed',
+              startedAt: proStartedAt,
+              finishedAt: new Date().toISOString(),
+              error: 'Failed to generate the pro hologram',
+            },
+          }).catch(() => {})
+        })
+    }
     const cached = parseCachedHologram(metrics.hologram)
+    const requestFrame =
+      typeof contactFrame === 'number' && Number.isFinite(contactFrame) ? Math.round(contactFrame) : null
+    const sameFrame = requestFrame == null || cached?.frame === requestFrame
     const sameMoment =
-      contactMs == null || (cached?.contactMs != null && Math.abs(cached.contactMs - Math.round(contactMs)) < 1)
+      sameFrame &&
+      (contactMs == null ||
+        requestFrame != null ||
+        (cached?.contactMs != null && Math.abs(cached.contactMs - Math.round(contactMs)) < 40))
     if (cached && forceRegenerate !== true && sameMoment) {
       return res.json(hologramStatusBody(analysisId, metrics))
     }
@@ -4877,7 +4972,7 @@ router.post('/hologram', async (req, res) => {
       return res.status(202).json({ ...hologramStatusBody(analysisId, metrics), status: 'running' })
     }
 
-    const moment = resolveHologramMoment(metrics, contactMs)
+    const moment = resolveHologramMoment(metrics, contactMs, contactFrame)
     if (!moment) {
       return res.status(400).json({ error: 'No ball contact marked for this shot yet' })
     }
@@ -4907,6 +5002,7 @@ router.post('/hologram', async (req, res) => {
           hologram_job: { status: 'failed', startedAt, finishedAt: new Date().toISOString(), error: message },
         }).catch((writeErr) => console.error('[Technique][hologram] failed to record job failure', writeErr))
       })
+
   } catch (e: any) {
     console.error('[Technique][hologram] error', { message: e?.message, elapsedMs: Date.now() - routeT0 })
     if (!res.headersSent) return res.status(500).json({ error: 'Failed to start hologram' })

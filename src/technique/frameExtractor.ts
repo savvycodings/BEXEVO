@@ -287,17 +287,20 @@ export async function extractFrame(
   );
 }
 
-/** Seek by time (seconds); more reliable than select=n on some train codecs. */
+/**
+ * Seek by time (seconds). `-ss` is after `-i` so ffmpeg decodes to that timestamp
+ * instead of snapping to the previous keyframe.
+ */
 export function extractFrameByTimestamp(
   videoPath: string,
   timeSec: number
 ): Promise<Buffer> {
   const t = Math.max(0, timeSec);
   return runFfmpegRawArgs([
-    "-ss",
-    String(t),
     "-i",
     videoPath,
+    "-ss",
+    String(t),
     "-frames:v",
     "1",
     "-f",

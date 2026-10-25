@@ -29,6 +29,8 @@ export type ResolveImpactFrameOpts = {
   clipPaddingFrames?: number;
   /** Ball contact the user marked in the app; wins over every detector. */
   userContactMs?: number;
+  /** Frame index the user tapped. Wins over the timestamp, which can land on a neighbour frame. */
+  userContactFrame?: number;
   /** Used to pick the contact run nearest the wrist speed peak. */
   poseData?: Array<{ frame: number; landmarks: FrameLandmarks }>;
 };
@@ -175,6 +177,12 @@ export function resolveImpactFrameIndex(
   const clipEndFrame = impactMsToFrameIndex(clip.endMs, fps);
   const clipSpanMs = clip.endMs - clip.startMs;
   const spanRatio = clipSpanMs / Math.max(1, videoDurationMs);
+
+  const userFrame = opts.userContactFrame;
+  if (typeof userFrame === "number" && Number.isFinite(userFrame)) {
+    const frame = Math.max(0, Math.min(Math.max(0, totalFrames - 1), Math.round(userFrame)));
+    return { impactFrameIndex: frame, impactMs: frameToMs(frame, fps), source: "user_marked" };
+  }
 
   const userMs = opts.userContactMs;
   if (typeof userMs === "number" && Number.isFinite(userMs) && userMs >= 0 && userMs <= videoDurationMs) {

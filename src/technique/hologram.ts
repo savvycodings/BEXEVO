@@ -20,6 +20,16 @@ export const HOLOGRAM_PROMPT =
   'This is the moment of contact: exactly one small glowing yellow-green ball, touching the face of the racket. ' +
   'No other ball anywhere.'
 
+/** Same hologram, drawn in red so it can sit on top of the player's blue one. */
+export const HOLOGRAM_PROMPT_RED =
+  'Turn the padel player into a 3D hologram: translucent crimson-red body made of a fine wireframe mesh with ' +
+  'glowing joint nodes, red edge light and a glowing racket. Keep the exact pose, ' +
+  'body proportions, camera angle and framing of the photo. The hologram has no face: a smooth, featureless head. ' +
+  'No reflections. Remove the court fence, the glass walls and the net. The player stands on a dark padel court ' +
+  'floor with glowing white lines, always visible, against a dark navy background. Nothing in front of the player. ' +
+  'This is the moment of contact: exactly one small glowing yellow-green ball, touching the face of the racket. ' +
+  'No other ball anywhere.'
+
 /** Qwen invents extra balls, glowing orbs and a floorless void without this. */
 export const HOLOGRAM_NEGATIVE_PROMPT =
   'two balls, second ball, extra ball, multiple balls, duplicate ball, ball on the floor, floating orbs, ' +
@@ -170,13 +180,17 @@ export function parseCachedHologram(raw: unknown): HologramResult | null {
  */
 export function resolveHologramMoment(
   metrics: Record<string, unknown>,
-  requestContactMs: unknown
+  requestContactMs: unknown,
+  requestContactFrame?: unknown
 ): { contactMs: number } | { frame: number } | null {
-  const ms = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : null)
-  const contactMs = ms(requestContactMs) ?? ms(metrics.user_contact_ms)
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : null)
+  // The tapped frame index is exact. A timestamp seek can land on a different picture.
+  const frame = n(requestContactFrame) ?? n(metrics.user_contact_frame)
+  if (frame != null) return { frame }
+  const contactMs = n(requestContactMs) ?? n(metrics.user_contact_ms)
   if (contactMs != null) return { contactMs }
-  const frame = ms(metrics.impact_frame_resolved)
-  return frame != null ? { frame } : null
+  const impact = n(metrics.impact_frame_resolved)
+  return impact != null ? { frame: impact } : null
 }
 
 /** Player box as fractions of the frame: left/top/right/bottom in 0..1. */
@@ -329,6 +343,10 @@ export async function generateHologram(opts: {
   analysisId: string
   videoPath: string
   moment: { contactMs: number } | { frame: number }
+  /** Defaults to the player's blue hologram. The pro reference uses the red prompt. */
+  prompt?: string
+  /** Filename stem so a second render does not replace the player's files. */
+  fileStem?: string
 }): Promise<HologramResult> {
   if (!fs.existsSync(opts.videoPath)) throw new HologramError(404, 'Video file missing on server')
   const raw =
@@ -346,17 +364,19 @@ export async function generateHologram(opts: {
     })
   }
   const frame = await squareCrop(raw, box)
+  const prompt = opts.prompt ?? HOLOGRAM_PROMPT
   const { image: hologram, keypoints } =
     hologramProvider() === 'openai'
-      ? { image: await gptImageEdit(HOLOGRAM_PROMPT, [{ name: 'frame.png', data: frame }]), keypoints: null }
-      : await comfyImageEdit(HOLOGRAM_PROMPT, frame)
+      ? { image: await gptImageEdit(prompt, [{ name: 'frame.png', data: frame }]), keypoints: null }
+      : await comfyImageEdit(prompt, frame)
 
   const dir = path.join(HOLOGRAM_UPLOAD_ROOT, opts.analysisId)
   fs.mkdirSync(dir, { recursive: true })
   // Timestamped names so a regenerated hologram is never served from a stale image cache.
   const stamp = Date.now()
-  const frameName = `impact-${stamp}.png`
-  const imageName = `hologram-${stamp}.png`
+  const stem = opts.fileStem ?? 'hologram'
+  const frameName = stem === 'hologram' ? `impact-${stamp}.png` : `${stem}-impact-${stamp}.png`
+  const imageName = `${stem}-${stamp}.png`
   fs.writeFileSync(path.join(dir, frameName), frame)
   fs.writeFileSync(path.join(dir, imageName), hologram)
   return {
