@@ -5,19 +5,21 @@ import sharp from 'sharp'
 import { extractFrame, extractFrameByTimestamp } from './frameExtractor'
 import { comfyQueuePrompt, comfyUploadImage, comfyViewToBuffer, comfyWaitForOutputImage } from './comfyClient'
 
-/** Same prompt as scripts/hologramVideo.ts step 3 (A_9_Cambio run). */
+/**
+ * The run.json hologram prompt with the look described in words. A style image in the prompt made
+ * both Qwen and GPT Image copy that image's pose instead of the player's, so only the frame goes in;
+ * on ComfyUI the contact pose is also pinned by SDPose + the Qwen Fun ControlNet in the workflow.
+ */
 export const HOLOGRAM_PROMPT =
-  'Image 1 is a frame from a padel video. Image 2 is the style reference. ' +
-  'Turn the player in image 1 into a 3D hologram in exactly the style of image 2: translucent electric-blue ' +
-  'body made of a fine wireframe mesh with glowing joint nodes, cyan edge light. Keep the exact pose, body ' +
-  'proportions, camera angle and framing of image 1, and keep the ball. The hologram has no face: a smooth, ' +
-  'featureless head. No reflections. Remove the court fence, the glass walls and the net; keep only the blue ' +
-  'court floor with its white lines, against a dark navy background. Nothing in front of the player.'
+  'Turn the padel player into a 3D hologram: translucent electric-blue body made of a fine wireframe mesh with ' +
+  'glowing joint nodes, cyan edge light, a glowing racket and a glowing yellow-green ball. Keep the exact pose, ' +
+  'body proportions, camera angle and framing of the photo. The hologram has no face: a smooth, featureless head. ' +
+  'No reflections. Remove the court fence, the glass walls and the net; keep only the blue court floor with its ' +
+  'white lines, against a dark navy background. Nothing in front of the player.'
 
-const STYLE_PATH = path.join(process.cwd(), 'assets', 'hologram', 'style.png')
 const DEFAULT_COMFY_WORKFLOW = 'workflows/qwen_image_edit_2511_hologram.api.json'
-/** Node ids in the hologram workflow: frame + style LoadImage, positive prompt, sampler. */
-const COMFY_NODES = { frame: '10', style: '11', prompt: '20', sampler: '50' }
+/** Node ids in the hologram workflow: frame LoadImage, positive prompt, sampler. */
+const COMFY_NODES = { frame: '10', prompt: '20', sampler: '50' }
 const HOLOGRAM_UPLOAD_ROOT = path.join(process.cwd(), 'uploads', 'technique-holograms')
 
 /** Square crop centre used for the approved run; the player sits a little below centre in portrait clips. */
@@ -59,7 +61,6 @@ function comfyWorkflowPath(): string {
 }
 
 export function isHologramConfigured(): boolean {
-  if (!fs.existsSync(STYLE_PATH)) return false
   if (hologramProvider() === 'openai') return Boolean(process.env.OPENAI_API_KEY?.trim())
   return Boolean(process.env.COMFYUI_BASE_URL?.trim()) && fs.existsSync(comfyWorkflowPath())
 }
@@ -126,7 +127,7 @@ async function squareCrop(png: Buffer): Promise<Buffer> {
     .toBuffer()
 }
 
-async function comfyImageEdit(prompt: string, frame: Buffer, style: Buffer): Promise<Buffer> {
+async function comfyImageEdit(prompt: string, frame: Buffer): Promise<Buffer> {
   const baseUrl = String(process.env.COMFYUI_BASE_URL ?? '').trim()
   if (!baseUrl) throw new HologramError(503, 'COMFYUI_BASE_URL is not set')
   const workflow = JSON.parse(fs.readFileSync(comfyWorkflowPath(), 'utf8')) as Record<
@@ -134,13 +135,9 @@ async function comfyImageEdit(prompt: string, frame: Buffer, style: Buffer): Pro
     { inputs: Record<string, unknown> }
   >
   const id = randomUUID()
-  const [frameUp, styleUp] = await Promise.all([
-    comfyUploadImage(baseUrl, frame, `xevo_hologram_frame_${id}.png`),
-    comfyUploadImage(baseUrl, style, 'xevo_hologram_style.png'),
-  ])
+  const frameUp = await comfyUploadImage(baseUrl, frame, `xevo_hologram_frame_${id}.png`)
   const imageRef = (u: { name: string; subfolder: string }) => (u.subfolder ? `${u.subfolder}/${u.name}` : u.name)
   workflow[COMFY_NODES.frame].inputs.image = imageRef(frameUp)
-  workflow[COMFY_NODES.style].inputs.image = imageRef(styleUp)
   workflow[COMFY_NODES.prompt].inputs.prompt = prompt
   workflow[COMFY_NODES.sampler].inputs.seed = Math.floor(Math.random() * 2 ** 48)
 
@@ -197,14 +194,10 @@ export async function generateHologram(opts: {
       : await extractFrame(opts.videoPath, opts.moment.frame)
   if (!raw.length) throw new Error('Could not extract the impact frame')
   const frame = await squareCrop(raw)
-  const style = fs.readFileSync(STYLE_PATH)
   const hologram =
     hologramProvider() === 'openai'
-      ? await gptImageEdit(HOLOGRAM_PROMPT, [
-          { name: 'frame.png', data: frame },
-          { name: 'style.png', data: style },
-        ])
-      : await comfyImageEdit(HOLOGRAM_PROMPT, frame, style)
+      ? await gptImageEdit(HOLOGRAM_PROMPT, [{ name: 'frame.png', data: frame }])
+      : await comfyImageEdit(HOLOGRAM_PROMPT, frame)
 
   const dir = path.join(HOLOGRAM_UPLOAD_ROOT, opts.analysisId)
   fs.mkdirSync(dir, { recursive: true })
