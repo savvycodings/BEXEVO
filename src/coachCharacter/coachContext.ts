@@ -1,4 +1,4 @@
-﻿import { and, desc, eq, gte } from "drizzle-orm";
+﻿import { and, desc, eq } from "drizzle-orm";
 import { db, techniqueAnalysis, techniqueVideo } from "../db";
 import type { TechniqueAnalysisMetrics } from "../db/schema";
 import {
@@ -29,6 +29,7 @@ import {
   type CoachHistoryFacts,
 } from "./coachHistory";
 import { enrichMeasuredMotionWithDerived } from "./coachMotionMath";
+import { planAnswer, type AnswerPlan, type CoachWindow } from "./coachAnswerPlan";
 
 export type CoachLocale = "en" | "es";
 export type { CoachHistoryFacts } from "./coachHistory";
@@ -44,8 +45,12 @@ export type CoachProReference = {
 
 export type CoachAnalysisFacts = {
   analysisId: string;
-  /** `selected`: the shot the player opened the coach from; `latest`: their most recent shot. */
-  source: "selected" | "latest" | "compare_current" | "compare_prior";
+  /**
+   * Why this clip was chosen.
+   * `selected` is the shot they opened. `latest` is the newest upload.
+   * Window picks and named shots must not be labeled as the latest upload.
+   */
+  source: "selected" | "latest" | "compare_current" | "compare_prior" | "best_in_window" | "worst_in_window" | "matching_shot";
   shotName: string | null;
   /** Server-relative (`/technique/video/:id`) or absolute URL of the submitted clip. */
   videoUrl: string | null;
@@ -86,6 +91,20 @@ export type CoachCompareFacts = {
   missing: "none" | "current" | "prior" | "both";
 };
 
+/** The clip and the score the question actually asked for. The trace follows this, not the newest upload. */
+export type CoachFocus = {
+  showVideo: boolean;
+  showScore: boolean;
+  showBreakdown: boolean;
+  showMotion: boolean;
+  windowLabel: string | null;
+  windowCount: number | null;
+  windowAverage: number | null;
+  windowBest: number | null;
+  theme: string | null;
+  analysis: CoachAnalysisFacts | null;
+};
+
 /** What the coach looked at before answering; rendered as the thinking trace in the app. */
 export type CoachContext = {
   kind: "analysis" | "day" | "compare" | "history" | "none";
@@ -93,6 +112,7 @@ export type CoachContext = {
   day: CoachDayFacts | null;
   compare: CoachCompareFacts | null;
   history: CoachHistoryFacts | null;
+  focus: CoachFocus | null;
 };
 
 const DAY_INTENT = /\b(today|todays|today's|day|daily|sessions?|hoy|d[ií]a|sesi[oó]n(es)?)\b/i;
@@ -102,7 +122,6 @@ const COMPARE_INTENT =
 /** Pairwise compare of two clips without a dated "X ago" (latest two matching / overall). */
 const PAIRWISE_LATEST_INTENT =
   /\b(which\s+of\s+these\s+two|these\s+two\s+shots?|which\s+(one|shot)\s+is\s+better|what\s+changed\s+between|between\s+these\s+(two\s+)?(videos?|shots?|clips?))\b/i;
-const MAX_DAY_SESSIONS = 8;
 const MAX_COMPARE_SCAN = 400;
 /** Accept a past bandeja within this many days of the requested date. */
 const PRIOR_SLACK_MS = 4 * 24 * 60 * 60 * 1000;
@@ -468,7 +487,7 @@ function shotMatchesQuery(metrics: TechniqueAnalysisMetrics | null | undefined, 
 }
 
 function emptyContext(): CoachContext {
-  return { kind: "none", analysis: null, day: null, compare: null, history: null };
+  return { kind: "none", analysis: null, day: null, compare: null, history: null, focus: null };
 }
 
 async function loadAnalysis(userId: string, analysisId: string | null): Promise<AnalysisRow | null> {
@@ -581,6 +600,7 @@ async function buildCompareContext(
     kind: "compare",
     analysis: current,
     day: null,
+    focus: null,
     compare: {
       shotQuery: shotQuery ?? current?.shotName ?? "shot",
       priorLabel,
@@ -666,6 +686,7 @@ async function buildHistoryContext(
     kind: "history",
     analysis: sessions[0] ?? null,
     day: null,
+    focus: null,
     compare: null,
     history: {
       intent,
@@ -678,88 +699,208 @@ async function buildHistoryContext(
   };
 }
 
+function rowScore(row: AnalysisRow): number | null {
+  const ai = (row.metrics as { ai_analysis?: { score?: unknown } } | null)?.ai_analysis;
+  return typeof ai?.score === "number" && Number.isFinite(ai.score) ? ai.score : null;
+}
+
+function rowTechnique(row: AnalysisRow): number | null {
+  const ai = (row.metrics as {
+    ai_analysis?: { technique_score?: unknown; breakdown?: { technique?: unknown } };
+  } | null)?.ai_analysis;
+  const raw = ai?.breakdown?.technique ?? ai?.technique_score;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+}
+
+function rowInWindow(row: AnalysisRow, window: CoachWindow): boolean {
+  const t = row.createdAt.getTime();
+  if (window.since && t < window.since.getTime()) return false;
+  if (window.until && t >= window.until.getTime()) return false;
+  return true;
+}
+
+function pickFeaturedRow(rows: AnalysisRow[], pick: AnswerPlan["pick"]): AnalysisRow | null {
+  if (!rows.length) return null;
+  if (pick === "latest") return rows[0] ?? null;
+  const value = pick === "best_technique" ? rowTechnique : rowScore;
+  let chosen = rows[0]!;
+  let best = value(chosen);
+  for (const row of rows) {
+    const v = value(row);
+    if (v == null) continue;
+    if (best == null || (pick === "worst_score" ? v < best : v > best)) {
+      chosen = row;
+      best = v;
+    }
+  }
+  return chosen;
+}
+
+function featuredSource(plan: AnswerPlan): CoachAnalysisFacts["source"] {
+  if (plan.pick === "best_score" || plan.pick === "best_technique") return "best_in_window";
+  if (plan.pick === "worst_score") return "worst_in_window";
+  if (plan.shotQuery) return "matching_shot";
+  return "latest";
+}
+
+function libraryIntent(plan: AnswerPlan, message: string): CoachHistoryFacts["intent"] {
+  if (plan.family === "pattern") return "consistency";
+  if (plan.family === "dialogue") return "goal";
+  if (plan.pick === "best_score" || plan.pick === "best_technique" || plan.pick === "worst_score") return "rank";
+  return detectHistoryIntent(message);
+}
+
+/** Library questions stay inside the asked window and shot. They never borrow a newer clip from outside it. */
+async function buildLibraryContext(
+  userId: string,
+  opts: { message: string; locale: CoachLocale },
+  plan: AnswerPlan
+): Promise<CoachContext> {
+  const window = plan.window!;
+  let rows = await loadRecentCompleted(userId, MAX_COMPARE_SCAN);
+  if (plan.shotQuery) rows = rows.filter((r) => historyShotMatches(r.metrics, plan.shotQuery!));
+  if (window.since || window.until) rows = rows.filter((r) => rowInWindow(r, window));
+  if (window.limit != null) rows = rows.slice(0, window.limit);
+
+  const scores = rows.map(rowScore).filter((s): s is number => s != null);
+  const average = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+  const best = scores.length ? Math.max(...scores) : null;
+  const featuredRow = pickFeaturedRow(rows, plan.pick);
+  const featured = featuredRow
+    ? await analysisFacts(featuredRow, opts.locale, featuredSource(plan), { includeProJoints: plan.includePro })
+    : null;
+
+  const sessions = await Promise.all(
+    rows.slice(0, 12).map(async (r) => toHistorySession(r, opts.locale, await analysisFacts(r, opts.locale, "latest")))
+  );
+  const notes = buildHistoryNotes(libraryIntent(plan, opts.message), sessions, plan.shotQuery, plan.theme, window.label);
+  if (average != null) {
+    notes.unshift(`${window.label}: ${rows.length} shots, average ${average}/100, best ${best}/100.`);
+  }
+  if (!rows.length) {
+    notes.unshift(
+      `No completed analyses in ${window.label}${plan.shotQuery ? ` for "${plan.shotQuery}"` : ""}. Do not substitute a clip from outside this range.`
+    );
+  } else if (featured && plan.showVideo) {
+    notes.unshift(
+      `Featured clip (${plan.pick.replace(/_/g, " ")}) in ${window.label}: ` +
+        `${featured.shotName ?? "shot"} on ${featured.createdAt.slice(0, 10)}` +
+        `${featured.score != null ? `, score ${featured.score}/100` : ""}. ` +
+        `This is not "their latest shot" unless that date is also the newest upload.`
+    );
+  }
+  if (!plan.showVideo) {
+    notes.unshift("No video is attached. Answer in spoken coaching from these notes. Do not pretend you are playing their latest clip.");
+  }
+
+  return {
+    kind: "history",
+    analysis: null,
+    day: null,
+    compare: null,
+    history: {
+      intent: libraryIntent(plan, opts.message),
+      windowLabel: window.label,
+      shotQuery: plan.shotQuery,
+      theme: plan.theme,
+      sessions,
+      notes,
+    },
+    focus: {
+      showVideo: plan.showVideo && !!featured?.videoUrl,
+      showScore: plan.showScore && featured?.score != null,
+      showBreakdown: plan.showBreakdown && !!featured,
+      showMotion: plan.showMotion && !!featured,
+      windowLabel: window.label,
+      windowCount: rows.length,
+      windowAverage: average,
+      windowBest: best,
+      theme: plan.theme,
+      analysis: featured,
+    },
+  };
+}
+
+/** One clip: the named shot, the open analysis, or the latest upload. A named shot that is missing is not replaced. */
+async function buildSingleClipContext(
+  userId: string,
+  opts: { analysisId?: string; message: string; locale: CoachLocale },
+  plan: AnswerPlan
+): Promise<CoachContext> {
+  const analysisId = opts.analysisId?.trim() || null;
+  let row: AnalysisRow | null = null;
+  let source: CoachAnalysisFacts["source"] = "latest";
+  if (plan.shotQuery) {
+    const recent = await loadRecentCompleted(userId, MAX_COMPARE_SCAN);
+    row = recent.find((r) => historyShotMatches(r.metrics, plan.shotQuery!)) ?? null;
+    source = "matching_shot";
+  } else if (analysisId) {
+    row = await loadAnalysis(userId, analysisId);
+    source = "selected";
+  } else if (plan.family !== "dialogue") {
+    row = await loadAnalysis(userId, null);
+    source = "latest";
+  }
+  const analysis = row
+    ? await analysisFacts(row, opts.locale, source, { includeProJoints: plan.includePro || source === "selected" })
+    : null;
+  return {
+    kind: analysis ? "analysis" : "none",
+    analysis,
+    day: null,
+    compare: null,
+    history: null,
+    focus: {
+      showVideo: plan.showVideo && !!analysis?.videoUrl,
+      showScore: plan.showScore && analysis?.score != null,
+      showBreakdown: plan.showBreakdown && !!analysis,
+      showMotion: plan.showMotion && !!analysis,
+      windowLabel: null,
+      windowCount: null,
+      windowAverage: null,
+      windowBest: null,
+      theme: plan.theme,
+      analysis,
+    },
+  };
+}
+
 /**
- * With an `analysisId` the coach talks about that shot. Without one (opened from the tab bar)
- * it falls back to the player's latest completed shot, unless the question is about the day,
- * a dated compare, or a history/trend recall.
+ * Chooses evidence from the question. A week, a named shot, a joint measurement,
+ * and a training-plan question do not all receive the newest upload.
  */
 export async function buildCoachContext(
   userId: string,
   opts: { analysisId?: string; message: string; locale: CoachLocale }
 ): Promise<CoachContext> {
-  const compare = await buildCompareContext(userId, opts);
-  if (compare) return compare;
-
-  // Pro-library compares use the player's analysis + matched reference clip — not history trends.
-  if (!wantsProCompareContext(opts.message)) {
-    const history = await buildHistoryContext(userId, opts);
-    if (history) return history;
+  const plan = planAnswer(opts.message, opts.locale === "es" ? "es" : "en");
+  if (plan.family === "compare") {
+    const compare = await buildCompareContext(userId, opts);
+    if (compare) return compare;
   }
-
-  const analysisId = opts.analysisId?.trim() || null;
-  const dayIntent = wantsDayContext(opts.message);
-  const shotQuery = extractShotQuery(opts.message);
-  const wantProJoints = wantsProCompareContext(opts.message);
-  let analysis: CoachAnalysisFacts | null = null;
-  if (analysisId || !dayIntent) {
-    let row: AnalysisRow | null = null;
-    if (analysisId) {
-      row = await loadAnalysis(userId, analysisId);
-    } else if (shotQuery) {
-      const recent = await loadRecentCompleted(userId, MAX_COMPARE_SCAN);
-      row = pickCurrentForShot(recent, shotQuery, false);
-    }
-    if (!row) row = await loadAnalysis(userId, null);
-    if (row) {
-      analysis = await analysisFacts(row, opts.locale, analysisId ? "selected" : "latest", {
-        includeProJoints: wantProJoints || !!analysisId,
-      });
-    }
+  if (plan.needsLibrary && plan.window) {
+    return buildLibraryContext(userId, opts, plan);
   }
+  return buildSingleClipContext(userId, opts, plan);
+}
 
-  if (!dayIntent) {
-    return { kind: analysis ? "analysis" : "none", analysis, day: null, compare: null, history: null };
+function clipHeading(a: CoachAnalysisFacts): string {
+  switch (a.source) {
+    case "selected":
+      return "Shot the player has open";
+    case "best_in_window":
+      return "Best shot inside the asked time window";
+    case "worst_in_window":
+      return "Weakest shot inside the asked time window";
+    case "matching_shot":
+      return "Shot that matches what they asked about";
+    case "compare_current":
+      return "More recent shot in the comparison";
+    case "compare_prior":
+      return "Older shot in the comparison";
+    default:
+      return "Player's most recent shot";
   }
-
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  const rows = await db
-    .select({
-      id: techniqueAnalysis.id,
-      metrics: techniqueAnalysis.metrics,
-      createdAt: techniqueAnalysis.createdAt,
-    })
-    .from(techniqueAnalysis)
-    .where(
-      and(
-        eq(techniqueAnalysis.userId, userId),
-        eq(techniqueAnalysis.status, "completed"),
-        gte(techniqueAnalysis.createdAt, startOfDay)
-      )
-    )
-    .orderBy(desc(techniqueAnalysis.createdAt))
-    .limit(MAX_DAY_SESSIONS);
-
-  const sessions = await Promise.all(
-    rows.map(async (r) => {
-      const f = await analysisFacts(r, opts.locale, "latest");
-      return { analysisId: f.analysisId, score: f.score, focusArea: f.focusArea, createdAt: f.createdAt };
-    })
-  );
-  const scores = sessions.map((s) => s.score).filter((s): s is number => s != null);
-  const day: CoachDayFacts = {
-    count: sessions.length,
-    averageScore: scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null,
-    bestScore: scores.length ? Math.max(...scores) : null,
-    sessions,
-  };
-  return {
-    kind: day.count > 0 ? "day" : analysis ? "analysis" : "none",
-    analysis,
-    day: day.count > 0 ? day : null,
-    compare: null,
-    history: null,
-  };
 }
 
 function pushAnalysisLines(lines: string[], a: CoachAnalysisFacts, heading: string) {
@@ -815,6 +956,19 @@ function pushAnalysisLines(lines: string[], a: CoachAnalysisFacts, heading: stri
 
 export function contextPrompt(ctx: CoachContext): string | null {
   const lines: string[] = [];
+  const focus = ctx.focus;
+  if (focus?.windowLabel) {
+    lines.push(
+      `Time window "${focus.windowLabel}": ${focus.windowCount ?? 0} shots` +
+        (focus.windowAverage != null ? `, average ${focus.windowAverage}/100, best ${focus.windowBest}/100.` : ".") +
+        " Use these window figures for period questions. Do not replace them with a clip from outside the window."
+    );
+  }
+  if (focus && !focus.showVideo) {
+    lines.push(
+      "No video is attached to this answer. Do not say you are showing their latest shot. Coach out loud from the notes."
+    );
+  }
   const hist = ctx.history;
   if (hist && ctx.kind === "history") {
     lines.push(
@@ -886,20 +1040,23 @@ export function contextPrompt(ctx: CoachContext): string | null {
   }
 
   const a = ctx.analysis;
+  const featured = focus?.analysis && ctx.kind !== "analysis" ? focus.analysis : null;
+  if (featured && focus?.showVideo) {
+    pushAnalysisLines(lines, featured, clipHeading(featured));
+  }
   if (a && ctx.kind === "analysis") {
-    pushAnalysisLines(
-      lines,
-      a,
-      a.source === "selected"
-        ? "Analysis of the shot the player just submitted"
-        : "Analysis of the player's most recent shot"
-    );
+    pushAnalysisLines(lines, a, clipHeading(a));
     lines.push(
       "For biomechanics questions (elbow, torso, wrist, contact, weight transfer, racket face, racket speed): answer from Technique issues / Observations / Diagnosis / Measured motion only. Prefer derived wrist_peak_* and estimated_contact_* lines when present (you may say estimate). If Measured motion lacks the number, say we do not have that measurement for this clip — never blame tracking or training data — then coach from qualitative notes. Never invent degrees, distances, or timings."
     );
     lines.push(
       "Special cases: (1) racket speed — use wrist_peak_*_derived when listed. (2) contact moment — use estimated_contact_frame / yolo frames when listed. (3) 'elbow improved by N degrees' — only if Measured motion has elbows on both clips; else we cannot verify that number from these notes. (4) knee dangerous — use knee_angle line if present; no medical diagnosis. (5) smash hit the glass — we do not have glass-outcome data for this clip; coach from smash notes if any. Tone: never put down the product."
     );
+    if (focus?.showMotion && !focus.showScore) {
+      lines.push(
+        "This is a measurement question. Lead with the measured motion for the body part they asked about. Do not open with the overall score. If that number is not under Measured motion, say we do not have that measurement for this clip."
+      );
+    }
     if (a.proReference) {
       lines.push(
         `When the player asks about a professional / reference / pro player: the professional standard IS "${a.proReference.label}" above (the matched reference video). Compare the player to that clip using Technique issues, strengths, corrections, and You vs professional reference joints. Call it the professional reference or pro example — do not invent a famous player name. Only cite joint degrees/match% listed under You vs professional reference joints. If joints are missing, compare qualitatively from the notes and say joint-by-joint numbers are limited.`
@@ -914,6 +1071,9 @@ export function contextPrompt(ctx: CoachContext): string | null {
     );
     const areas = [...new Set(d.sessions.map((s) => s.focusArea).filter(Boolean))];
     if (areas.length) lines.push(`- Areas flagged today: ${areas.join(", ")}.`);
+  }
+  if (lines.length) {
+    lines.push("The player hears this reply spoken aloud. Always answer in spoken sentences, including when no clip is attached.");
   }
   return lines.length ? lines.join("\n") : null;
 }

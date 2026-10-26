@@ -9,7 +9,7 @@ export type CoachLocale = "en" | "es";
 /** Minimal analysis facts needed for history (avoids circular import with coachContext). */
 export type HistoryAnalysisFacts = {
   analysisId: string;
-  source: "selected" | "latest" | "compare_current" | "compare_prior";
+  source: "selected" | "latest" | "compare_current" | "compare_prior" | "best_in_window" | "worst_in_window" | "matching_shot";
   shotName: string | null;
   videoUrl: string | null;
   score: number | null;
