@@ -4843,7 +4843,7 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
   }
 }
 
-/** Pro-library clip matched to this shot, and a frame near contact to render in red. */
+/** Pro-library clip matched to this shot, and the pro's contact frame to render in red. */
 async function resolveProHologramSource(
   metrics: Record<string, unknown>
 ): Promise<{ videoPath: string; frame: number } | null> {
@@ -4870,7 +4870,15 @@ async function resolveProHologramSource(
   if (!video?.cloudinaryPublicId) return null
   const videoPath = resolveVideoPath(video.cloudinaryPublicId)
   if (!fs.existsSync(videoPath)) return null
-  const frame = totalFrames && totalFrames > 1 ? Math.min(totalFrames - 1, Math.round(totalFrames * 0.45)) : 0
+  // The pro's own contact frame (the one /joints measures); 45% into the clip when it was never resolved.
+  const meta = neighbor.train_sample_id ? await getTrainSampleImpactMeta(neighbor.train_sample_id) : null
+  const last = totalFrames && totalFrames > 1 ? totalFrames - 1 : null
+  const frame =
+    meta?.impactFrame != null
+      ? Math.min(meta.impactFrame, last ?? meta.impactFrame)
+      : last != null
+        ? Math.min(last, Math.round(totalFrames! * 0.45))
+        : 0
   return { videoPath, frame }
 }
 

@@ -11,29 +11,32 @@ import { comfyQueuePrompt, comfyUploadImage, comfyViewToBuffer, comfyWaitForOutp
  * both Qwen and GPT Image copy that image's pose instead of the player's, so only the frame goes in;
  * on ComfyUI the contact pose is also pinned by SDPose + the Qwen Fun ControlNet in the workflow.
  */
-export const HOLOGRAM_PROMPT =
-  'Turn the padel player into a 3D hologram: translucent electric-blue body made of a fine wireframe mesh with ' +
-  'glowing joint nodes, cyan edge light and a glowing racket. Keep the exact pose, ' +
-  'body proportions, camera angle and framing of the photo. The hologram has no face: a smooth, featureless head. ' +
-  'No reflections. Remove the court fence, the glass walls and the net. The player stands on a blue padel court ' +
-  'floor with glowing white lines, always visible, against a dark navy background. Nothing in front of the player. ' +
-  'This is the moment of contact: exactly one small glowing yellow-green ball, touching the face of the racket. ' +
-  'No other ball anywhere.'
+function hologramPrompt(body: string, glow: string): string {
+  return (
+    `Turn the padel player into a glowing 3D hologram: a translucent ${body} body built from a fine wireframe ` +
+    `mesh sprinkled with tiny glowing particles and nodes, with an intense luminous ${glow} glow and bloom around ` +
+    'the edges. The head is a smooth, bald, featureless mannequin head: no face, no hair, no cap. The racket is a ' +
+    `glowing ${glow} padel racket with a solid perforated face, no strings. Keep the exact pose, body proportions, ` +
+    'camera angle and framing of the photo. Set the scene on an indoor padel court at night, bathed in deep blue ' +
+    'light: dark glass walls and a black mesh fence outlined by thin neon-blue light strips, small bright ceiling ' +
+    'lights, and a wet, mirror-like dark blue court floor with glowing white lines that reflects the hologram\'s ' +
+    'glow. Replace every sign, logo, brand mark, letter and advertising board with plain dark glass or plain dark ' +
+    'mesh: there is no text anywhere in the image. Cinematic and high contrast, deep blacks with saturated glow. ' +
+    'This is the moment of contact: exactly one small glowing ball touching the face of the racket. ' +
+    'No other ball anywhere.'
+  )
+}
+
+export const HOLOGRAM_PROMPT = hologramPrompt('deep electric-blue', 'blue')
 
 /** Same hologram, drawn in red so it can sit on top of the player's blue one. */
-export const HOLOGRAM_PROMPT_RED =
-  'Turn the padel player into a 3D hologram: translucent crimson-red body made of a fine wireframe mesh with ' +
-  'glowing joint nodes, red edge light and a glowing racket. Keep the exact pose, ' +
-  'body proportions, camera angle and framing of the photo. The hologram has no face: a smooth, featureless head. ' +
-  'No reflections. Remove the court fence, the glass walls and the net. The player stands on a dark padel court ' +
-  'floor with glowing white lines, always visible, against a dark navy background. Nothing in front of the player. ' +
-  'This is the moment of contact: exactly one small glowing yellow-green ball, touching the face of the racket. ' +
-  'No other ball anywhere.'
+export const HOLOGRAM_PROMPT_RED = hologramPrompt('crimson-red', 'red')
 
 /** Qwen invents extra balls, glowing orbs and a floorless void without this. */
 export const HOLOGRAM_NEGATIVE_PROMPT =
   'two balls, second ball, extra ball, multiple balls, duplicate ball, ball on the floor, floating orbs, ' +
-  'glowing spheres near the head, empty background without a court floor'
+  'glowing spheres near the head, empty background without a court floor, cap, hat, hair, face, eyes, ' +
+  'text, letters, logos, banners, advertising, grey, washed out, flat lighting'
 
 const DEFAULT_COMFY_WORKFLOW = 'workflows/qwen_image_edit_2511_hologram.api.json'
 const DETECT_WORKFLOW = path.join(process.cwd(), 'workflows', 'sdpose_player_box.api.json')
