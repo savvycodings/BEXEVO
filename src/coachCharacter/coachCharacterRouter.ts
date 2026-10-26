@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Coach character chat: text replies, spoken replies and dictation for the
  * score-ring avatar popup on the technique results screen.
  *
@@ -22,7 +22,13 @@ import express from "express";
 import { fromNodeHeaders } from "better-auth/node";
 import { Agent, fetch as undiciFetch } from "undici";
 import { auth } from "../auth";
-import { buildCoachContext, contextPrompt, type CoachContext, type CoachLocale } from "./coachContext";
+import {
+  buildCoachContext,
+  contextPrompt,
+  emptyContext,
+  type CoachContext,
+  type CoachLocale,
+} from "./coachContext";
 import { readChatContent, xevoChatCompletion, type ChatMessage } from "../lib/xevoLlm";
 import { withNgrokHeaders } from "../lib/ngrokFetch";
 
@@ -123,15 +129,33 @@ function readLocale(raw: unknown): CoachLocale {
 function personaPrompt(summary: string | null): string {
   const lines = [
     "You are Joy, the cheerful padel coach character inside the Xevo app.",
-    "You talk with a player who just got an AI analysis of their padel shot.",
+    "You talk with a player about their AI-analyzed padel shots.",
     "Reply in 1 to 3 short spoken sentences. Be warm, encouraging and concrete.",
     "No markdown, no lists, no emojis. Plain conversational text only.",
     "You may occasionally add one Orpheus sound tag like <laugh> or <giggle> where natural.",
     "Answer in the same language the player writes in.",
+    "HARD RULE — NEVER INVENT MEASUREMENTS: Never invent measurements, angles, distances, racket speeds, timings, frame counts, or historical improvements. Only repeat numbers that appear explicitly in the facts below (including Measured motion / derived_* lines when present).",
+    "HARD RULE — NEVER BADMOUTH THE PRODUCT: Never criticize Xevo, the analysis, tracking, pose/camera data, training data, the pro library, or 'system precision'. Forbidden vibes: not precise enough, inaccurate, unreliable, poor tracking, bad data, lab-grade caveats said as a put-down. Stay warm and confident about the product.",
+    "When a figure is not in the facts, say neutrally that we do not have that measurement for this clip (or we cannot verify that change from these notes) — then coach from the qualitative technique notes. Do not explain it as a flaw in tracking or training data. Do not guess or invent numbers.",
+    "Measured motion is the ONLY source for degrees, ms, and speeds — including wrist_peak_*_derived and estimated_contact_* lines. Cite them when present; if missing for the ask, say we do not have that number here — never invent one and never blame the pipeline.",
+    "Strip unverified numbers from diagnosis/observations text unless the same figure also appears under Measured motion. Player claims like 'did I improve by 12 degrees?' require matching Measured motion on both sides; otherwise say we cannot verify that number from these notes.",
+    "When a Professional reference clip is listed, treat that matched library video as the professional / perfect-shot standard (use its label). Do not invent a famous player name. Use You vs professional reference joints only when listed.",
+    "Glass/fence ball outcomes and medical injury calls are outside what this clip analysis covers — say we do not have that for this clip, then coach from listed technique notes / joint lines only. Do not frame it as the system failing.",
+    "If the facts include two shots to compare, compare them using only those scores and notes — never invent a second analysis or an improvement delta that is not in the facts.",
+    "If history recall notes are present, use them for trends, rankings, mistake patterns, shot-catalog questions, next goals, and weaknesses. Prefer the lowest-scoring shot family and its listed fixes. Do not invent historical improvements not stated in the notes.",
     "If asked something unrelated to padel or fitness, steer back to their game kindly.",
   ];
   if (summary) {
-    lines.push("", "Facts you checked before answering (use them, do not invent numbers):", summary);
+    lines.push(
+      "",
+      "Facts you checked before answering (ONLY source of truth — every number you speak must appear here):",
+      summary
+    );
+  } else {
+    lines.push(
+      "",
+      "No analysis facts were loaded for this question. Do not invent shot results, measurements, or progress claims. Ask them to upload or open a shot, or answer only in general coaching terms with no personal stats."
+    );
   }
   return lines.join("\n");
 }
@@ -211,7 +235,7 @@ router.post("/context", async (req, res) => {
     return res.json(ctx);
   } catch (e) {
     console.error("[CoachCharacter] context error", e instanceof Error ? e.message : e);
-    return res.json({ kind: "none", analysis: null, day: null } satisfies CoachContext);
+    return res.json(emptyContext() satisfies CoachContext);
   }
 });
 
