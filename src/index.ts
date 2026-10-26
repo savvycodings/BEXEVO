@@ -10,7 +10,6 @@ import techniqueRouter from './technique/techniqueRouter'
 import trainRouter from './train/trainRouter'
 import profileRouter from './profile/profileRouter'
 import coachRouter from './coach/coachRouter'
-import coachCharacterRouter from './coachCharacter/coachCharacterRouter'
 import clubRouter from './club/clubRouter'
 import signupVerificationRouter from './auth/signupVerificationRouter'
 import { passwordResetDevFallbackCode } from './auth/passwordResetOtp'
@@ -43,8 +42,6 @@ app.use(cors({
     'ngrok-skip-browser-warning',
   ],
 }))
-
-app.use(['/coach-character', '/api/auth/coach-character'], coachCharacterRouter)
 
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
@@ -121,7 +118,7 @@ app.use('/api/auth/technique', techniqueRouter)
 app.use('/api/auth/train', trainRouter)
 app.use('/api/auth/profile', profileRouter)
 app.use('/api/auth/coach', coachRouter)
-app.use(['/coach-character', '/api/auth/coach-character'], coachCharacterRouter)
+app.use('/api/auth/coach-character', coachCharacterRouter)
 app.use('/api/auth/club', clubRouter)
 app.use('/api/auth/signup', signupRequestLogger, signupVerificationRouter)
 
