@@ -4,59 +4,104 @@ import { ACHIEVEMENT_KEYS } from "./definitions";
 import type { UserGamificationStats } from "./stats";
 import { db, userAchievement } from "../db";
 
-function meetsAchievement(key: AchievementKey, s: UserGamificationStats): boolean {
+export type AchievementProgress = { current: number; goal: number };
+
+function count(current: number, goal: number): AchievementProgress {
+  return { current: Math.max(0, Math.min(goal, Math.floor(current))), goal };
+}
+
+function threshold(best: number | null, goal: number): AchievementProgress {
+  return count(best ?? 0, goal);
+}
+
+function flag(done: boolean): AchievementProgress {
+  return { current: done ? 1 : 0, goal: 1 };
+}
+
+/**
+ * How far a player is toward an achievement. Single source of truth: an achievement is earned
+ * exactly when `current >= goal`, so the unlock rule and the progress bar can't disagree.
+ */
+export function progressFor(key: AchievementKey, s: UserGamificationStats): AchievementProgress {
   switch (key) {
     case "streak-3":
-      return s.loginStreak >= 3;
+      return count(s.loginStreak, 3);
     case "streak-7":
-      return s.loginStreak >= 7;
+      return count(s.loginStreak, 7);
     case "streak-30":
-      return s.loginStreak >= 30;
+      return count(s.loginStreak, 30);
     case "first-upload":
-      return s.videoCount >= 1;
+      return count(s.videoCount, 1);
     case "upload-10":
-      return s.videoCount >= 10;
+      return count(s.videoCount, 10);
     case "upload-20":
-      return s.videoCount >= 20;
+      return count(s.videoCount, 20);
     case "upload-40":
-      return s.videoCount >= 40;
+      return count(s.videoCount, 40);
     case "upload-full-week":
-      return s.maxUploadStreakDays >= 7;
+      return count(s.maxUploadStreakDays, 7);
     case "monthly-year":
-      return s.hasMonthlyYearUploads;
+      return count(s.maxConsecutiveUploadMonths, 12);
     case "first-ai":
-      return s.completedAnalysisCount >= 1;
+      return count(s.completedAnalysisCount, 1);
     case "above-50":
-      return s.maxOverallScore != null && s.maxOverallScore >= 50;
+      return threshold(s.maxOverallScore, 50);
     case "above-80":
-      return s.maxOverallScore != null && s.maxOverallScore >= 80;
+      return threshold(s.maxOverallScore, 80);
     case "above-90":
-      return s.maxOverallScore != null && s.maxOverallScore >= 90;
+      return threshold(s.maxOverallScore, 90);
     case "the-goat":
-      return s.maxOverallScore != null && s.maxOverallScore >= 95;
+      return threshold(s.maxOverallScore, 95);
     case "above-60-defence":
-      return s.maxDefenceScore != null && s.maxDefenceScore >= 60;
+      return threshold(s.maxDefenceScore, 60);
     case "net-play-60":
-      return s.maxNetPlayScore != null && s.maxNetPlayScore >= 60;
+      return threshold(s.maxNetPlayScore, 60);
     case "smash-60":
-      return s.maxSmashScore != null && s.maxSmashScore >= 60;
+      return threshold(s.maxSmashScore, 60);
     case "three-techniques-90":
-      return s.techniquesWith90.size >= 3;
+      return count(s.techniquesWith90.size, 3);
     case "first-coach-review":
-      return s.hasCoachReview;
+      return flag(s.hasCoachReview);
     case "coach-rate-100":
-      return s.hasCoachRated100;
+      return flag(s.hasCoachRated100);
     case "improve-shot":
-      return s.hasImprovedShot;
+      return flag(s.hasImprovedShot);
     case "add-friend":
-      return s.friendLinkCount >= 1;
-    case "secret": {
-      const nonSecret = Array.from(s.claimedKeys).filter((k) => k !== "secret");
-      return nonSecret.length >= 5;
-    }
+      return count(s.friendLinkCount, 1);
+    case "secret":
+      return count(Array.from(s.claimedKeys).filter((k) => k !== "secret").length, 5);
+    // A "match" is an uploaded video; a "win" is a scored analysis beating the previous one.
+    case "first-match":
+      return count(s.videoCount, 1);
+    case "matches-10":
+      return count(s.videoCount, 10);
+    case "win-streak-3":
+      return count(s.bestWinStreak, 3);
+    case "shot-analyzer":
+      return count(s.scoredAnalysisCount, 10);
+    case "weekly-consistency":
+      return count(s.maxSessionsInWeek, 3);
+    case "technique-improver":
+      return count(s.techniqueGain, 10);
     default:
-      return false;
+      return { current: 0, goal: 1 };
   }
+}
+
+function meetsAchievement(key: AchievementKey, s: UserGamificationStats): boolean {
+  const p = progressFor(key, s);
+  return p.current >= p.goal;
+}
+
+/** Progress for every achievement key; anything already earned is reported as complete. */
+export function achievementProgressList(
+  stats: UserGamificationStats,
+  earnedKeys: ReadonlySet<string>
+): { key: AchievementKey; current: number; goal: number }[] {
+  return ACHIEVEMENT_KEYS.map((key) => {
+    const p = progressFor(key, stats);
+    return { key, goal: p.goal, current: earnedKeys.has(key) ? p.goal : p.current };
+  });
 }
 
 export function evaluateNewAchievements(

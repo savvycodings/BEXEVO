@@ -8,6 +8,7 @@ import {
   userAchievement,
 } from "../db";
 import {
+  storedAiBreakdownToPercent,
   storedAiScoreToPercent,
 } from "../technique/techniqueScoreScale";
 
@@ -25,6 +26,7 @@ export type AnalysisSnapshot = {
   createdAt: Date;
   dateKey: string;
   score: number | null;
+  techniqueScore: number | null;
   rating: string | null;
   category: string | null;
   strokeLabel: string | null;
@@ -37,7 +39,17 @@ export type UserGamificationStats = {
   uploadMonthKeys: Set<string>;
   maxUploadStreakDays: number;
   hasMonthlyYearUploads: boolean;
+  /** Longest run of consecutive calendar months with an upload. */
+  maxConsecutiveUploadMonths: number;
   completedAnalysisCount: number;
+  /** Completed analyses with an overall score. */
+  scoredAnalysisCount: number;
+  /** Longest run of scored analyses each beating the previous one ("wins"). */
+  bestWinStreak: number;
+  /** Most completed analyses in any Monday–Sunday week. */
+  maxSessionsInWeek: number;
+  /** Best technique score minus the first one (≥ 0). */
+  techniqueGain: number;
   maxOverallScore: number | null;
   maxDefenceScore: number | null;
   maxNetPlayScore: number | null;
@@ -96,24 +108,72 @@ function maxConsecutiveDays(dateKeys: Set<string>): number {
   return best;
 }
 
-function hasTwelveConsecutiveUploadMonths(monthKeys: Set<string>): boolean {
-  if (monthKeys.size < 12) return false;
+function nextMonthKey(key: string): string {
+  const [y, m] = key.split("-").map(Number);
+  const next = new Date(y, m - 1, 1);
+  next.setMonth(next.getMonth() + 1);
+  return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`;
+}
+
+export function maxConsecutiveMonths(monthKeys: Set<string>): number {
+  if (monthKeys.size === 0) return 0;
   const sorted = Array.from(monthKeys).sort();
-  for (let i = 0; i <= sorted.length - 12; i++) {
-    let ok = true;
-    for (let j = 1; j < 12; j++) {
-      const [y, m] = sorted[i + j - 1].split("-").map(Number);
-      const next = new Date(y, m - 1, 1);
-      next.setMonth(next.getMonth() + 1);
-      const expected = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`;
-      if (sorted[i + j] !== expected) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return true;
+  let best = 1;
+  let run = 1;
+  for (let i = 1; i < sorted.length; i++) {
+    run = nextMonthKey(sorted[i - 1]) === sorted[i] ? run + 1 : 1;
+    best = Math.max(best, run);
   }
-  return false;
+  return best;
+}
+
+/** Monday date key of the week containing `d` (local time). */
+function weekKey(d: Date): string {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = x.getDay();
+  x.setDate(x.getDate() + (day === 0 ? -6 : 1 - day));
+  return localDateKey(x);
+}
+
+/** Derived counts for the progress-style achievements; pure so it can be unit-tested. */
+export function analysisProgressStats(analyses: AnalysisSnapshot[]): {
+  scoredAnalysisCount: number;
+  bestWinStreak: number;
+  maxSessionsInWeek: number;
+  techniqueGain: number;
+} {
+  const ordered = [...analyses].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+
+  let scoredAnalysisCount = 0;
+  let bestWinStreak = 0;
+  let run = 0;
+  let prevScore: number | null = null;
+  for (const a of ordered) {
+    if (a.score == null) continue;
+    scoredAnalysisCount += 1;
+    run = prevScore != null && a.score > prevScore ? run + 1 : 0;
+    bestWinStreak = Math.max(bestWinStreak, run);
+    prevScore = a.score;
+  }
+
+  const perWeek = new Map<string, number>();
+  for (const a of ordered) {
+    const k = weekKey(a.createdAt);
+    perWeek.set(k, (perWeek.get(k) ?? 0) + 1);
+  }
+  const maxSessionsInWeek = Math.max(0, ...perWeek.values());
+
+  let firstTechnique: number | null = null;
+  let bestTechnique: number | null = null;
+  for (const a of ordered) {
+    if (a.techniqueScore == null) continue;
+    if (firstTechnique == null) firstTechnique = a.techniqueScore;
+    bestTechnique = bestTechnique == null ? a.techniqueScore : Math.max(bestTechnique, a.techniqueScore);
+  }
+  const techniqueGain =
+    firstTechnique != null && bestTechnique != null ? Math.max(0, bestTechnique - firstTechnique) : 0;
+
+  return { scoredAnalysisCount, bestWinStreak, maxSessionsInWeek, techniqueGain };
 }
 
 export function trainCategoryFromMetrics(metrics: unknown): string | null {
@@ -172,6 +232,7 @@ function analysisFromRow(row: {
     createdAt: row.createdAt,
     dateKey: localDateKey(row.createdAt),
     score: storedAiScoreToPercent(ai),
+    techniqueScore: storedAiBreakdownToPercent(ai).technique,
     rating: typeof ai?.rating === "string" ? ai.rating : null,
     category: trainCategoryFromMetrics(row.metrics),
     strokeLabel: strokeLabelFromMetrics(row.metrics),
@@ -354,13 +415,17 @@ export async function loadUserGamificationStats(
     }
   }
 
+  const maxConsecutiveUploadMonths = maxConsecutiveMonths(uploadMonthKeys);
+
   return {
     videoCount: videos.length,
     uploadDateKeys,
     uploadMonthKeys,
     maxUploadStreakDays: maxConsecutiveDays(uploadDateKeys),
-    hasMonthlyYearUploads: hasTwelveConsecutiveUploadMonths(uploadMonthKeys),
+    hasMonthlyYearUploads: maxConsecutiveUploadMonths >= 12,
+    maxConsecutiveUploadMonths,
     completedAnalysisCount: analysisSnaps.length,
+    ...analysisProgressStats(analysisSnaps),
     maxOverallScore,
     maxDefenceScore,
     maxNetPlayScore,

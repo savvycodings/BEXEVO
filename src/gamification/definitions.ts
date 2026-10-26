@@ -64,6 +64,18 @@ export const ACHIEVEMENT_KEYS = [
 
   "secret",
 
+  "first-match",
+
+  "matches-10",
+
+  "win-streak-3",
+
+  "shot-analyzer",
+
+  "weekly-consistency",
+
+  "technique-improver",
+
 ] as const;
 
 

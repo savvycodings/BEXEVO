@@ -190,6 +190,7 @@ import {
   orderFrameInsights,
 } from './correctionFrameInsights'
 import { normalizePhysicalMetricsOnAnalysis, parsePhysicalMetrics } from './physicalMetrics'
+import { shotCardFields } from './activityShotFields'
 import { sanitizeAiAnalysisNarrativePlaceholders } from './sanitizeAiAnalysisNarrative'
 import { normalizeCorrectionsForClient } from './correctionImageStorage'
 import { poseDataForOverlayFetch } from './poseOverlay'
@@ -1217,6 +1218,7 @@ router.get('/activities', async (req, res) => {
         confidenceBand: confidence.band,
         uncertaintyPlusMinus: confidence.uncertaintyPlusMinus,
         shotLabel,
+        ...shotCardFields(metrics),
         rating,
         coachReviewId: review?.id ?? null,
         coachReviewStatus: review?.status ?? null,

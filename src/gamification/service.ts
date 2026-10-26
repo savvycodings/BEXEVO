@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { and, eq } from "drizzle-orm";
 import { db, userAchievement, userDailyQuest, userGamification } from "../db";
-import { evaluateNewAchievements, unlockAchievements } from "./achievements";
+import { achievementProgressList, evaluateNewAchievements, unlockAchievements } from "./achievements";
 import {
   CLIENT_TRACKABLE_QUEST_KEYS,
   getQuestDef,
@@ -28,6 +28,8 @@ export type GamificationState = {
   loginStreak: number;
   achievements: { key: string; unlockedAt: string; claimedAt: string }[];
   claimableAchievements: { key: string; earnedAt: string }[];
+  /** Progress toward every achievement; earned ones report `current === goal`. */
+  achievementProgress: { key: string; current: number; goal: number }[];
   dailyQuests: QuestProgress[];
   weeklyQuests: QuestProgress[];
   seasonQuests: QuestProgress[];
@@ -174,6 +176,10 @@ export async function refreshGamification(
       key: a.achievementKey,
       earnedAt: a.unlockedAt.toISOString(),
     })),
+    achievementProgress: achievementProgressList(
+      stats,
+      new Set(achievementRows.map((a) => a.achievementKey))
+    ),
     dailyQuests,
     weeklyQuests,
     seasonQuests,
