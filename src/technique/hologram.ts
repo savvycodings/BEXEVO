@@ -11,32 +11,66 @@ import { comfyQueuePrompt, comfyUploadImage, comfyViewToBuffer, comfyWaitForOutp
  * both Qwen and GPT Image copy that image's pose instead of the player's, so only the frame goes in;
  * on ComfyUI the contact pose is also pinned by SDPose + the Qwen Fun ControlNet in the workflow.
  */
-function hologramPrompt(body: string, glow: string): string {
+interface HologramPalette {
+  /** Dominant colour, named with its hex so the model holds the exact shade. */
+  main: string
+  /** Short colour word for the racket, rings and reflection. */
+  glow: string
+  /** The only accent allowed next to the dominant colour. */
+  accent: string
+  /** Shades that wash the colour out or drift it off-palette. */
+  avoid: string
+}
+
+function hologramPrompt(c: HologramPalette): string {
   return (
-    `Turn the padel player into a glowing 3D hologram: a translucent ${body} body built from a fine wireframe ` +
-    `mesh sprinkled with tiny glowing particles and nodes, with an intense luminous ${glow} glow and bloom around ` +
-    'the edges. The head is a smooth, bald, featureless mannequin head: no face, no hair, no cap. The racket is a ' +
-    `glowing ${glow} padel racket with a solid perforated face, no strings. Keep the exact pose, body proportions, ` +
-    'camera angle and framing of the photo. Set the scene on an indoor padel court at night, bathed in deep blue ' +
-    'light: dark glass walls and a black mesh fence outlined by thin neon-blue light strips, small bright ceiling ' +
-    'lights, and a wet, mirror-like dark blue court floor with glowing white lines that reflects the hologram\'s ' +
-    'glow. Replace every sign, logo, brand mark, letter and advertising board with plain dark glass or plain dark ' +
-    'mesh: there is no text anywhere in the image. Cinematic and high contrast, deep blacks with saturated glow. ' +
+    'Turn the padel player in the photo into a full-body, anatomically realistic 3D holographic human figure at ' +
+    'the moment of hitting the ball. Keep the exact pose, body proportions, camera angle and framing of the photo; ' +
+    'only the look changes, and the entire figure stays visible from head to feet. The whole body is a futuristic ' +
+    'holographic wireframe made of thousands of extremely fine, crisp horizontal digital scan lines, with subtle ' +
+    'mesh details and tiny luminous particles. ' +
+    `STRICT COLOUR PALETTE: intense ${c.main} is the dominant colour across the entire holographic body, outlines, ` +
+    `scan lines and light effects. Use only closely related deep ${c.glow} tones and subtle ${c.accent} highlights. ` +
+    `Avoid ${c.avoid}, white-dominant lighting or oversaturated highlights; keep the deep, saturated ${c.main} ` +
+    'appearance. Consistent holographic material and colour throughout the body. ' +
+    'Highly realistic human anatomy, accurate muscular structure, natural body proportions, anatomically correct ' +
+    'hands and bare feet. No clothing, no shirt, no shorts, no waistband or hem line, no socks, no shoes and no ' +
+    'accessories except the padel racket. The head is a smooth, bald, featureless mannequin head: no face, no ' +
+    `hair, no cap. The racket is made of the same ${c.glow} holographic linework with a solid perforated face, no ` +
+    'strings. Clearly defined silhouette and sharp digital linework, controlled subtle glow, minimal bloom, high ' +
+    'contrast and crisp details. ' +
+    'Remove the whole court, walls, fence, net, people and lights: pure black background, glossy black reflective ' +
+    `floor, subtle concentric ${c.glow} holographic rings beneath the feet and a realistic ${c.glow} floor ` +
+    'reflection. There is no text anywhere in the image. Cinematic studio lighting, ultra-detailed 3D render, sharp ' +
+    'focus, futuristic scientific visualization, premium technology aesthetic. ' +
     'This is the moment of contact: exactly one small glowing ball touching the face of the racket. ' +
     'No other ball anywhere.'
   )
 }
 
-export const HOLOGRAM_PROMPT = hologramPrompt('deep electric-blue', 'blue')
+export const HOLOGRAM_PROMPT = hologramPrompt({
+  main: 'electric royal blue #0048FF',
+  glow: 'blue',
+  accent: 'cyan',
+  avoid: 'pale blue, light blue, turquoise',
+})
 
 /** Same hologram, drawn in red so it can sit on top of the player's blue one. */
-export const HOLOGRAM_PROMPT_RED = hologramPrompt('crimson-red', 'red')
+export const HOLOGRAM_PROMPT_RED = hologramPrompt({
+  main: 'crimson red #E0102A',
+  glow: 'red',
+  accent: 'warm scarlet',
+  avoid: 'pink, salmon, orange',
+})
 
 /** Qwen invents extra balls, glowing orbs and a floorless void without this. */
 export const HOLOGRAM_NEGATIVE_PROMPT =
   'two balls, second ball, extra ball, multiple balls, duplicate ball, ball on the floor, floating orbs, ' +
-  'glowing spheres near the head, empty background without a court floor, cap, hat, hair, face, eyes, ' +
-  'text, letters, logos, banners, advertising, grey, washed out, flat lighting'
+  'glowing spheres near the head, figure floating with no floor, padel court, glass walls, fence, net, court ' +
+  'lines, ceiling lights, spectators, text, letters, logos, banners, advertising, ' +
+  'pale blue, light blue, turquoise, excessive cyan, white glowing body, excessive bloom, blurry scan lines, ' +
+  'soft focus, low detail, clothing, shorts, waistband, shoes, socks, cap, hat, hair, face, eyes, cropped feet, ' +
+  'cropped head, distorted anatomy, extra fingers, deformed hands, cartoon, solid opaque skin, gray background'
 
 const DEFAULT_COMFY_WORKFLOW = 'workflows/qwen_image_edit_2511_hologram.api.json'
 const DETECT_WORKFLOW = path.join(process.cwd(), 'workflows', 'sdpose_player_box.api.json')
