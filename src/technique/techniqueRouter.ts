@@ -4936,6 +4936,8 @@ async function resolveProHologramSource(
 
 /** Hologram of the player at ball contact; poll after POST /hologram. */
 router.get('/analysis/:id/hologram', async (req, res) => {
+  // A 304 here made the phone reuse "still building" and stop asking.
+  res.setHeader('Cache-Control', 'no-store')
   try {
     const userId = await resolveUserId(req)
     if (!userId) return res.status(401).json({ error: 'Unauthorized' })
@@ -4957,6 +4959,7 @@ router.get('/analysis/:id/hologram', async (req, res) => {
  */
 router.post('/hologram', async (req, res) => {
   const routeT0 = Date.now()
+  res.setHeader('Cache-Control', 'no-store')
   try {
     const userId = await resolveUserId(req)
     if (!userId) return res.status(401).json({ error: 'Unauthorized' })
