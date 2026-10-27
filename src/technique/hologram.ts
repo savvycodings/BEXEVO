@@ -90,6 +90,9 @@ export const HOLOGRAM_JOB_STALE_MS = 10 * 60_000
 export type HologramKeypoint = { x: number; y: number; score: number }
 export type HologramKeypoints = Record<string, HologramKeypoint>
 
+/** One MediaPipe frame of the orbit clip, in that frame's own 0..1 image space. */
+export type HologramOrbitFrame = { frame: number; keypoints: HologramKeypoints }
+
 export type HologramResult = {
   image: string
   frameImage: string
@@ -97,6 +100,13 @@ export type HologramResult = {
   frame: number | null
   /** Contact skeleton from the render's SDPose pass; same framing as `image`. */
   keypoints: HologramKeypoints | null
+  /** Seedance orbit of the still. Scrubbing it is the 3D view. */
+  orbitVideo?: string | null
+  orbitDurationMs?: number | null
+  orbitFrameCount?: number | null
+  orbitWidth?: number | null
+  orbitHeight?: number | null
+  orbitFrames?: HologramOrbitFrame[] | null
 }
 
 /** OpenPose COCO-18 body order, then the six foot points, as SDPose writes them. Sides are the player's own. */
@@ -202,13 +212,34 @@ export function parseCachedHologram(raw: unknown): HologramResult | null {
   const frameImage = typeof o.frameImage === 'string' ? o.frameImage.trim() : ''
   if (!image || !frameImage) return null
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null)
+  const orbitFrames = parseStoredOrbitFrames(o.orbitFrames)
   return {
     image,
     frameImage,
     contactMs: num(o.contactMs),
     frame: num(o.frame),
     keypoints: parseStoredKeypoints(o.keypoints),
+    ...(typeof o.orbitVideo === 'string' && o.orbitVideo.trim() ? { orbitVideo: o.orbitVideo.trim() } : {}),
+    ...(num(o.orbitDurationMs) != null ? { orbitDurationMs: num(o.orbitDurationMs) } : {}),
+    ...(num(o.orbitFrameCount) != null ? { orbitFrameCount: num(o.orbitFrameCount) } : {}),
+    ...(num(o.orbitWidth) != null ? { orbitWidth: num(o.orbitWidth) } : {}),
+    ...(num(o.orbitHeight) != null ? { orbitHeight: num(o.orbitHeight) } : {}),
+    ...(orbitFrames?.length ? { orbitFrames } : {}),
   }
+}
+
+function parseStoredOrbitFrames(raw: unknown): HologramOrbitFrame[] | null {
+  if (!Array.isArray(raw)) return null
+  const out: HologramOrbitFrame[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const row = item as { frame?: unknown; keypoints?: unknown }
+    const frame = typeof row.frame === 'number' && Number.isFinite(row.frame) ? Math.round(row.frame) : null
+    const keypoints = parseStoredKeypoints(row.keypoints)
+    if (frame == null || !keypoints) continue
+    out.push({ frame, keypoints })
+  }
+  return out.length ? out : null
 }
 
 /**

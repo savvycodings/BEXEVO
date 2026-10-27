@@ -105,6 +105,7 @@ import {
   readHologramJob,
   resolveHologramMoment,
 } from './hologram'
+import { generateHologramOrbit, isHologramOrbitConfigured } from './hologramOrbit'
 import { runChat, chatContent } from '../lib/chatProvider'
 import {
   llmContentHasJsonObject,
@@ -4819,6 +4820,48 @@ async function writeHologramState(analysisId: string, patch: Record<string, unkn
     .where(eq(techniqueAnalysis.id, analysisId))
 }
 
+/** Existing stills get the orbit the next time Smart 3D asks, without rebuilding the image. */
+async function startOrbitIfNeeded(
+  analysisId: string,
+  cached: NonNullable<ReturnType<typeof parseCachedHologram>>,
+  metrics: Record<string, unknown>
+): Promise<boolean> {
+  if (!isHologramOrbitConfigured() || cached.orbitVideo) return false
+  const job = readHologramJob({ hologram_job: metrics.hologram_orbit_job })
+  if (job?.status === 'running') return false
+  const imagePath = path.join(process.cwd(), cached.image.replace(/^\//, ''))
+  if (!fs.existsSync(imagePath)) return false
+  const orbitStartedAt = new Date().toISOString()
+  await writeHologramState(analysisId, { hologram_orbit_job: { status: 'running', startedAt: orbitStartedAt } })
+  void generateHologramOrbit({ analysisId, imagePath })
+    .then((orbit) =>
+      writeHologramState(analysisId, {
+        hologram: { ...cached, ...orbit },
+        hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
+      })
+    )
+    .catch(async (e: any) => {
+      console.error('[Technique][hologram] orbit error', { analysisId, message: e?.message })
+      await writeHologramState(analysisId, {
+        hologram_orbit_job: {
+          status: 'failed',
+          startedAt: orbitStartedAt,
+          finishedAt: new Date().toISOString(),
+          error: 'Failed to build the 3D turn',
+        },
+      }).catch(() => {})
+    })
+  return true
+}
+
+function orbitStatusOf(metrics: Record<string, unknown>): 'idle' | 'running' | 'done' | 'failed' {
+  const job = readHologramJob({ hologram_job: metrics.hologram_orbit_job })
+  if (job?.status === 'running') return 'running'
+  if (job?.status === 'failed') return 'failed'
+  const cached = parseCachedHologram(metrics.hologram)
+  return cached?.orbitVideo ? 'done' : 'idle'
+}
+
 function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>) {
   const cached = parseCachedHologram(metrics.hologram)
   const job = readHologramJob(metrics)
@@ -4838,6 +4881,13 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
     contactMs: cached?.contactMs ?? null,
     frame: cached?.frame ?? null,
     keypoints: cached?.keypoints ?? null,
+    orbitStatus: orbitStatusOf(metrics),
+    orbitVideo: cached?.orbitVideo ?? null,
+    orbitDurationMs: cached?.orbitDurationMs ?? null,
+    orbitFrameCount: cached?.orbitFrameCount ?? null,
+    orbitWidth: cached?.orbitWidth ?? null,
+    orbitHeight: cached?.orbitHeight ?? null,
+    orbitFrames: cached?.orbitFrames ?? null,
     proStatus,
     proImage: pro?.image ?? null,
     proKeypoints: pro?.keypoints ?? null,
@@ -4975,6 +5025,9 @@ router.post('/hologram', async (req, res) => {
         requestFrame != null ||
         (cached?.contactMs != null && Math.abs(cached.contactMs - Math.round(contactMs)) < 40))
     if (cached && forceRegenerate !== true && sameMoment) {
+      if (await startOrbitIfNeeded(analysisId, cached, metrics)) {
+        metrics.hologram_orbit_job = { status: 'running', startedAt: new Date().toISOString() }
+      }
       return res.json(hologramStatusBody(analysisId, metrics))
     }
     const existingJob = readHologramJob(metrics)
@@ -4998,12 +5051,35 @@ router.post('/hologram', async (req, res) => {
 
     console.log('[Technique][hologram] start', { analysisId, moment })
     void generateHologram({ analysisId, videoPath, moment })
-      .then((result) => {
+      .then(async (result) => {
         console.log('[Technique][hologram] done', { analysisId, image: result.image, elapsedMs: Date.now() - routeT0 })
-        return writeHologramState(analysisId, {
+        const orbitStartedAt = new Date().toISOString()
+        const startOrbit = isHologramOrbitConfigured()
+        await writeHologramState(analysisId, {
           hologram: result,
           hologram_job: { status: 'done', startedAt, finishedAt: new Date().toISOString() },
+          ...(startOrbit ? { hologram_orbit_job: { status: 'running', startedAt: orbitStartedAt } } : {}),
         })
+        if (!startOrbit) return
+        const imagePath = path.join(process.cwd(), result.image.replace(/^\//, ''))
+        try {
+          const orbit = await generateHologramOrbit({ analysisId, imagePath })
+          console.log('[Technique][hologram] orbit done', { analysisId, video: orbit.orbitVideo, frames: orbit.orbitFrames.length })
+          await writeHologramState(analysisId, {
+            hologram: { ...result, ...orbit },
+            hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
+          })
+        } catch (orbitErr: any) {
+          console.error('[Technique][hologram] orbit error', { analysisId, message: orbitErr?.message })
+          await writeHologramState(analysisId, {
+            hologram_orbit_job: {
+              status: 'failed',
+              startedAt: orbitStartedAt,
+              finishedAt: new Date().toISOString(),
+              error: 'Failed to build the 3D turn',
+            },
+          }).catch(() => {})
+        }
       })
       .catch(async (e: any) => {
         const message = e instanceof HologramError ? e.message : 'Failed to generate the hologram'
