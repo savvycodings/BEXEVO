@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { execFile } from 'child_process'
 import sharp from 'sharp'
+import ffmpegStatic from 'ffmpeg-static'
 import { probeVideoStreamMeta } from './frameExtractor'
 import type { HologramKeypoints, HologramOrbitFrame } from './hologram'
 
@@ -215,6 +216,7 @@ export async function generateHologramOrbit(opts: {
   const name = `orbit-${Date.now()}.mp4`
   const abs = path.join(dir, name)
   fs.writeFileSync(abs, video)
+  await moveIndexToFront(abs)
   const rel = `/uploads/technique-holograms/${opts.analysisId}/${name}`
   const meta = await probeVideoStreamMeta(abs)
   const size = await probeSize(abs)
@@ -237,4 +239,21 @@ export async function generateHologramOrbit(opts: {
 
 export function isHologramOrbitConfigured(): boolean {
   return Boolean(process.env.OPENROUTER_API_KEY?.trim())
+}
+
+/** Phones only paint a paused clip when the mp4 index is at the front of the file. */
+function moveIndexToFront(abs: string): Promise<void> {
+  const bin = process.env.FFMPEG_PATH?.trim() || ffmpegStatic || 'ffmpeg'
+  const tmp = `${abs}.fast.mp4`
+  return new Promise((resolve) => {
+    execFile(bin, ['-y', '-i', abs, '-c', 'copy', '-movflags', '+faststart', tmp], (err) => {
+      if (err) {
+        console.warn('[Technique][hologram] faststart skipped', err.message)
+        fs.rmSync(tmp, { force: true })
+        return resolve()
+      }
+      fs.renameSync(tmp, abs)
+      resolve()
+    })
+  })
 }
