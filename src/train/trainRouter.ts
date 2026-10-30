@@ -30,61 +30,17 @@ import { POSE_EMBEDDING_SPEC_VERSION } from "../technique/poseEmbedding";
 import falLoraRouter from "./falLoraRouter";
 import adminAccuracyRouter from "../adminAccuracy/adminAccuracyRouter";
 import { adminStrokeLabelKey } from "./trainShotDisplay";
-import { fal } from "@fal-ai/client";
+import {
+  isCloudinaryConfigured,
+  uploadLocalFileToCloudinary,
+} from "../lib/cloudinaryUpload";
 
-function resolveFalKey(): string {
-  return String(process.env.FAL_API_KEY || process.env.FAL_KEY || "").trim();
-}
-
-function isTransientFalNetworkError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { code?: string; cause?: { code?: string }; message?: string };
-  const code = e.cause?.code || e.code;
-  if (
-    code === "ENOTFOUND" ||
-    code === "EAI_AGAIN" ||
-    code === "ETIMEDOUT" ||
-    code === "ECONNRESET" ||
-    code === "UND_ERR_CONNECT_TIMEOUT"
-  ) {
-    return true;
-  }
-  const msg = err instanceof Error ? err.message : String(err);
-  return /fetch failed|ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i.test(msg);
-}
-
-/** Stage local train clip on fal CDN so Modal can GET bytes (ngrok often 404s server-side). */
-async function uploadTrainVideoToFalCdn(absPath: string): Promise<string> {
-  const key = resolveFalKey();
-  if (!key) throw new Error("FAL_KEY or FAL_API_KEY is not set");
-  fal.config({ credentials: key });
-  const buf = await fs.promises.readFile(absPath);
-  const ext = path.extname(absPath).toLowerCase();
-  const contentType =
-    ext === ".mp4"
-      ? "video/mp4"
-      : ext === ".mov"
-        ? "video/quicktime"
-        : "application/octet-stream";
-  const blob = new Blob([buf], { type: contentType });
-
-  const maxAttempts = 3;
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fal.storage.upload(blob, { lifecycle: { expiresIn: "1d" } });
-    } catch (e) {
-      lastErr = e;
-      if (!isTransientFalNetworkError(e) || attempt === maxAttempts) throw e;
-      const delayMs = attempt * 2000;
-      console.warn(
-        `[Train] fal.storage upload transient error; retry ${attempt}/${maxAttempts} in ${delayMs}ms`,
-        e instanceof Error ? e.message : e
-      );
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastErr;
+/** Stage local train clip on Cloudinary so Modal can GET bytes (ngrok often 404s server-side). */
+async function uploadTrainVideoForModal(absPath: string): Promise<string> {
+  return uploadLocalFileToCloudinary(absPath, {
+    folder: "xevo/train-staging",
+    resourceType: "video",
+  });
 }
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
@@ -264,7 +220,7 @@ async function triggerTrainExtraction(params: {
   trainVideoId: string;
   strokeName: string;
   videoPublicPath: string;
-  /** Absolute path on disk; staged on fal CDN for remote Modal when FAL_KEY is set. */
+  /** Absolute path on disk; staged on Cloudinary for remote Modal when CLOUDINARY_* is set. */
   videoAbsPath: string;
 }): Promise<void> {
   const modalUrl = TRAIN_MODAL_WEBHOOK_URL();
@@ -283,31 +239,31 @@ async function triggerTrainExtraction(params: {
     !modalUrl.includes("localhost") && !/127\.0\.0\.1/i.test(modalUrl);
   const hasLocalFile =
     Boolean(params.videoAbsPath) && fs.existsSync(params.videoAbsPath);
-  const falKey = resolveFalKey();
+  const cloudinaryOk = isCloudinaryConfigured();
 
-  if (modalRemote && hasLocalFile && falKey) {
+  if (modalRemote && hasLocalFile && cloudinaryOk) {
     try {
-      console.log("[Train] Staging train video via fal.storage for Modal", {
+      console.log("[Train] Staging train video via Cloudinary for Modal", {
         sampleId: params.sampleId,
         videoAbsPath: params.videoAbsPath,
       });
-      videoUrl = await uploadTrainVideoToFalCdn(params.videoAbsPath);
+      videoUrl = await uploadTrainVideoForModal(params.videoAbsPath);
     } catch (e: unknown) {
-      console.error("[Train] fal.storage upload failed (train Modal)", e);
+      console.error("[Train] Cloudinary staging upload failed (train Modal)", e);
       const msg =
-        "Could not stage train video for Modal (fal upload failed). Check FAL_KEY and logs.";
+        "Could not stage train video for Modal (Cloudinary upload failed). Check CLOUDINARY_* and logs.";
       await markTrainSampleFailed(params.sampleId, msg);
       throw new Error(msg);
     }
-  } else if (modalRemote && hasLocalFile && !falKey) {
+  } else if (modalRemote && hasLocalFile && !cloudinaryOk) {
     console.warn(
-      "[Train] Modal is remote but FAL_KEY is unset; using public video URL (ngrok may block Modal). Set FAL_KEY to stage on fal CDN."
+      "[Train] Modal is remote but Cloudinary is unset; using public video URL (ngrok may block Modal). Set CLOUDINARY_* to stage publicly."
     );
   }
 
   if (modalRemote && /localhost|127\.0\.0\.1/i.test(videoUrl)) {
     const msg =
-      "Video URL is not publicly reachable for Modal. Set PUBLIC_VIDEO_BASE_URL (or FAL_KEY for fal CDN staging).";
+      "Video URL is not publicly reachable for Modal. Set PUBLIC_VIDEO_BASE_URL (or CLOUDINARY_* for public staging).";
     console.error("[Train] Modal cannot reach local video URL", {
       sampleId: params.sampleId,
       videoUrl,

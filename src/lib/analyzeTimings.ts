@@ -5,6 +5,7 @@
 
 export type AnalyzePhase =
   | "fal_staging"
+  | "cloudinary_staging"
   | "modal"
   | "yolo_persist"
   | "retrieval"

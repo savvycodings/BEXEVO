@@ -195,7 +195,11 @@ import { shotCardFields } from './activityShotFields'
 import { sanitizeAiAnalysisNarrativePlaceholders } from './sanitizeAiAnalysisNarrative'
 import { normalizeCorrectionsForClient } from './correctionImageStorage'
 import { poseDataForOverlayFetch } from './poseOverlay'
-import { fal } from '@fal-ai/client'
+import {
+  isCloudinaryConfigured,
+  uploadLocalFileToCloudinary,
+  cloudinaryStagingFailureMessage,
+} from '../lib/cloudinaryUpload'
 
 function resolveFalKey(): string {
   return String(process.env.FAL_API_KEY || process.env.FAL_KEY || '').trim()
@@ -258,48 +262,12 @@ async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts =
   throw last
 }
 
-/** Stage local upload on fal CDN so Modal can GET real bytes (ngrok often 404s server-side). */
-async function uploadLocalVideoToFalCdn(absPath: string): Promise<string> {
-  const key = resolveFalKey()
-  if (!key) throw new Error('FAL_KEY or FAL_API_KEY is not set')
-  fal.config({ credentials: key })
-  const buf = await fs.promises.readFile(absPath)
-  const ext = path.extname(absPath).toLowerCase()
-  const contentType =
-    ext === '.mp4'
-      ? 'video/mp4'
-      : ext === '.mov'
-        ? 'video/quicktime'
-        : 'application/octet-stream'
-  const blob = new Blob([buf], { type: contentType })
-  return fal.storage.upload(blob, { lifecycle: { expiresIn: '1d' } })
-}
-
-function falStagingFailureMessage(e: unknown): {
-  error: string
-  detail: string
-  feedbackText: string
-} {
-  const detail = e instanceof Error ? e.message : String(e)
-  const cause =
-    e instanceof Error && e.cause && typeof e.cause === 'object'
-      ? (e.cause as { code?: string; hostname?: string; message?: string })
-      : null
-  const code = cause?.code ?? (typeof (e as { code?: string })?.code === 'string' ? (e as { code: string }).code : '')
-  const blob = `${detail} ${cause?.message ?? ''} ${cause?.hostname ?? ''} ${code}`
-  if (/ENOTFOUND|getaddrinfo/i.test(blob) || code === 'ENOTFOUND') {
-    const msg =
-      'Could not reach fal.ai to stage the video (DNS lookup failed for rest.fal.ai). Check this machine’s internet/DNS/VPN, then retry.'
-    return { error: msg, detail, feedbackText: msg }
-  }
-  if (/ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed/i.test(blob) || code === 'ECONNREFUSED' || code === 'ETIMEDOUT') {
-    const msg =
-      'Could not reach fal.ai to stage the video (network error). Check server internet connectivity and retry.'
-    return { error: msg, detail, feedbackText: msg }
-  }
-  const msg =
-    'Could not stage video for Modal analysis. Check FAL_KEY and server network access to rest.fal.ai.'
-  return { error: msg, detail, feedbackText: msg }
+/** Stage local upload on Cloudinary so Modal can GET real bytes (ngrok often 404s server-side). */
+async function uploadLocalVideoForModal(absPath: string): Promise<string> {
+  return uploadLocalFileToCloudinary(absPath, {
+    folder: 'xevo/technique-staging',
+    resourceType: 'video',
+  })
 }
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024
@@ -1331,30 +1299,40 @@ router.post('/analyze', async (req, res) => {
       !modalWebhook.includes('localhost') &&
       !publicHttpVideo &&
       localVideoPath &&
-      resolveFalKey()
+      isCloudinaryConfigured()
     ) {
       try {
-        console.log('[Technique] Staging video via fal.storage for Modal', {
+        console.log('[Technique] Staging video via Cloudinary for Modal', {
           localVideoPath,
         })
-        const falT0 = Date.now()
-        videoUrl = await uploadLocalVideoToFalCdn(localVideoPath)
-        timer.mark('fal_staging', { durationMs: Date.now() - falT0 })
+        const stageT0 = Date.now()
+        videoUrl = await uploadLocalVideoForModal(localVideoPath)
+        timer.mark('cloudinary_staging', { durationMs: Date.now() - stageT0 })
       } catch (e) {
-        console.error('[Technique] fal.storage upload failed', e)
-        const falFail = falStagingFailureMessage(e)
+        console.error('[Technique] Cloudinary staging upload failed', e)
+        const stageFail = cloudinaryStagingFailureMessage(e)
         await db
           .update(techniqueAnalysis)
           .set({
             status: 'failed',
-            feedbackText: falFail.feedbackText,
+            feedbackText: stageFail.feedbackText,
           })
           .where(eq(techniqueAnalysis.id, analysisId))
         return res.status(500).json({
-          error: falFail.error,
-          detail: falFail.detail,
+          error: stageFail.error,
+          detail: stageFail.detail,
         })
       }
+    } else if (
+      modalWebhook &&
+      !modalWebhook.includes('localhost') &&
+      !publicHttpVideo &&
+      localVideoPath &&
+      !isCloudinaryConfigured()
+    ) {
+      console.warn(
+        '[Technique] Modal is remote but Cloudinary is unset; using public video URL (ngrok may block Modal). Set CLOUDINARY_* to stage publicly.'
+      )
     }
 
     if (
@@ -1373,7 +1351,7 @@ router.post('/analyze', async (req, res) => {
         .where(eq(techniqueAnalysis.id, analysisId))
       return res.status(500).json({
         error:
-          'Video URL is not publicly reachable for Modal. Configure PUBLIC_VIDEO_BASE_URL to your ngrok/Railway URL.',
+          'Video URL is not publicly reachable for Modal. Configure CLOUDINARY_* for public staging (or PUBLIC_VIDEO_BASE_URL to a public URL).',
       })
     }
 
