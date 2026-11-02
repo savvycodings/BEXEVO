@@ -35,6 +35,7 @@ import {
   commentTonesForReview,
   normalizeCoachAnnotations,
 } from "./coachAnnotations";
+import { normalizeSpecialties } from "./coachSpecialties";
 
 const router = express.Router();
 router.use(express.json({ limit: "50mb" }));
@@ -1108,6 +1109,41 @@ router.post("/profile-sections", async (req, res) => {
   } catch (e: any) {
     console.error("[Coach] profile section create error", e);
     return res.status(500).json({ error: "Failed to save profile section" });
+  }
+});
+
+/** Replace the signed-in coach's specialty list (0-5 catalog keys, stored in catalog order). */
+router.put("/specialties", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const profile = await db.query.userProfile.findFirst({
+      where: (p, { eq: _eq }) => _eq(p.userId, userId),
+    });
+    if (profile?.coachStudentRole !== "coach") {
+      return res.status(403).json({ error: "Only coaches can set specialties" });
+    }
+
+    const result = normalizeSpecialties(req.body?.specialties);
+    if (!result.ok) {
+      const error =
+        result.error === "too_many"
+          ? "Pick up to 5 specialties"
+          : result.error === "unknown_key"
+            ? `Unknown specialty: ${result.detail}`
+            : "specialties must be an array";
+      return res.status(400).json({ error });
+    }
+
+    await db
+      .update(userProfile)
+      .set({ coachSpecialties: result.specialties, updatedAt: new Date() })
+      .where(eq(userProfile.userId, userId));
+    return res.json({ specialties: result.specialties });
+  } catch (e: any) {
+    console.error("[Coach] specialties save error", e);
+    return res.status(500).json({ error: "Failed to save specialties" });
   }
 });
 

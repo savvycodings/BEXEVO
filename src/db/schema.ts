@@ -302,9 +302,37 @@ export const userProfile = pgTable("user_profile", {
   level: text("level"),
   rankingOrg: text("rankingOrg"),
   rankingValue: text("rankingValue"),
+  /** Coach specialty keys (see src/coach/coachSpecialties.ts), max 5, in catalog order. */
+  coachSpecialties: text("coachSpecialties").array().notNull().default([]),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
   updatedAt: timestamp("updatedAt").notNull().defaultNow(),
 });
+
+/**
+ * One-way follows with no approval. `targetType` is plain text checked in code ('coach' |
+ * 'country' today); `targetId` is a user id for coaches and an uppercase ISO alpha-2 code for
+ * countries, so there is no FK on the target. Coach reads join `user` so deleted coaches drop out.
+ */
+export const follow = pgTable(
+  "follow",
+  {
+    id: text("id").primaryKey(),
+    followerUserId: text("followerUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    targetType: text("targetType").notNull(),
+    targetId: text("targetId").notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("follow_unique_idx").on(
+      table.followerUserId,
+      table.targetType,
+      table.targetId
+    ),
+    index("follow_target_idx").on(table.targetType, table.targetId),
+  ]
+);
 
 /** Coach's roster of students shown in My Coach + coach tools. */
 export const coachStudent = pgTable(

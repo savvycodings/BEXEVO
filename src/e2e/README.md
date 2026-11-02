@@ -4,6 +4,9 @@ Real HTTP requests against a real running BEXevo server.
 
 - `technique.flow.e2e.ts` — sign in → upload a video → analyze → read the analysis → confirm it
   shows up in `/activities` → (optional) generate Comfy correction images.
+- `follows.flow.e2e.ts` — follow / unfollow coaches and countries, the target rules, and follows
+  disappearing with deleted users (the last step deletes user rows, so it runs only against the
+  server's own fakes-mode database).
 - `achievements.flow.e2e.ts` — every achievement in `gamification/definitions.ts`'
   `ACHIEVEMENT_KEYS`, seeded progressively from a clean two-account slate (a throwaway student +
   coach) and driven through the real `/gamification/state` and `/gamification/achievements/:key/claim`

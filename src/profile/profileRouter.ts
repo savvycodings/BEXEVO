@@ -24,6 +24,7 @@ import {
 import gamificationRouter from "../gamification/gamificationRouter";
 import { onFriendLinked } from "../gamification/service";
 import { adminHubPasswordValid, roleAfterCoachRevoke } from "./coachRole";
+import { visibleSpecialties } from "../coach/coachSpecialties";
 
 const router = express.Router();
 router.use(express.json());
@@ -390,6 +391,10 @@ router.get("/users/:userId/public", async (req, res) => {
             rankingValue: profile.rankingValue ?? null,
             hasRanking: profile.hasRanking ?? null,
             headline: playerHeadline(profile),
+            coachSpecialties: visibleSpecialties(
+              normalizeCoachStudentRole(profile.coachStudentRole),
+              profile.coachSpecialties
+            ),
           }
         : {
             username: null,
@@ -401,6 +406,7 @@ router.get("/users/:userId/public", async (req, res) => {
             rankingValue: null,
             hasRanking: null,
             headline: "Player",
+            coachSpecialties: [],
           },
       totalXp: gamification?.totalXp ?? 0,
     });
@@ -850,6 +856,10 @@ router.get("/directory", async (req, res) => {
             image: u.image ?? null,
             username: p?.username ?? null,
             coachStudentRole: normalizeCoachStudentRole(p?.coachStudentRole),
+            coachSpecialties: visibleSpecialties(
+              normalizeCoachStudentRole(p?.coachStudentRole),
+              p?.coachSpecialties
+            ),
           };
         }),
     });
