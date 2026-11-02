@@ -8,6 +8,7 @@ import {
   userProfile,
 } from "../db";
 import { storedAiScoreToPercent } from "../technique/techniqueScoreScale";
+import { acceptedFriendIds } from "../friends/friendsService";
 
 export type LeaderboardScope = "global" | "country" | "city" | "friends";
 
@@ -33,12 +34,16 @@ function parseAreaLocation(area: string | null | undefined): {
   return { city: parts[0] ?? "", country: "" };
 }
 
-async function friendUserIds(userId: string): Promise<string[]> {
-  const links = await db.query.coachStudent.findMany({
-    where: (row, { or, eq: _eq }) =>
-      or(_eq(row.coachUserId, userId), _eq(row.studentUserId, userId)),
-  });
-  const ids = new Set<string>([userId]);
+/** You, your coach–student links and your accepted friendships. */
+export async function friendUserIds(userId: string): Promise<string[]> {
+  const [links, friends] = await Promise.all([
+    db.query.coachStudent.findMany({
+      where: (row, { or, eq: _eq }) =>
+        or(_eq(row.coachUserId, userId), _eq(row.studentUserId, userId)),
+    }),
+    acceptedFriendIds(userId),
+  ]);
+  const ids = new Set<string>([userId, ...friends]);
   for (const link of links) {
     ids.add(link.coachUserId);
     ids.add(link.studentUserId);
@@ -46,7 +51,7 @@ async function friendUserIds(userId: string): Promise<string[]> {
   return Array.from(ids);
 }
 
-async function averageScoresForUsers(
+export async function averageScoresForUsers(
   userIds: string[]
 ): Promise<Map<string, number>> {
   if (userIds.length === 0) return new Map();

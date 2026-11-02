@@ -309,6 +309,13 @@
       "when": 1793249906488,
       "tag": "0044_technique_drill",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1793300000000,
+      "tag": "0045_friendship",
+      "breakpoints": true
     }
   ]
 }

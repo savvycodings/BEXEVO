@@ -11,6 +11,7 @@ import trainRouter from './train/trainRouter'
 import profileRouter from './profile/profileRouter'
 import coachRouter from './coach/coachRouter'
 import clubRouter from './club/clubRouter'
+import friendsRouter from './friends/friendsRouter'
 import signupVerificationRouter from './auth/signupVerificationRouter'
 import { passwordResetDevFallbackCode } from './auth/passwordResetOtp'
 import { getSignupOtpHappyPathCode } from './auth/signupOtpHappyPath'
@@ -131,6 +132,7 @@ app.use('/api/auth/profile', profileRouter)
 app.use('/api/auth/coach', coachRouter)
 app.use('/api/auth/coach-character', coachCharacterRouter)
 app.use('/api/auth/club', clubRouter)
+app.use('/api/auth/friends', friendsRouter)
 app.use('/api/auth/signup', signupRequestLogger, signupVerificationRouter)
 
 app.all('/api/auth/*', toNodeHandler(auth))
@@ -183,6 +185,7 @@ app.use('/profile', profileRouter)
 app.use('/coach', coachRouter)
 app.use('/coach-character', coachCharacterRouter)
 app.use('/club', clubRouter)
+app.use('/friends', friendsRouter)
 app.use('/signup', signupRequestLogger, signupVerificationRouter)
 
 const port = Number(process.env.PORT) || 3050

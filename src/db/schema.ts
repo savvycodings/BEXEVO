@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export type TechniqueCorrectionImage = {
   frame: number;
@@ -1124,3 +1125,33 @@ export const techniqueDrill = pgTable("technique_drill", {
   createdAt: timestamp("createdAt").notNull().defaultNow(),
   updatedAt: timestamp("updatedAt").notNull().defaultNow(),
 });
+/**
+ * Player-to-player friendship. A row is a pending request (requester -> addressee) until the
+ * addressee accepts it. Declining, cancelling and unfriending delete the row, so there is no
+ * `declined` state. The unordered-pair unique index allows one row per pair of players, which
+ * rules out duplicate and reverse pending requests.
+ */
+export const friendship = pgTable(
+  "friendship",
+  {
+    id: text("id").primaryKey(),
+    requesterUserId: text("requesterUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    addresseeUserId: text("addresseeUserId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** `pending` | `accepted` */
+    status: text("status").notNull().default("pending"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    respondedAt: timestamp("respondedAt"),
+  },
+  (table) => [
+    uniqueIndex("friendship_pair_idx").on(
+      sql`LEAST(${table.requesterUserId}, ${table.addresseeUserId})`,
+      sql`GREATEST(${table.requesterUserId}, ${table.addresseeUserId})`
+    ),
+    index("friendship_addressee_status_idx").on(table.addresseeUserId, table.status),
+    index("friendship_requester_status_idx").on(table.requesterUserId, table.status),
+  ]
+);
