@@ -3,6 +3,7 @@ import path from 'path'
 import { execFile } from 'child_process'
 import sharp from 'sharp'
 import ffmpegStatic from 'ffmpeg-static'
+import { isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload'
 import { probeVideoStreamMeta } from './frameExtractor'
 import type { HologramKeypoints, HologramOrbitFrame } from './hologram'
 
@@ -222,11 +223,26 @@ export async function generateHologramOrbit(opts: {
   const size = await probeSize(abs)
   const durationMs = Math.round((meta?.durationSec ?? 4) * 1000)
   const frameCount = meta?.nbFrames && meta.nbFrames > 1 ? meta.nbFrames : Math.max(2, Math.round((meta?.fps ?? 24) * (durationMs / 1000)))
-  const publicUrl = publicFileUrl(rel)
-  const orbitFrames = publicUrl ? await poseOrbit(publicUrl, opts.analysisId).catch((e) => {
-    console.warn('[Technique][hologram] orbit pose skipped', e?.message)
-    return [] as HologramOrbitFrame[]
-  }) : []
+  // Prefer Cloudinary for Modal pose (ngrok free interstitial can block the public URL).
+  let poseUrl: string | null = null
+  if (isCloudinaryConfigured()) {
+    try {
+      poseUrl = await uploadBufferToCloudinary(video, {
+        filenameHint: 'hologram-orbit.mp4',
+        resourceType: 'video',
+        publicId: `xevo/hologram-orbit/${opts.analysisId}-${Date.now()}`,
+      })
+    } catch (e: any) {
+      console.warn('[Technique][hologram] orbit cloudinary upload failed', e?.message)
+    }
+  }
+  if (!poseUrl) poseUrl = publicFileUrl(rel)
+  const orbitFrames = poseUrl
+    ? await poseOrbit(poseUrl, opts.analysisId).catch((e) => {
+        console.warn('[Technique][hologram] orbit pose skipped', e?.message)
+        return [] as HologramOrbitFrame[]
+      })
+    : []
   return {
     orbitVideo: rel,
     orbitDurationMs: durationMs,
@@ -237,7 +253,14 @@ export async function generateHologramOrbit(opts: {
   }
 }
 
+/**
+ * Orbit / spin video is opt-in. The contact still must land first; set
+ * HOLOGRAM_ORBIT_ENABLED=true (plus OPENROUTER_API_KEY) when you want Seedance orbits again.
+ */
 export function isHologramOrbitConfigured(): boolean {
+  const flag = process.env.HOLOGRAM_ORBIT_ENABLED?.trim().toLowerCase()
+  if (flag === 'false' || flag === '0' || flag === 'no') return false
+  if (flag !== 'true' && flag !== '1' && flag !== 'yes') return false
   return Boolean(process.env.OPENROUTER_API_KEY?.trim())
 }
 

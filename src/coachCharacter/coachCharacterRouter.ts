@@ -7,13 +7,13 @@
  * - POST /speech      { text, locale? }         -> { audioBase64, mimeType }  (voice Studio)
  * - POST /transcribe  { audioBase64, language? } -> { text }       (main Studio STT sidecar)
  *
- * Env:
- * - XEVO_TTS_BASE_URL     EN voice Studio OpenAI base (default http://127.0.0.1:8889/v1)
- * - XEVO_TTS_ES_BASE_URL  ES Chatterbox OpenAI base (default http://127.0.0.1:8890/v1)
- * - XEVO_TTS_API_KEY      voice Studio key (falls back to XEVO_LLM_API_KEY; unused by Chatterbox)
- * - XEVO_TTS_MODEL        EN Orpheus id (default vinhnx90/VT-Orpheus-3B-TTS-Ceylia-Q4KM-GGUFF)
- * - XEVO_TTS_VOICE        EN Orpheus voice (default ceylia)
- * - XEVO_TTS_ES_MODEL     ES Chatterbox id (default ResembleAI/chatterbox)
+ * Env (both locales use Chatterbox multilingual on :8890):
+ * - XEVO_TTS_BASE_URL     Chatterbox OpenAI base (default http://127.0.0.1:8890/v1)
+ * - XEVO_TTS_ES_BASE_URL  optional ES override (defaults to XEVO_TTS_BASE_URL)
+ * - XEVO_TTS_API_KEY      optional bearer (Chatterbox ignores locally)
+ * - XEVO_TTS_MODEL        model id (default ResembleAI/chatterbox)
+ * - XEVO_TTS_VOICE        EN voice label (default chatterbox-en)
+ * - XEVO_TTS_ES_MODEL     optional ES model override
  * - XEVO_TTS_ES_VOICE     ES voice label (default chatterbox-es)
  *
  * Mounted ahead of the global 100kb JSON parser because dictation audio is larger.
@@ -39,18 +39,6 @@ const MAX_HISTORY = 12;
 const MAX_MESSAGE_CHARS = 800;
 const MAX_SPEECH_CHARS = 400;
 const MAX_AUDIO_B64_CHARS = 12 * 1024 * 1024;
-const ORPHEUS_TAGS = new Set([
-  "laugh",
-  "chuckle",
-  "sigh",
-  "cough",
-  "sniffle",
-  "groan",
-  "yawn",
-  "gasp",
-  "giggle",
-]);
-
 function trimBase(raw: string): string {
   return raw.replace(/\/+$/, "");
 }
@@ -66,31 +54,39 @@ type TtsTarget = {
   baseUrl: string;
   model: string;
   voice: string;
-  variant: string;
+  language: "en" | "es";
   locale: CoachLocale;
 };
 
-/** English Ceylia on :8889 (Orpheus); Spanish Chatterbox on :8890. */
+function chatterboxBaseUrl(): string {
+  return trimBase(
+    String(process.env.XEVO_TTS_BASE_URL ?? "").trim() || "http://127.0.0.1:8890/v1"
+  );
+}
+
+/** Both EN and ES coach speech go through Chatterbox multilingual (:8890). */
 function ttsTarget(locale: CoachLocale): TtsTarget {
+  const sharedBase = chatterboxBaseUrl();
   if (locale === "es") {
     return {
       locale,
+      language: "es",
       baseUrl: trimBase(
-        String(process.env.XEVO_TTS_ES_BASE_URL ?? "").trim() || "http://127.0.0.1:8890/v1"
+        String(process.env.XEVO_TTS_ES_BASE_URL ?? "").trim() || sharedBase
       ),
-      model: String(process.env.XEVO_TTS_ES_MODEL ?? "").trim() || "ResembleAI/chatterbox",
+      model:
+        String(process.env.XEVO_TTS_ES_MODEL ?? "").trim() ||
+        String(process.env.XEVO_TTS_MODEL ?? "").trim() ||
+        "ResembleAI/chatterbox",
       voice: String(process.env.XEVO_TTS_ES_VOICE ?? "").trim() || "chatterbox-es",
-      variant: "",
     };
   }
   return {
     locale,
-    baseUrl: trimBase(String(process.env.XEVO_TTS_BASE_URL ?? "").trim() || "http://127.0.0.1:8889/v1"),
-    model:
-      String(process.env.XEVO_TTS_MODEL ?? "").trim() ||
-      "vinhnx90/VT-Orpheus-3B-TTS-Ceylia-Q4KM-GGUFF",
-    voice: String(process.env.XEVO_TTS_VOICE ?? "").trim() || "ceylia",
-    variant: String(process.env.XEVO_TTS_VARIANT ?? "").trim() || "Q4_K_M",
+    language: "en",
+    baseUrl: sharedBase,
+    model: String(process.env.XEVO_TTS_MODEL ?? "").trim() || "ResembleAI/chatterbox",
+    voice: String(process.env.XEVO_TTS_VOICE ?? "").trim() || "chatterbox-en",
   };
 }
 
@@ -133,7 +129,6 @@ function personaPrompt(summary: string | null): string {
     "Reply in 1 to 3 short spoken sentences. Be warm, encouraging and concrete.",
     "Every reply is spoken aloud. Always answer, including when no video is attached and when the question is a training plan or a trend.",
     "No markdown, no lists, no emojis. Plain conversational text only.",
-    "You may occasionally add one Orpheus sound tag like <laugh> or <giggle> where natural.",
     "Answer in the same language the player writes in.",
     "HARD RULE — NEVER INVENT MEASUREMENTS: Never invent measurements, angles, distances, racket speeds, timings, frame counts, or historical improvements. Only repeat numbers that appear explicitly in the facts below (including Measured motion / derived_* lines when present).",
     "HARD RULE — NEVER BADMOUTH THE PRODUCT: Never criticize Xevo, the analysis, tracking, pose/camera data, training data, the pro library, or 'system precision'. Forbidden vibes: not precise enough, inaccurate, unreliable, poor tracking, bad data, lab-grade caveats said as a put-down. Stay warm and confident about the product.",
@@ -161,27 +156,19 @@ function personaPrompt(summary: string | null): string {
   return lines.join("\n");
 }
 
-/** Normalizes sound tags (the model sometimes drops the closing `>`) and removes unknown ones. */
-function normalizeTags(raw: string): string {
-  return raw.replace(/<\/?\s*([a-zA-Z]+)\s*\/?>?/g, (_m, tag: string) => {
-    const t = tag.toLowerCase();
-    return ORPHEUS_TAGS.has(t) ? `<${t}> ` : "";
-  });
-}
-
 function cleanReply(raw: string): string {
-  return normalizeTags(raw.replace(/<think>[\s\S]*?<\/think>/gi, ""))
+  return raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
     .replace(/[*_#`]+/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-/** Keep plain speech plus supported Orpheus tags; drop anything else that looks like markup. */
+/** Plain speech for Chatterbox — strip markup/URLs. */
 function speechText(raw: string): string {
-  const kept = raw.replace(/<\/?([a-z]+)[^>]*>/gi, (m, tag: string) =>
-    ORPHEUS_TAGS.has(tag.toLowerCase()) && !m.startsWith("</") ? `<${tag.toLowerCase()}>` : " "
-  );
-  const plain = kept
+  const plain = raw
+    .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
     .replace(/https?:\/\/\S+/g, "")
     .replace(/[*_#`~|[\]{}]+/g, "")
     .replace(/\s+/g, " ")
@@ -261,6 +248,7 @@ router.post("/speech", async (req, res) => {
         input,
         model: target.model,
         voice: target.voice,
+        language: target.language,
         response_format: "wav",
       }),
       dispatcher: new Agent({ headersTimeout: 90_000, bodyTimeout: 90_000, connectTimeout: 5_000 }),

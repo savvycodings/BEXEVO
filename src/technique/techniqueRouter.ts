@@ -697,11 +697,45 @@ async function ensureGuestUser(): Promise<string | null> {
 }
 
 /**
- * Whole-metrics writes go through this so a hologram that finished while they were running
- * (POST /hologram starts before the analysis completes) is kept from the row, not the stale copy.
+ * Whole-metrics writes go through this so a hologram / orbit that finished while they were
+ * running (POST /hologram starts before the analysis completes) is kept from the row, not the
+ * stale in-memory copy. Orbit + pro keys must be listed or reopen rebuilds Seedance.
  */
 function keepHologramKeys(next: unknown) {
-  return sql`${JSON.stringify(next)}::jsonb || jsonb_strip_nulls(jsonb_build_object('hologram', ${techniqueAnalysis.metrics}->'hologram', 'hologram_job', ${techniqueAnalysis.metrics}->'hologram_job'))`
+  return sql`${JSON.stringify(next)}::jsonb || jsonb_strip_nulls(jsonb_build_object(
+    'hologram', ${techniqueAnalysis.metrics}->'hologram',
+    'hologram_job', ${techniqueAnalysis.metrics}->'hologram_job',
+    'hologram_orbit_job', ${techniqueAnalysis.metrics}->'hologram_orbit_job',
+    'hologram_pro', ${techniqueAnalysis.metrics}->'hologram_pro',
+    'hologram_pro_job', ${techniqueAnalysis.metrics}->'hologram_pro_job'
+  ))`
+}
+
+/** Newest orbit mp4 already on disk for this analysis (relative /uploads path), if any. */
+function findSavedOrbitVideo(analysisId: string): string | null {
+  const dir = path.join(process.cwd(), 'uploads', 'technique-holograms', analysisId)
+  if (!fs.existsSync(dir)) return null
+  const files = fs
+    .readdirSync(dir)
+    .filter((f) => f.startsWith('orbit-') && f.endsWith('.mp4'))
+    .sort()
+  if (!files.length) return null
+  return `/uploads/technique-holograms/${analysisId}/${files[files.length - 1]}`
+}
+
+/** Orbit fields to keep when a still is rewritten without force-regenerate. */
+function preservedOrbitFields(
+  previous: ReturnType<typeof parseCachedHologram>
+): Record<string, unknown> {
+  if (!previous?.orbitVideo) return {}
+  return {
+    ...(previous.orbitVideo ? { orbitVideo: previous.orbitVideo } : {}),
+    ...(previous.orbitDurationMs != null ? { orbitDurationMs: previous.orbitDurationMs } : {}),
+    ...(previous.orbitFrameCount != null ? { orbitFrameCount: previous.orbitFrameCount } : {}),
+    ...(previous.orbitWidth != null ? { orbitWidth: previous.orbitWidth } : {}),
+    ...(previous.orbitHeight != null ? { orbitHeight: previous.orbitHeight } : {}),
+    ...(previous.orbitFrames?.length ? { orbitFrames: previous.orbitFrames } : {}),
+  }
 }
 
 async function resolveUserId(req: express.Request): Promise<string | null> {
@@ -4798,26 +4832,90 @@ async function writeHologramState(analysisId: string, patch: Record<string, unkn
     .where(eq(techniqueAnalysis.id, analysisId))
 }
 
+/**
+ * Re-attach an on-disk orbit mp4 into metrics when the URL was wiped but the file remains.
+ * Returns true when metrics were healed (caller should refresh the in-memory copy).
+ */
+async function healOrbitFromDisk(
+  analysisId: string,
+  cached: NonNullable<ReturnType<typeof parseCachedHologram>>,
+  metrics: Record<string, unknown>
+): Promise<boolean> {
+  if (cached.orbitVideo) {
+    const abs = path.join(process.cwd(), cached.orbitVideo.replace(/^\//, ''))
+    if (fs.existsSync(abs)) return false
+  }
+  const rel = findSavedOrbitVideo(analysisId)
+  if (!rel) return false
+  const abs = path.join(process.cwd(), rel.replace(/^\//, ''))
+  if (!fs.existsSync(abs)) return false
+  const finishedAt = new Date().toISOString()
+  const startedAt =
+    (readHologramJob({ hologram_job: metrics.hologram_orbit_job })?.startedAt as string | undefined) ??
+    finishedAt
+  await writeHologramState(analysisId, {
+    hologram: {
+      ...cached,
+      orbitVideo: rel,
+      orbitDurationMs: cached.orbitDurationMs ?? 4000,
+      orbitFrameCount: cached.orbitFrameCount ?? 96,
+      orbitWidth: cached.orbitWidth ?? 496,
+      orbitHeight: cached.orbitHeight ?? 864,
+      orbitFrames: cached.orbitFrames ?? [],
+    },
+    hologram_orbit_job: { status: 'done', startedAt, finishedAt },
+  })
+  metrics.hologram = {
+    ...cached,
+    orbitVideo: rel,
+    orbitDurationMs: cached.orbitDurationMs ?? 4000,
+    orbitFrameCount: cached.orbitFrameCount ?? 96,
+    orbitWidth: cached.orbitWidth ?? 496,
+    orbitHeight: cached.orbitHeight ?? 864,
+    orbitFrames: cached.orbitFrames ?? [],
+  }
+  metrics.hologram_orbit_job = { status: 'done', startedAt, finishedAt }
+  console.log('[Technique][hologram] orbit restored from disk', { analysisId, video: rel })
+  return true
+}
+
 /** Existing stills get the orbit the next time Smart 3D asks, without rebuilding the image. */
 async function startOrbitIfNeeded(
   analysisId: string,
   cached: NonNullable<ReturnType<typeof parseCachedHologram>>,
   metrics: Record<string, unknown>
 ): Promise<boolean> {
-  if (!isHologramOrbitConfigured() || cached.orbitVideo) return false
+  if (!isHologramOrbitConfigured()) return false
+  if (await healOrbitFromDisk(analysisId, cached, metrics)) return false
+  const live = parseCachedHologram(metrics.hologram) ?? cached
+  if (live.orbitVideo) return false
   const job = readHologramJob({ hologram_job: metrics.hologram_orbit_job })
   if (job?.status === 'running') return false
-  const imagePath = path.join(process.cwd(), cached.image.replace(/^\//, ''))
+  const imagePath = path.join(process.cwd(), live.image.replace(/^\//, ''))
   if (!fs.existsSync(imagePath)) return false
   const orbitStartedAt = new Date().toISOString()
   await writeHologramState(analysisId, { hologram_orbit_job: { status: 'running', startedAt: orbitStartedAt } })
   void generateHologramOrbit({ analysisId, imagePath })
-    .then((orbit) =>
-      writeHologramState(analysisId, {
-        hologram: { ...cached, ...orbit },
+    .then(async (orbit) => {
+      // Re-read so a keypoints refresh that landed while Seedance ran is not wiped.
+      const row = await db.query.techniqueAnalysis.findFirst({
+        where: (ta, { eq: _eq }) => _eq(ta.id, analysisId),
+        columns: { metrics: true },
+      })
+      const latest =
+        parseCachedHologram((row?.metrics as Record<string, unknown> | undefined)?.hologram) ?? live
+      // Prefer an orbit already finished by another worker over a duplicate Seedance result.
+      if (latest.orbitVideo && latest.orbitVideo !== orbit.orbitVideo) {
+        await writeHologramState(analysisId, {
+          hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
+        })
+        return
+      }
+      await writeHologramState(analysisId, {
+        hologram: { ...latest, ...orbit },
         hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
       })
-    )
+    })
     .catch(async (e: any) => {
       console.error('[Technique][hologram] orbit error', { analysisId, message: e?.message })
       await writeHologramState(analysisId, {
@@ -4833,11 +4931,13 @@ async function startOrbitIfNeeded(
 }
 
 function orbitStatusOf(metrics: Record<string, unknown>): 'idle' | 'running' | 'done' | 'failed' {
+  const cached = parseCachedHologram(metrics.hologram)
+  // Saved clip wins over a stuck/stale "running" job so reopen never rebuilds.
+  if (cached?.orbitVideo) return 'done'
   const job = readHologramJob({ hologram_job: metrics.hologram_orbit_job })
   if (job?.status === 'running') return 'running'
   if (job?.status === 'failed') return 'failed'
-  const cached = parseCachedHologram(metrics.hologram)
-  return cached?.orbitVideo ? 'done' : 'idle'
+  return 'idle'
 }
 
 function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>) {
@@ -4923,7 +5023,10 @@ router.get('/analysis/:id/hologram', async (req, res) => {
       where: (ta, { and, eq: _eq }) => and(_eq(ta.id, req.params.id), _eq(ta.userId, userId)),
     })
     if (!analysis) return res.status(404).json({ error: 'Analysis not found' })
-    return res.json(hologramStatusBody(analysis.id, (analysis.metrics ?? {}) as Record<string, unknown>))
+    const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
+    const cached = parseCachedHologram(metrics.hologram)
+    if (cached) await healOrbitFromDisk(analysis.id, cached, metrics)
+    return res.json(hologramStatusBody(analysis.id, metrics))
   } catch (e: any) {
     console.error('[Technique][hologram] fetch error', e)
     return res.status(500).json({ error: 'Failed to fetch hologram' })
@@ -4942,7 +5045,10 @@ router.post('/hologram', async (req, res) => {
     const userId = await resolveUserId(req)
     if (!userId) return res.status(401).json({ error: 'Unauthorized' })
     if (!isHologramConfigured()) {
-      return res.status(503).json({ error: 'Hologram generation is not configured (COMFYUI_BASE_URL, or HOLOGRAM_PROVIDER=openai with OPENAI_API_KEY).' })
+      return res.status(503).json({
+        error:
+          'Hologram generation is not configured (HOLOGRAM_PROVIDER=openrouter + OPENROUTER_API_KEY, or comfy/openai).',
+      })
     }
     const { analysisId, contactMs, contactFrame, forceRegenerate } = req.body as {
       analysisId?: string
@@ -5006,6 +5112,7 @@ router.post('/hologram', async (req, res) => {
         requestFrame != null ||
         (cached?.contactMs != null && Math.abs(cached.contactMs - Math.round(contactMs)) < 40))
     if (cached && forceRegenerate !== true && sameMoment) {
+      // Still (and any saved orbit) already exist — never rebuild; only kick Seedance once if missing.
       if (await startOrbitIfNeeded(analysisId, cached, metrics)) {
         metrics.hologram_orbit_job = { status: 'running', startedAt: new Date().toISOString() }
       }
@@ -5031,15 +5138,41 @@ router.post('/hologram', async (req, res) => {
     res.status(202).json({ ...hologramStatusBody(analysisId, metrics), status: 'running', startedAt, error: null })
 
     console.log('[Technique][hologram] start', { analysisId, moment })
-    void generateHologram({ analysisId, videoPath, moment })
+    const fpsHint =
+      typeof metrics.fps === 'number' && metrics.fps > 1
+        ? metrics.fps
+        : typeof metrics.video_fps === 'number' && metrics.video_fps > 1
+          ? metrics.video_fps
+          : undefined
+    void generateHologram({
+      analysisId,
+      videoPath,
+      moment,
+      poseData: metrics.pose_data,
+      fpsHint,
+    })
       .then(async (result) => {
         console.log('[Technique][hologram] done', { analysisId, image: result.image, elapsedMs: Date.now() - routeT0 })
+        // Re-read so a finished orbit from a parallel kick is not wiped by this still write.
+        const row = await db.query.techniqueAnalysis.findFirst({
+          where: (ta, { eq: _eq }) => _eq(ta.id, analysisId),
+          columns: { metrics: true },
+        })
+        const prior = parseCachedHologram(
+          (row?.metrics as Record<string, unknown> | undefined)?.hologram
+        )
+        const keepOrbit = forceRegenerate === true ? {} : preservedOrbitFields(prior)
+        const orbitAlready = Boolean((keepOrbit as { orbitVideo?: string }).orbitVideo)
         const orbitStartedAt = new Date().toISOString()
-        const startOrbit = isHologramOrbitConfigured()
+        const startOrbit = isHologramOrbitConfigured() && !orbitAlready
         await writeHologramState(analysisId, {
-          hologram: result,
+          hologram: { ...result, ...keepOrbit },
           hologram_job: { status: 'done', startedAt, finishedAt: new Date().toISOString() },
-          ...(startOrbit ? { hologram_orbit_job: { status: 'running', startedAt: orbitStartedAt } } : {}),
+          ...(startOrbit
+            ? { hologram_orbit_job: { status: 'running', startedAt: orbitStartedAt } }
+            : orbitAlready
+              ? { hologram_orbit_job: { status: 'done', finishedAt: new Date().toISOString() } }
+              : {}),
         })
         if (!startOrbit) return
         const imagePath = path.join(process.cwd(), result.image.replace(/^\//, ''))
@@ -5047,7 +5180,7 @@ router.post('/hologram', async (req, res) => {
           const orbit = await generateHologramOrbit({ analysisId, imagePath })
           console.log('[Technique][hologram] orbit done', { analysisId, video: orbit.orbitVideo, frames: orbit.orbitFrames.length })
           await writeHologramState(analysisId, {
-            hologram: { ...result, ...orbit },
+            hologram: { ...result, ...keepOrbit, ...orbit },
             hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
           })
         } catch (orbitErr: any) {

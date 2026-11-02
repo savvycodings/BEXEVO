@@ -1,0 +1,71 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder_hologram_pose.png"
+    },
+    "_meta": {
+      "title": "Hologram or contact still"
+    }
+  },
+  "2": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {
+      "image": ["1", 0],
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1
+    }
+  },
+  "3": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sdpose_wholebody_fp16.safetensors"
+    },
+    "_meta": {
+      "title": "SDPose"
+    }
+  },
+  "4": {
+    "class_type": "SDPoseKeypointExtractor",
+    "inputs": {
+      "model": ["3", 0],
+      "vae": ["3", 2],
+      "image": ["2", 0],
+      "batch_size": 1
+    }
+  },
+  "5": {
+    "class_type": "SDPoseDrawKeypoints",
+    "inputs": {
+      "keypoints": ["4", 0],
+      "draw_body": true,
+      "draw_hands": true,
+      "draw_face": false,
+      "draw_feet": true,
+      "stick_width": 4,
+      "face_point_size": 3,
+      "score_threshold": 0.3,
+      "draw_head": true
+    },
+    "_meta": {
+      "title": "Skeleton preview (keeps the graph terminating)"
+    }
+  },
+  "6": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["5", 0],
+      "filename_prefix": "xevo_hologram_pose"
+    }
+  },
+  "90": {
+    "class_type": "PreviewAny",
+    "inputs": {
+      "source": ["4", 0]
+    },
+    "_meta": {
+      "title": "Contact keypoints (read back by the server)"
+    }
+  }
+}

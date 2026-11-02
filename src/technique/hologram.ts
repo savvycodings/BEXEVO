@@ -1,15 +1,20 @@
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
+import { execFile } from 'child_process'
 import { randomUUID } from 'crypto'
 import sharp from 'sharp'
+import ffmpegStatic from 'ffmpeg-static'
 import { extractFrame, extractFrameByTimestamp } from './frameExtractor'
 import { withNgrokHeaders } from '../lib/ngrokFetch'
+import { isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload'
 import { comfyQueuePrompt, comfyUploadImage, comfyViewToBuffer, comfyWaitForOutputImage } from './comfyClient'
 
 /**
- * The run.json hologram prompt with the look described in words. A style image in the prompt made
- * both Qwen and GPT Image copy that image's pose instead of the player's, so only the frame goes in;
- * on ComfyUI the contact pose is also pinned by SDPose + the Qwen Fun ControlNet in the workflow.
+ * Electric-blue wireframe look (commit 7b4d153). The contact frame alone goes in — a style image
+ * made Qwen / GPT copy the wrong pose. Comfy pins pose with SDPose + Fun ControlNet; OpenRouter
+ * Nano Banana edits the still with the same prompt, then SDPose (optional Comfy) reads joints for
+ * Smart 3D elbow selection.
  */
 interface HologramPalette {
   /** Dominant colour, named with its hex so the model holds the exact shade. */
@@ -74,8 +79,11 @@ export const HOLOGRAM_NEGATIVE_PROMPT =
 
 const DEFAULT_COMFY_WORKFLOW = 'workflows/qwen_image_edit_2511_hologram.api.json'
 const DETECT_WORKFLOW = path.join(process.cwd(), 'workflows', 'sdpose_player_box.api.json')
+const KEYPOINTS_WORKFLOW = path.join(process.cwd(), 'workflows', 'sdpose_keypoints.api.json')
 /** Node ids in the hologram workflow: frame LoadImage, positive and negative prompt, sampler. */
 const COMFY_NODES = { frame: '10', prompt: '20', negative: '21', sampler: '50', keypoints: '90' }
+/** Nano Banana 2 on OpenRouter (gemini-2.5-flash-image = original Nano Banana). */
+const DEFAULT_OPENROUTER_HOLOGRAM_MODEL = 'google/gemini-3.1-flash-image'
 const HOLOGRAM_UPLOAD_ROOT = path.join(process.cwd(), 'uploads', 'technique-holograms')
 
 /** Fallback crop centre when the player is not detected; the player sits a little below centre in portrait clips. */
@@ -172,9 +180,16 @@ export class HologramError extends Error {
   }
 }
 
-/** ComfyUI (Kyle's machine, COMFYUI_BASE_URL) by default; HOLOGRAM_PROVIDER=openai uses GPT Image instead. */
-function hologramProvider(): 'comfy' | 'openai' {
-  return process.env.HOLOGRAM_PROVIDER?.trim().toLowerCase() === 'openai' ? 'openai' : 'comfy'
+type HologramProvider = 'comfy' | 'openai' | 'openrouter'
+
+/** Default openrouter (Nano Banana). Set HOLOGRAM_PROVIDER=comfy|openai to force a backend. */
+function hologramProvider(): HologramProvider {
+  const raw = process.env.HOLOGRAM_PROVIDER?.trim().toLowerCase()
+  if (raw === 'openai' || raw === 'comfy' || raw === 'openrouter') return raw
+  if (process.env.OPENROUTER_API_KEY?.trim()) return 'openrouter'
+  if (process.env.COMFYUI_BASE_URL?.trim()) return 'comfy'
+  if (process.env.OPENAI_API_KEY?.trim()) return 'openai'
+  return 'openrouter'
 }
 
 function comfyWorkflowPath(): string {
@@ -183,7 +198,9 @@ function comfyWorkflowPath(): string {
 }
 
 export function isHologramConfigured(): boolean {
-  if (hologramProvider() === 'openai') return Boolean(process.env.OPENAI_API_KEY?.trim())
+  const p = hologramProvider()
+  if (p === 'openrouter') return Boolean(process.env.OPENROUTER_API_KEY?.trim())
+  if (p === 'openai') return Boolean(process.env.OPENAI_API_KEY?.trim())
   return Boolean(process.env.COMFYUI_BASE_URL?.trim()) && fs.existsSync(comfyWorkflowPath())
 }
 
@@ -300,11 +317,17 @@ async function detectPlayerBox(baseUrl: string, png: Buffer, id: string): Promis
   return { x0: x0 / info.width, y0: y0 / info.height, x1: (x1 + 1) / info.width, y1: (y1 + 1) / info.height }
 }
 
+/** Pixel crop of the full frame before the 1024 resize — used to map MediaPipe into hologram space. */
+export type HologramCropRect = { left: number; top: number; side: number; srcW: number; srcH: number }
+
 /**
  * Square around the player (box plus margin), clamped inside the frame; without a box, the largest
  * square around (CROP_CX, CROP_CY) like the script's ffmpeg crop. Scaled to 1024.
  */
-async function squareCrop(png: Buffer, box: PlayerBox | null): Promise<Buffer> {
+async function squareCrop(
+  png: Buffer,
+  box: PlayerBox | null
+): Promise<{ buffer: Buffer; crop: HologramCropRect }> {
   const meta = await sharp(png).metadata()
   const w = meta.width ?? 0
   const h = meta.height ?? 0
@@ -323,11 +346,263 @@ async function squareCrop(png: Buffer, box: PlayerBox | null): Promise<Buffer> {
     left = Math.min(Math.max(0, cx - side / 2), w - side)
     top = Math.min(Math.max(0, cy - side / 2), h - side)
   }
-  return sharp(png)
-    .extract({ left: Math.round(left), top: Math.round(top), width: Math.round(side), height: Math.round(side) })
+  const leftR = Math.round(left)
+  const topR = Math.round(top)
+  const sideR = Math.round(side)
+  const buffer = await sharp(png)
+    .extract({ left: leftR, top: topR, width: sideR, height: sideR })
     .resize(SIZE, SIZE)
     .png()
     .toBuffer()
+  return { buffer, crop: { left: leftR, top: topR, side: sideR, srcW: w, srcH: h } }
+}
+
+/** MediaPipe PoseLandmark names -> Smart 3D / SDPose joint ids. */
+const MP_TO_HOLO: Array<[string, string]> = [
+  ['NOSE', 'nose'],
+  ['LEFT_EYE', 'left_eye'],
+  ['RIGHT_EYE', 'right_eye'],
+  ['LEFT_EAR', 'left_ear'],
+  ['RIGHT_EAR', 'right_ear'],
+  ['LEFT_SHOULDER', 'left_shoulder'],
+  ['RIGHT_SHOULDER', 'right_shoulder'],
+  ['LEFT_ELBOW', 'left_elbow'],
+  ['RIGHT_ELBOW', 'right_elbow'],
+  ['LEFT_WRIST', 'left_wrist'],
+  ['RIGHT_WRIST', 'right_wrist'],
+  ['LEFT_HIP', 'left_hip'],
+  ['RIGHT_HIP', 'right_hip'],
+  ['LEFT_KNEE', 'left_knee'],
+  ['RIGHT_KNEE', 'right_knee'],
+  ['LEFT_ANKLE', 'left_ankle'],
+  ['RIGHT_ANKLE', 'right_ankle'],
+  ['LEFT_HEEL', 'left_heel'],
+  ['RIGHT_HEEL', 'right_heel'],
+  ['LEFT_FOOT_INDEX', 'left_big_toe'],
+  ['RIGHT_FOOT_INDEX', 'right_big_toe'],
+]
+
+type MpLandmark = { x?: number; y?: number; visibility?: number; score?: number }
+
+function putHologramJoint(
+  out: HologramKeypoints,
+  name: string,
+  x: number,
+  y: number,
+  score: number
+) {
+  if (![x, y, score].every(Number.isFinite) || score < KEYPOINT_MIN_SCORE) return
+  if (x < -0.05 || x > 1.05 || y < -0.05 || y > 1.05) return
+  out[name] = {
+    x: +Math.min(1, Math.max(0, x)).toFixed(4),
+    y: +Math.min(1, Math.max(0, y)).toFixed(4),
+    score: +score.toFixed(3),
+  }
+}
+
+/**
+ * MediaPipe landmarks already in the hologram still's own 0..1 space (pose run on the PNG/mp4).
+ * Prefer this over crop-projected analysis pose — Nano Banana reframes the figure.
+ */
+export function landmarksInImageToHologramKeypoints(
+  landmarks: Record<string, MpLandmark | undefined>
+): HologramKeypoints | null {
+  const out: HologramKeypoints = {}
+  for (const [mp, holo] of MP_TO_HOLO) {
+    const p = landmarks[mp] || landmarks[mp.toLowerCase()]
+    if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue
+    const score =
+      typeof p.visibility === 'number' ? p.visibility : typeof p.score === 'number' ? p.score : 0.9
+    putHologramJoint(out, holo, p.x, p.y, score)
+  }
+  const ls = out.left_shoulder
+  const rs = out.right_shoulder
+  if (ls && rs) {
+    putHologramJoint(out, 'neck', (ls.x + rs.x) / 2, (ls.y + rs.y) / 2, Math.min(ls.score, rs.score))
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/**
+ * Project analysis MediaPipe landmarks (full-frame 0..1) into the square hologram crop (0..1).
+ * Last-resort only: Nano Banana often shifts the figure, so crop-projected joints look wrong.
+ */
+export function mapMediaPipeToHologramKeypoints(
+  landmarks: Record<string, MpLandmark | undefined>,
+  crop: HologramCropRect
+): HologramKeypoints | null {
+  if (!crop.side || !crop.srcW || !crop.srcH) return null
+  const out: HologramKeypoints = {}
+  for (const [mp, holo] of MP_TO_HOLO) {
+    const p = landmarks[mp] || landmarks[mp.toLowerCase()]
+    if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue
+    const score =
+      typeof p.visibility === 'number' ? p.visibility : typeof p.score === 'number' ? p.score : 0.9
+    const px = p.x * crop.srcW
+    const py = p.y * crop.srcH
+    putHologramJoint(out, holo, (px - crop.left) / crop.side, (py - crop.top) / crop.side, score)
+  }
+  const ls = out.left_shoulder
+  const rs = out.right_shoulder
+  if (ls && rs) {
+    putHologramJoint(out, 'neck', (ls.x + rs.x) / 2, (ls.y + rs.y) / 2, Math.min(ls.score, rs.score))
+  }
+  return Object.keys(out).length ? out : null
+}
+
+function resolveFfmpeg(): string {
+  return process.env.FFMPEG_PATH?.trim() || ffmpegStatic || 'ffmpeg'
+}
+
+/** One-second mp4 of the still so Modal's video MediaPipe endpoint can pose it. */
+async function encodeStillMp4(png: Buffer): Promise<Buffer> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xevo-holo-pose-'))
+  const pngPath = path.join(dir, 'still.png')
+  const mp4Path = path.join(dir, 'still.mp4')
+  fs.writeFileSync(pngPath, png)
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        resolveFfmpeg(),
+        [
+          '-y',
+          '-loop',
+          '1',
+          '-i',
+          pngPath,
+          '-t',
+          '1',
+          '-vf',
+          `scale=${SIZE}:${SIZE}`,
+          '-pix_fmt',
+          'yuv420p',
+          '-r',
+          '8',
+          mp4Path,
+        ],
+        (err) => (err ? reject(err) : resolve())
+      )
+    })
+    return fs.readFileSync(mp4Path)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Run MediaPipe on the generated hologram still (via a 1s clip + Modal) so markers sit on
+ * the Nano Banana figure, not the pre-edit crop.
+ */
+export async function poseHologramStill(
+  png: Buffer,
+  analysisId: string
+): Promise<HologramKeypoints | null> {
+  const modal = process.env.MODAL_WEBHOOK_URL?.trim()
+  if (!modal) {
+    console.warn('[Technique][hologram] still pose skipped — MODAL_WEBHOOK_URL unset')
+    return null
+  }
+  if (!isCloudinaryConfigured()) {
+    console.warn('[Technique][hologram] still pose skipped — Cloudinary unset')
+    return null
+  }
+  const t0 = Date.now()
+  try {
+    const mp4 = await encodeStillMp4(png)
+    const videoUrl = await uploadBufferToCloudinary(mp4, {
+      filenameHint: 'hologram-still.mp4',
+      resourceType: 'video',
+      publicId: `xevo/hologram-pose/${analysisId}-${Date.now()}`,
+    })
+    const res = await fetch(modal, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        video_url: videoUrl,
+        analysis_id: `${analysisId}-holo-still`,
+        model: 'mediapipe',
+      }),
+    })
+    const body = (await res.json().catch(() => null)) as {
+      status?: string
+      metrics?: { pose_data?: Array<{ frame?: number; landmarks?: Record<string, MpLandmark> }> }
+    } | null
+    if (!res.ok || body?.status !== 'success') {
+      console.warn('[Technique][hologram] still pose modal failed', {
+        analysisId,
+        status: body?.status ?? res.status,
+        elapsedMs: Date.now() - t0,
+      })
+      return null
+    }
+    const rows = Array.isArray(body.metrics?.pose_data) ? body.metrics!.pose_data! : []
+    let best: HologramKeypoints | null = null
+    let bestN = 0
+    for (const row of rows) {
+      if (!row?.landmarks) continue
+      const k = landmarksInImageToHologramKeypoints(row.landmarks)
+      const n = k ? Object.keys(k).length : 0
+      if (n > bestN) {
+        best = k
+        bestN = n
+      }
+    }
+    console.log('[Technique][hologram] still pose ok', {
+      analysisId,
+      joints: bestN,
+      frames: rows.length,
+      elapsedMs: Date.now() - t0,
+    })
+    return best
+  } catch (e: any) {
+    console.warn('[Technique][hologram] still pose error', { analysisId, message: e?.message })
+    return null
+  }
+}
+
+/** Nearest pose_data row to the contact frame / ms for hologram joint fallback. */
+export function pickPoseLandmarksForHologram(
+  poseData: unknown,
+  moment: { contactMs: number } | { frame: number },
+  fpsHint?: number
+): Record<string, { x: number; y: number; visibility?: number }> | null {
+  if (!Array.isArray(poseData) || !poseData.length) return null
+  const rows = poseData
+    .map((r) => {
+      if (!r || typeof r !== 'object') return null
+      const row = r as { frame?: unknown; frame_idx?: unknown; landmarks?: unknown }
+      const frame =
+        typeof row.frame === 'number'
+          ? row.frame
+          : typeof row.frame_idx === 'number'
+            ? row.frame_idx
+            : null
+      const landmarks = row.landmarks
+      if (frame == null || !landmarks || typeof landmarks !== 'object') return null
+      return { frame, landmarks: landmarks as Record<string, { x: number; y: number; visibility?: number }> }
+    })
+    .filter(Boolean) as Array<{
+    frame: number
+    landmarks: Record<string, { x: number; y: number; visibility?: number }>
+  }>
+  if (!rows.length) return null
+  let targetFrame: number
+  if ('frame' in moment) {
+    targetFrame = moment.frame
+  } else {
+    const fps = fpsHint && fpsHint > 1 ? fpsHint : 30
+    targetFrame = Math.round((moment.contactMs / 1000) * fps)
+  }
+  let best = rows[0]
+  let dist = Math.abs(best.frame - targetFrame)
+  for (const row of rows) {
+    const d = Math.abs(row.frame - targetFrame)
+    if (d < dist) {
+      best = row
+      dist = d
+    }
+  }
+  return best.landmarks
 }
 
 async function comfyImageEdit(
@@ -406,7 +681,137 @@ async function gptImageEdit(prompt: string, images: { name: string; data: Buffer
   return Buffer.from(b64, 'base64')
 }
 
-/** Impact frame -> square crop -> GPT Image hologram; both PNGs land under /uploads/technique-holograms. */
+/**
+ * OpenRouter Nano Banana image edit: contact crop in, electric-blue hologram out.
+ * Tries /images first, then chat/completions with modalities as a fallback.
+ */
+async function openRouterImageEdit(prompt: string, frame: Buffer): Promise<Buffer> {
+  const key = process.env.OPENROUTER_API_KEY?.trim()
+  if (!key) throw new HologramError(503, 'OPENROUTER_API_KEY is not set')
+  const base = (process.env.OPENROUTER_BASE_URL?.trim() || 'https://openrouter.ai/api/v1').replace(/\/+$/, '')
+  const model =
+    process.env.HOLOGRAM_IMAGE_MODEL?.trim() ||
+    process.env.OPENROUTER_HOLOGRAM_MODEL?.trim() ||
+    DEFAULT_OPENROUTER_HOLOGRAM_MODEL
+  const dataUrl = `data:image/png;base64,${frame.toString('base64')}`
+  const headers = {
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+    'X-Title': 'Xevo contact hologram',
+  }
+  const t0 = Date.now()
+
+  const imagesRes = await fetch(`${base}/images`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model,
+      prompt: `${prompt}\n\nAvoid: ${HOLOGRAM_NEGATIVE_PROMPT}`,
+      input_references: [{ type: 'image_url', image_url: { url: dataUrl } }],
+    }),
+  })
+  if (imagesRes.ok) {
+    const body: any = await imagesRes.json().catch(() => ({}))
+    const b64 = body?.data?.[0]?.b64_json
+    if (typeof b64 === 'string') {
+      console.log('[Technique][hologram] openrouter /images done', {
+        model,
+        elapsedMs: Date.now() - t0,
+      })
+      return Buffer.from(b64, 'base64')
+    }
+  } else {
+    const detail = (await imagesRes.text()).slice(0, 400)
+    console.warn('[Technique][hologram] openrouter /images failed, trying chat', {
+      status: imagesRes.status,
+      detail,
+    })
+  }
+
+  const chatRes = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: `${prompt}\n\nAvoid: ${HOLOGRAM_NEGATIVE_PROMPT}` },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+      modalities: ['image', 'text'],
+    }),
+  })
+  const chatBody: any = await chatRes.json().catch(() => ({}))
+  if (!chatRes.ok) {
+    throw new Error(
+      `OpenRouter hologram ${chatRes.status}: ${chatBody?.error?.message ?? JSON.stringify(chatBody).slice(0, 400)}`
+    )
+  }
+  const message = chatBody?.choices?.[0]?.message
+  const images: unknown[] = Array.isArray(message?.images) ? message.images : []
+  for (const img of images) {
+    const url =
+      typeof img === 'string'
+        ? img
+        : typeof (img as { image_url?: { url?: string } })?.image_url?.url === 'string'
+          ? (img as { image_url: { url: string } }).image_url.url
+          : typeof (img as { image_url?: string })?.image_url === 'string'
+            ? (img as { image_url: string }).image_url
+            : null
+    const m = url?.match(/^data:image\/[a-zA-Z0-9+.-]+;base64,(.+)$/)
+    if (m?.[1]) {
+      console.log('[Technique][hologram] openrouter chat image done', {
+        model,
+        elapsedMs: Date.now() - t0,
+      })
+      return Buffer.from(m[1], 'base64')
+    }
+  }
+  const parts = Array.isArray(message?.content) ? message.content : []
+  for (const part of parts) {
+    const inline = part?.inline_data?.data || part?.inlineData?.data
+    if (typeof inline === 'string') {
+      console.log('[Technique][hologram] openrouter chat inline done', {
+        model,
+        elapsedMs: Date.now() - t0,
+      })
+      return Buffer.from(inline, 'base64')
+    }
+  }
+  throw new Error('OpenRouter hologram returned no image bytes')
+}
+
+/** SDPose-only pass so Smart 3D can keep elbow/joint hit targets after a non-Comfy image edit. */
+async function comfyExtractKeypoints(png: Buffer): Promise<HologramKeypoints | null> {
+  const baseUrl = String(process.env.COMFYUI_BASE_URL ?? '').trim()
+  if (!baseUrl || !fs.existsSync(KEYPOINTS_WORKFLOW)) return null
+  try {
+    const workflow = JSON.parse(fs.readFileSync(KEYPOINTS_WORKFLOW, 'utf8')) as Record<
+      string,
+      { inputs: Record<string, unknown> }
+    >
+    const id = randomUUID()
+    const up = await comfyUploadImage(baseUrl, png, `xevo_hologram_pose_${id}.png`)
+    workflow['1'].inputs.image = up.subfolder ? `${up.subfolder}/${up.name}` : up.name
+    const { prompt_id } = await comfyQueuePrompt(baseUrl, workflow)
+    await comfyWaitForOutputImage(baseUrl, prompt_id, { timeoutMs: 180_000, pollMs: 1000 })
+    const keypoints = await readComfyKeypoints(baseUrl, prompt_id)
+    console.log('[Technique][hologram] sdpose keypoints', {
+      promptId: prompt_id,
+      joints: keypoints ? Object.keys(keypoints).length : 0,
+    })
+    return keypoints
+  } catch (e: any) {
+    console.warn('[Technique][hologram] sdpose keypoints failed', e?.message)
+    return null
+  }
+}
+
+/** Impact frame -> square crop -> hologram still; both PNGs land under /uploads/technique-holograms. */
 export async function generateHologram(opts: {
   analysisId: string
   videoPath: string
@@ -415,6 +820,10 @@ export async function generateHologram(opts: {
   prompt?: string
   /** Filename stem so a second render does not replace the player's files. */
   fileStem?: string
+  /** Analysis pose_data — MediaPipe fallback for joints when SDPose is unavailable. */
+  poseData?: unknown
+  /** FPS hint when mapping contactMs -> pose frame. */
+  fpsHint?: number
 }): Promise<HologramResult> {
   if (!fs.existsSync(opts.videoPath)) throw new HologramError(404, 'Video file missing on server')
   const raw =
@@ -425,18 +834,43 @@ export async function generateHologram(opts: {
   // Centre on the player when ComfyUI can find them; the fixed crop is the fallback.
   let box: PlayerBox | null = null
   const comfyBase = String(process.env.COMFYUI_BASE_URL ?? '').trim()
-  if (hologramProvider() === 'comfy' && comfyBase) {
+  const provider = hologramProvider()
+  if (comfyBase) {
     box = await detectPlayerBox(comfyBase, raw, randomUUID()).catch((e) => {
       console.warn('[Technique][hologram] player detection failed, using the fixed crop', e?.message)
       return null
     })
   }
-  const frame = await squareCrop(raw, box)
+  const { buffer: frame, crop } = await squareCrop(raw, box)
   const prompt = opts.prompt ?? HOLOGRAM_PROMPT
-  const { image: hologram, keypoints } =
-    hologramProvider() === 'openai'
-      ? { image: await gptImageEdit(prompt, [{ name: 'frame.png', data: frame }]), keypoints: null }
-      : await comfyImageEdit(prompt, frame)
+
+  let hologram: Buffer
+  let keypoints: HologramKeypoints | null = null
+  if (provider === 'openrouter') {
+    hologram = await openRouterImageEdit(prompt, frame)
+    // Pose the *edited* still — crop-projected analysis pose will not match Nano Banana framing.
+    keypoints = await comfyExtractKeypoints(hologram)
+    if (!keypoints) keypoints = await poseHologramStill(hologram, opts.analysisId)
+  } else if (provider === 'openai') {
+    hologram = await gptImageEdit(prompt, [{ name: 'frame.png', data: frame }])
+    keypoints = await comfyExtractKeypoints(hologram)
+    if (!keypoints) keypoints = await poseHologramStill(hologram, opts.analysisId)
+  } else {
+    ;({ image: hologram, keypoints } = await comfyImageEdit(prompt, frame))
+  }
+
+  if (!keypoints && opts.poseData) {
+    const lm = pickPoseLandmarksForHologram(opts.poseData, opts.moment, opts.fpsHint)
+    if (lm) {
+      keypoints = mapMediaPipeToHologramKeypoints(lm, crop)
+      console.log('[Technique][hologram] mediapipe crop fallback', {
+        joints: keypoints ? Object.keys(keypoints).length : 0,
+      })
+    }
+  }
+
+  // Keypoints come from posing the edited still (same 0..1 space as the PNG). Do not remap —
+  // overview joints already prove MediaPipe coords paint correctly when the pose is on that image.
 
   const dir = path.join(HOLOGRAM_UPLOAD_ROOT, opts.analysisId)
   fs.mkdirSync(dir, { recursive: true })
@@ -455,3 +889,4 @@ export async function generateHologram(opts: {
     keypoints,
   }
 }
+
