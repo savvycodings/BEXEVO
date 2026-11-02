@@ -22,7 +22,7 @@ export type LeaderboardEntry = {
   overallScore: number | null;
 };
 
-function parseAreaLocation(area: string | null | undefined): {
+export function parseAreaLocation(area: string | null | undefined): {
   city: string;
   country: string;
 } {

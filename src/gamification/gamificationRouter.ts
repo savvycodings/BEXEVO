@@ -9,6 +9,7 @@ import {
 } from "./service";
 import { getXpLeaderboard, type LeaderboardScope } from "./leaderboard";
 import { localDateKey } from "./stats";
+import { getCountryDetail, getCountryRanking, getPlayerRanking } from "./ranking";
 
 const router = express.Router();
 router.use(express.json());
@@ -39,6 +40,49 @@ router.get("/leaderboard", async (req, res) => {
   } catch (e: unknown) {
     console.error("[Gamification] leaderboard GET error", e);
     return res.status(500).json({ error: "Failed to load leaderboard" });
+  }
+});
+
+function queryText(value: unknown): string {
+  return typeof value === "string" ? value.trim().slice(0, 80) : "";
+}
+
+// Rating ranking for the Friends tab (World / Club players, countries, country page).
+router.get("/ranking/players", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const scope = queryText(req.query.scope) === "club" ? "club" : "world";
+    const friendsOnly = ["1", "true"].includes(queryText(req.query.friendsOnly));
+    const result = await getPlayerRanking({ requesterId: userId, scope, friendsOnly, q: queryText(req.query.q) });
+    return res.json(result);
+  } catch (e: unknown) {
+    console.error("[Gamification] ranking players GET error", e);
+    return res.status(500).json({ error: "Failed to load ranking" });
+  }
+});
+
+router.get("/ranking/countries", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    return res.json(await getCountryRanking(queryText(req.query.q)));
+  } catch (e: unknown) {
+    console.error("[Gamification] ranking countries GET error", e);
+    return res.status(500).json({ error: "Failed to load country ranking" });
+  }
+});
+
+router.get("/ranking/countries/:code", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const detail = await getCountryDetail(String(req.params.code || ""));
+    if (!detail) return res.status(404).json({ error: "Country not found" });
+    return res.json(detail);
+  } catch (e: unknown) {
+    console.error("[Gamification] ranking country GET error", e);
+    return res.status(500).json({ error: "Failed to load country" });
   }
 });
 

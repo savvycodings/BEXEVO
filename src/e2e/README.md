@@ -4,6 +4,10 @@ Real HTTP requests against a real running BEXevo server.
 
 - `technique.flow.e2e.ts` — sign in → upload a video → analyze → read the analysis → confirm it
   shows up in `/activities` → (optional) generate Comfy correction images.
+- `ranking.flow.e2e.ts` — the Friends-tab Rating ranking: World order (unrated last), accent-free
+  search keeping ranks, friends-only recount, the 3-player country rule, the country page (clubs,
+  pending club ignored, top cities, 404) and the Club scope. It seeds analyses and locations in the
+  database, so it runs only against the server's own fakes-mode database, and deletes its users.
 - `follows.flow.e2e.ts` — follow / unfollow coaches and countries, the target rules, and follows
   disappearing with deleted users (the last step deletes user rows, so it runs only against the
   server's own fakes-mode database).
