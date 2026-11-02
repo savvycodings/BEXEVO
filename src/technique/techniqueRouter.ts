@@ -22,6 +22,8 @@ import {
   type TechniqueCorrectionFrameInsight,
 } from '../db'
 import { randomUUID, createHash } from 'crypto'
+import { parseFocus } from './drillCatalog'
+import { listDrills } from './drillStore'
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import {
   extractFrame,
@@ -2159,6 +2161,27 @@ Rules:
   } catch (e: any) {
     console.error('[Technique] Analyze error:', e)
     return res.status(500).json({ error: 'Analyze failed' })
+  }
+})
+
+/**
+ * Suggested drills: GET /drills?focus=elbow,racket&shot=Forehand%20volley&lang=es&limit=3.
+ * `focus` is most important first; the catalogue lives in the technique_drill table.
+ */
+router.get('/drills', async (req, res) => {
+  try {
+    const userId = await resolveUserId(req)
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' })
+    const focus = parseFocus(req.query.focus)
+    const shot = typeof req.query.shot === 'string' ? req.query.shot.slice(0, 80) : null
+    const lang = req.query.lang === 'es' ? 'es' : 'en'
+    const limitRaw = Number(req.query.limit)
+    const limit = Number.isFinite(limitRaw) ? Math.min(10, Math.max(1, Math.round(limitRaw))) : 3
+    const drills = await listDrills({ focus, shotLabel: shot, lang, limit })
+    return res.json({ data: { drills } })
+  } catch (err) {
+    console.error('[Technique] drills failed', err)
+    return res.status(500).json({ error: 'Could not load drills' })
   }
 })
 

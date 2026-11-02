@@ -1105,3 +1105,22 @@ export const proReference = pgTable(
   },
   (table) => [index("pro_reference_stroke_idx").on(table.strokePreset)]
 );
+
+/** Practice drills shown after an analysis. Seeded from DEFAULT_DRILLS in technique/drillCatalog.ts when empty. */
+export const techniqueDrill = pgTable("technique_drill", {
+  slug: text("slug").primaryKey(),
+  /** beginner | intermediate | advanced */
+  level: text("level").notNull(),
+  minutes: integer("minutes").notNull(),
+  /** Focus ids the drill works on: elbow | racket | torso | foot. */
+  focus: jsonb("focus").$type<string[]>().notNull(),
+  /** Shot tags it's written for (volley, bandeja, forehand…); empty = any shot. */
+  shots: jsonb("shots").$type<string[]>().notNull(),
+  videoUrl: text("videoUrl"),
+  sort: integer("sort").notNull().default(0),
+  /** { en: { title, summary, focusLabel, steps[] }, es: { … } } */
+  content: jsonb("content").notNull(),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("createdAt").notNull().defaultNow(),
+  updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+});
