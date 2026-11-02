@@ -14,6 +14,21 @@ import {
   slugifyClubName,
   type ClubStatus,
 } from "./clubDefinitions";
+import {
+  MembershipError,
+  approveRequest,
+  cancelInvite,
+  declineRequest,
+  inviteToClub,
+  memberCountForClub,
+  memberCountsForClubs,
+  membershipErrorStatus,
+  myMembership,
+  ownedClubOrThrow,
+  ownerMembersView,
+  removeMember,
+  serializeMembership,
+} from "./clubMembership";
 
 const router = express.Router();
 router.use(express.json());
@@ -100,7 +115,8 @@ async function loadCourtsAndAmenitiesAndGallery(clubId: string) {
 
 function serializeClub(
   row: typeof club.$inferSelect,
-  extra: Awaited<ReturnType<typeof loadCourtsAndAmenitiesAndGallery>>
+  extra: Awaited<ReturnType<typeof loadCourtsAndAmenitiesAndGallery>>,
+  memberCount = 0
 ) {
   return {
     id: row.id,
@@ -135,7 +151,18 @@ function serializeClub(
     amenityKeys: extra.amenities.map((a) => a.amenityKey),
     galleryImageUrls: extra.gallery.map((g) => g.imageUrl),
     gallery: extra.gallery.map((g) => ({ id: g.id, imageUrl: g.imageUrl })),
+    memberCount,
   };
+}
+
+/** Serializes many clubs with one grouped member-count query. */
+async function serializeClubs(rows: (typeof club.$inferSelect)[]) {
+  const counts = await memberCountsForClubs(rows.map((r) => r.id));
+  return Promise.all(
+    rows.map(async (row) =>
+      serializeClub(row, await loadCourtsAndAmenitiesAndGallery(row.id), counts.get(row.id) ?? 0)
+    )
+  );
 }
 
 async function loadOwnedClub(userId: string, clubId: string) {
@@ -223,9 +250,7 @@ router.get("/mine", async (req, res) => {
       where: (c, { eq: _eq }) => _eq(c.ownerUserId, userId),
       orderBy: (c, { desc: _desc }) => [_desc(c.createdAt)],
     });
-    const clubs = await Promise.all(
-      rows.map(async (row) => serializeClub(row, await loadCourtsAndAmenitiesAndGallery(row.id)))
-    );
+    const clubs = await serializeClubs(rows);
     return res.json({ clubs });
   } catch (e: unknown) {
     console.error("[Club] mine GET error", e);
@@ -242,7 +267,7 @@ router.get("/mine/:id", async (req, res) => {
     if (!row) return res.status(404).json({ error: "Club not found" });
 
     const extra = await loadCourtsAndAmenitiesAndGallery(row.id);
-    return res.json({ club: serializeClub(row, extra) });
+    return res.json({ club: serializeClub(row, extra, await memberCountForClub(row.id)) });
   } catch (e: unknown) {
     console.error("[Club] mine/:id GET error", e);
     return res.status(500).json({ error: "Failed to load club" });
@@ -295,7 +320,7 @@ router.patch("/mine/:id", async (req, res) => {
 
     const row = await db.query.club.findFirst({ where: (c, { eq: _eq }) => _eq(c.id, clubId) });
     const extra = await loadCourtsAndAmenitiesAndGallery(clubId);
-    return res.json({ club: serializeClub(row!, extra) });
+    return res.json({ club: serializeClub(row!, extra, await memberCountForClub(clubId)) });
   } catch (e: unknown) {
     console.error("[Club] mine/:id PATCH error", e);
     return res.status(500).json({ error: "Failed to update club" });
@@ -579,6 +604,83 @@ router.put("/mine/:id/amenities", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Owner: members, invites and join requests. Rules live in clubMembership.ts.
+// ---------------------------------------------------------------------------
+
+type OwnerHandler = (
+  req: express.Request,
+  res: express.Response,
+  userId: string,
+  clubId: string
+) => Promise<unknown>;
+
+function ownerMembers(label: string, handler: OwnerHandler): express.RequestHandler {
+  return async (req, res) => {
+    try {
+      const userId = await resolveUserId(req);
+      if (!userId) return res.status(401).json({ error: "Unauthorized" });
+      await handler(req, res, userId, String(req.params.id || "").trim());
+    } catch (e: unknown) {
+      if (e instanceof MembershipError) {
+        return res.status(membershipErrorStatus(e)).json({ error: e.message, code: e.code });
+      }
+      console.error(`[Club] ${label} error`, e);
+      return res.status(500).json({ error: "Something went wrong" });
+    }
+  };
+}
+
+router.get(
+  "/mine/:id/members",
+  ownerMembers("members GET", async (_req, res, userId, clubId) => {
+    const row = await ownedClubOrThrow(userId, clubId);
+    res.json({ clubStatus: row.status, ...(await ownerMembersView(row.id)) });
+  })
+);
+
+router.post(
+  "/mine/:id/invites",
+  ownerMembers("invite", async (req, res, userId, clubId) => {
+    const result = await inviteToClub(userId, clubId, req.body?.email);
+    res
+      .status(result.created ? 201 : 200)
+      .json({ membership: serializeMembership(result.membership), state: result.state });
+  })
+);
+
+router.delete(
+  "/mine/:id/invites/:membershipId",
+  ownerMembers("cancel invite", async (req, res, userId, clubId) => {
+    await cancelInvite(userId, clubId, String(req.params.membershipId || ""));
+    res.json({ ok: true });
+  })
+);
+
+router.post(
+  "/mine/:id/requests/:membershipId/approve",
+  ownerMembers("approve request", async (req, res, userId, clubId) => {
+    const result = await approveRequest(userId, clubId, String(req.params.membershipId || ""));
+    res.json({ membership: serializeMembership(result.membership), state: result.state });
+  })
+);
+
+router.post(
+  "/mine/:id/requests/:membershipId/decline",
+  ownerMembers("decline request", async (req, res, userId, clubId) => {
+    await declineRequest(userId, clubId, String(req.params.membershipId || ""));
+    res.json({ ok: true });
+  })
+);
+
+router.delete(
+  "/mine/:id/members/:membershipId",
+  ownerMembers("remove member", async (req, res, userId, clubId) => {
+    await removeMember(userId, clubId, String(req.params.membershipId || ""));
+    res.json({ ok: true });
+  })
+);
+
+// ---------------------------------------------------------------------------
 // Admin (shared-secret header, same pattern as profileRouter's admin-grant-coach)
 // ---------------------------------------------------------------------------
 
@@ -589,9 +691,7 @@ router.get("/admin/pending", async (req, res) => {
       where: (c, { inArray: _inArray }) => _inArray(c.status, ["pending", "rejected"]),
       orderBy: (c, { asc: _asc }) => [_asc(c.createdAt)],
     });
-    const clubs = await Promise.all(
-      rows.map(async (row) => serializeClub(row, await loadCourtsAndAmenitiesAndGallery(row.id)))
-    );
+    const clubs = await serializeClubs(rows);
     return res.json({ clubs });
   } catch (e: unknown) {
     console.error("[Club] admin/pending GET error", e);
@@ -646,9 +746,7 @@ router.get("/", async (_req, res) => {
       where: (c, { eq: _eq }) => _eq(c.status, "approved" satisfies ClubStatus),
       orderBy: (c, { desc: _desc }) => [_desc(c.createdAt)],
     });
-    const clubs = await Promise.all(
-      rows.map(async (row) => serializeClub(row, await loadCourtsAndAmenitiesAndGallery(row.id)))
-    );
+    const clubs = await serializeClubs(rows);
     return res.json({ clubs });
   } catch (e: unknown) {
     console.error("[Club] list GET error", e);
@@ -665,8 +763,14 @@ router.get("/:slug", async (req, res) => {
     });
     if (!row) return res.status(404).json({ error: "Club not found" });
 
-    const extra = await loadCourtsAndAmenitiesAndGallery(row.id);
-    return res.json({ club: serializeClub(row, extra) });
+    const [extra, memberCount, userId] = await Promise.all([
+      loadCourtsAndAmenitiesAndGallery(row.id),
+      memberCountForClub(row.id),
+      resolveUserId(req).catch(() => null),
+    ]);
+    const payload: Record<string, unknown> = serializeClub(row, extra, memberCount);
+    if (userId) payload.myMembership = await myMembership(userId, row.id);
+    return res.json({ club: payload });
   } catch (e: unknown) {
     console.error("[Club] detail GET error", e);
     return res.status(500).json({ error: "Failed to load club" });

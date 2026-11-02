@@ -1183,3 +1183,39 @@ export const friendship = pgTable(
     index("friendship_requester_status_idx").on(table.requesterUserId, table.status),
   ]
 );
+
+/**
+ * A player's link to a club. One row per (club, player) pair:
+ * - `invited`: the club owner invited the player, who hasn't answered;
+ * - `requested`: the player asked to join, and the owner hasn't answered;
+ * - `member`: the player belongs to the club.
+ * Declining, cancelling, leaving and removing delete the row. `isMain` marks the player's main
+ * club (at most one per player, enforced by a partial unique index).
+ */
+export const clubMembership = pgTable(
+  "club_membership",
+  {
+    id: text("id").primaryKey(),
+    clubId: text("clubId")
+      .notNull()
+      .references(() => club.id, { onDelete: "cascade" }),
+    userId: text("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** `invited` | `requested` | `member` */
+    state: text("state").notNull(),
+    /** The email the owner typed, on invites only. */
+    invitedEmail: text("invitedEmail"),
+    createdByUserId: text("createdByUserId").references(() => user.id, { onDelete: "set null" }),
+    isMain: boolean("isMain").notNull().default(false),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    joinedAt: timestamp("joinedAt"),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("club_membership_club_user_idx").on(table.clubId, table.userId),
+    index("club_membership_user_state_idx").on(table.userId, table.state),
+    index("club_membership_club_state_idx").on(table.clubId, table.state),
+    uniqueIndex("club_membership_user_main_idx").on(table.userId).where(sql`"isMain"`),
+  ]
+);
