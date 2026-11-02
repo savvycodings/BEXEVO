@@ -775,6 +775,57 @@ router.post("/hand", async (req, res) => {
   }
 });
 
+/**
+ * Partial update for the Game Settings player-details step: only the keys present in the
+ * body are written; everything else on the profile is left alone.
+ */
+router.post("/player-details", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const has = (key: string) => Object.prototype.hasOwnProperty.call(body, key);
+    const set: Partial<typeof userProfile.$inferInsert> = {};
+
+    for (const key of ["dominantHand", "courtSide"] as const) {
+      if (!has(key)) continue;
+      const value = String(body[key] ?? "").trim().toLowerCase();
+      if (value !== "left" && value !== "right") {
+        return res.status(400).json({ error: `${key} must be left or right.` });
+      }
+      set[key] = value;
+    }
+    if (has("heightCm")) {
+      const parsed = parseRequiredHeightCm(body.heightCm);
+      if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+      set.heightCm = parsed.value;
+    }
+    if (has("weightKg")) {
+      const parsed = parseRequiredWeightKg(body.weightKg);
+      if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+      set.weightKg = parsed.value;
+    }
+    if (Object.keys(set).length === 0) {
+      return res.status(400).json({
+        error: "Send at least one of dominantHand, courtSide, heightCm, weightKg.",
+      });
+    }
+
+    const updated = await db
+      .update(userProfile)
+      .set({ ...set, updatedAt: new Date() })
+      .where(eq(userProfile.userId, userId))
+      .returning({ userId: userProfile.userId });
+    if (!updated.length) return res.status(404).json({ error: "Profile not found" });
+
+    return res.json({ ok: true });
+  } catch (e: any) {
+    console.error("[Profile] player details update error", e);
+    return res.status(500).json({ error: "Failed to update player details" });
+  }
+});
+
 router.get("/directory", async (req, res) => {
   try {
     const requesterId = await resolveUserId(req);
