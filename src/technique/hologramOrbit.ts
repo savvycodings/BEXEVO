@@ -237,12 +237,25 @@ export async function generateHologramOrbit(opts: {
     }
   }
   if (!poseUrl) poseUrl = publicFileUrl(rel)
+  console.log('[Technique][hologram] orbit video ready', {
+    analysisId: opts.analysisId,
+    rel,
+    bytes: video.length,
+    durationMs,
+    frameCount,
+    size: size ? `${size.width}x${size.height}` : null,
+    poseUrl: poseUrl ? poseUrl.slice(0, 120) : null,
+  })
   const orbitFrames = poseUrl
     ? await poseOrbit(poseUrl, opts.analysisId).catch((e) => {
         console.warn('[Technique][hologram] orbit pose skipped', e?.message)
         return [] as HologramOrbitFrame[]
       })
     : []
+  console.log('[Technique][hologram] orbit mediapipe', {
+    analysisId: opts.analysisId,
+    frames: orbitFrames.length,
+  })
   return {
     orbitVideo: rel,
     orbitDurationMs: durationMs,
@@ -261,7 +274,11 @@ export function isHologramOrbitConfigured(): boolean {
   const flag = process.env.HOLOGRAM_ORBIT_ENABLED?.trim().toLowerCase()
   if (flag === 'false' || flag === '0' || flag === 'no') return false
   if (flag !== 'true' && flag !== '1' && flag !== 'yes') return false
-  return Boolean(process.env.OPENROUTER_API_KEY?.trim())
+  const ok = Boolean(process.env.OPENROUTER_API_KEY?.trim())
+  if (!ok) {
+    console.warn('[Technique][hologram] orbit enabled but OPENROUTER_API_KEY is missing')
+  }
+  return ok
 }
 
 /** Phones only paint a paused clip when the mp4 index is at the front of the file. */

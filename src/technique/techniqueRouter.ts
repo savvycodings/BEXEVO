@@ -4913,6 +4913,10 @@ async function healOrbitFromDisk(
   cached: NonNullable<ReturnType<typeof parseCachedHologram>>,
   metrics: Record<string, unknown>
 ): Promise<boolean> {
+  // Seedance writes the mp4 before MediaPipe finishes — never "heal" into done while a job is
+  // still running or the client will stop polling and miss orbitFrames.
+  const job = readHologramJob({ hologram_job: metrics.hologram_orbit_job })
+  if (job?.status === 'running') return false
   if (cached.orbitVideo) {
     const abs = path.join(process.cwd(), cached.orbitVideo.replace(/^\//, ''))
     if (fs.existsSync(abs)) return false
@@ -4922,9 +4926,8 @@ async function healOrbitFromDisk(
   const abs = path.join(process.cwd(), rel.replace(/^\//, ''))
   if (!fs.existsSync(abs)) return false
   const finishedAt = new Date().toISOString()
-  const startedAt =
-    (readHologramJob({ hologram_job: metrics.hologram_orbit_job })?.startedAt as string | undefined) ??
-    finishedAt
+  const startedAt = (job?.startedAt as string | undefined) ?? finishedAt
+  const frames = cached.orbitFrames ?? []
   await writeHologramState(analysisId, {
     hologram: {
       ...cached,
@@ -4933,7 +4936,7 @@ async function healOrbitFromDisk(
       orbitFrameCount: cached.orbitFrameCount ?? 96,
       orbitWidth: cached.orbitWidth ?? 496,
       orbitHeight: cached.orbitHeight ?? 864,
-      orbitFrames: cached.orbitFrames ?? [],
+      orbitFrames: frames,
     },
     hologram_orbit_job: { status: 'done', startedAt, finishedAt },
   })
@@ -4944,10 +4947,14 @@ async function healOrbitFromDisk(
     orbitFrameCount: cached.orbitFrameCount ?? 96,
     orbitWidth: cached.orbitWidth ?? 496,
     orbitHeight: cached.orbitHeight ?? 864,
-    orbitFrames: cached.orbitFrames ?? [],
+    orbitFrames: frames,
   }
   metrics.hologram_orbit_job = { status: 'done', startedAt, finishedAt }
-  console.log('[Technique][hologram] orbit restored from disk', { analysisId, video: rel })
+  console.log('[Technique][hologram] orbit restored from disk', {
+    analysisId,
+    video: rel,
+    orbitFrames: frames.length,
+  })
   return true
 }
 
@@ -4967,6 +4974,7 @@ async function startOrbitIfNeeded(
   if (!fs.existsSync(imagePath)) return false
   const orbitStartedAt = new Date().toISOString()
   await writeHologramState(analysisId, { hologram_orbit_job: { status: 'running', startedAt: orbitStartedAt } })
+  console.log('[Technique][hologram] orbit start', { analysisId, still: live.image, imagePath })
   void generateHologramOrbit({ analysisId, imagePath })
     .then(async (orbit) => {
       // Re-read so a keypoints refresh that landed while Seedance ran is not wiped.
@@ -4983,6 +4991,14 @@ async function startOrbitIfNeeded(
         })
         return
       }
+      console.log('[Technique][hologram] orbit done', {
+        analysisId,
+        still: latest.image ?? live.image,
+        video: orbit.orbitVideo,
+        frames: orbit.orbitFrames.length,
+        durationMs: orbit.orbitDurationMs,
+        size: `${orbit.orbitWidth}x${orbit.orbitHeight}`,
+      })
       await writeHologramState(analysisId, {
         hologram: { ...latest, ...orbit },
         hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
@@ -5098,7 +5114,20 @@ router.get('/analysis/:id/hologram', async (req, res) => {
     const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
     const cached = parseCachedHologram(metrics.hologram)
     if (cached) await healOrbitFromDisk(analysis.id, cached, metrics)
-    return res.json(hologramStatusBody(analysis.id, metrics))
+    const body = hologramStatusBody(analysis.id, metrics)
+    if (body.orbitVideo || body.status === 'running' || body.orbitStatus === 'running') {
+      console.log('[Technique][hologram] status', {
+        analysisId: analysis.id,
+        status: body.status,
+        image: body.image,
+        orbitStatus: body.orbitStatus,
+        orbitVideo: body.orbitVideo,
+        orbitFrames: Array.isArray(body.orbitFrames) ? body.orbitFrames.length : 0,
+        size:
+          body.orbitWidth && body.orbitHeight ? `${body.orbitWidth}x${body.orbitHeight}` : null,
+      })
+    }
+    return res.json(body)
   } catch (e: any) {
     console.error('[Technique][hologram] fetch error', e)
     return res.status(500).json({ error: 'Failed to fetch hologram' })
@@ -5236,7 +5265,13 @@ router.post('/hologram', async (req, res) => {
         const keepOrbit = forceRegenerate === true ? {} : preservedOrbitFields(prior)
         const orbitAlready = Boolean((keepOrbit as { orbitVideo?: string }).orbitVideo)
         const orbitStartedAt = new Date().toISOString()
-        const startOrbit = isHologramOrbitConfigured() && !orbitAlready
+        const orbitConfigured = isHologramOrbitConfigured()
+        const startOrbit = orbitConfigured && !orbitAlready
+        if (!orbitAlready && !orbitConfigured) {
+          console.warn('[Technique][hologram] orbit skipped — set HOLOGRAM_ORBIT_ENABLED=true with OPENROUTER_API_KEY', {
+            analysisId,
+          })
+        }
         await writeHologramState(analysisId, {
           hologram: { ...result, ...keepOrbit },
           hologram_job: { status: 'done', startedAt, finishedAt: new Date().toISOString() },
@@ -5249,8 +5284,20 @@ router.post('/hologram', async (req, res) => {
         if (!startOrbit) return
         const imagePath = path.join(process.cwd(), result.image.replace(/^\//, ''))
         try {
+          console.log('[Technique][hologram] orbit start', {
+            analysisId,
+            still: result.image,
+            imagePath,
+          })
           const orbit = await generateHologramOrbit({ analysisId, imagePath })
-          console.log('[Technique][hologram] orbit done', { analysisId, video: orbit.orbitVideo, frames: orbit.orbitFrames.length })
+          console.log('[Technique][hologram] orbit done', {
+            analysisId,
+            still: result.image,
+            video: orbit.orbitVideo,
+            frames: orbit.orbitFrames.length,
+            durationMs: orbit.orbitDurationMs,
+            size: `${orbit.orbitWidth}x${orbit.orbitHeight}`,
+          })
           await writeHologramState(analysisId, {
             hologram: { ...result, ...keepOrbit, ...orbit },
             hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
