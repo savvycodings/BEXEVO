@@ -17,6 +17,12 @@ const ORBIT_PROMPT =
   'Electric royal blue fine horizontal scan-line hologram, bald featureless mannequin head, no face, no clothes, one racket, one ball touching the racket face. ' +
   'Pure black background, glossy black floor, blue concentric rings under the feet.'
 
+/** Extra wording when Seedance rejects the still as a real person (privacy). */
+const ORBIT_PROMPT_PRIVACY_RETRY =
+  ORBIT_PROMPT +
+  ' CRITICAL: This is a fully synthetic CGI mannequin hologram, not a photograph of a real human. ' +
+  'No real person, no identifiable face, no biometric likeness — only a featureless digital wireframe statue.'
+
 /** MediaPipe joint name -> the hologram overlay name. Neck is filled from the shoulders. */
 const JOINTS: Record<string, string> = {
   NOSE: 'nose',
@@ -78,6 +84,7 @@ function point(p: MpPoint | undefined): HologramKeypoints[string] | null {
 }
 
 export type HologramOrbit = {
+  /** Durable public URL when Cloudinary is configured; otherwise a local /uploads path. */
   orbitVideo: string
   orbitDurationMs: number
   orbitFrameCount: number
@@ -121,7 +128,11 @@ function publicFileUrl(uploadPath: string): string | null {
   return `${base.replace(/\/+$/, '')}${uploadPath.startsWith('/') ? uploadPath : `/${uploadPath}`}`
 }
 
-async function openRouterVideo(png: Buffer): Promise<Buffer> {
+function isPrivacyReject(message: string): boolean {
+  return /InputImageSensitiveContentDetected|PrivacyInformation|may contain real person/i.test(message)
+}
+
+async function openRouterVideoOnce(png: Buffer, prompt: string): Promise<Buffer> {
   const cfg = openRouterConfig()
   if (!cfg) throw new Error('OPENROUTER_API_KEY is not set')
   const dataUrl = `data:image/png;base64,${png.toString('base64')}`
@@ -135,7 +146,7 @@ async function openRouterVideo(png: Buffer): Promise<Buffer> {
     headers,
     body: JSON.stringify({
       model: cfg.model,
-      prompt: ORBIT_PROMPT,
+      prompt,
       duration: 4,
       resolution: '480p',
       aspect_ratio: '9:16',
@@ -144,8 +155,17 @@ async function openRouterVideo(png: Buffer): Promise<Buffer> {
       frame_images: [{ type: 'image_url', image_url: { url: dataUrl }, frame_type: 'first_frame' }],
     }),
   })
-  if (!submit.ok) throw new Error(`OpenRouter submit failed: ${submit.status} ${await submit.text()}`)
-  let status = (await submit.json()) as { id?: string; polling_url?: string; status?: string; error?: string; unsigned_urls?: string[] }
+  if (!submit.ok) {
+    const text = await submit.text()
+    throw new Error(`OpenRouter submit failed: ${submit.status} ${text}`)
+  }
+  let status = (await submit.json()) as {
+    id?: string
+    polling_url?: string
+    status?: string
+    error?: string
+    unsigned_urls?: string[]
+  }
   const jobId = status.id
   if (!jobId) throw new Error('OpenRouter returned no video job')
   const pollUrl = status.polling_url || `${cfg.base}/videos/${jobId}`
@@ -162,6 +182,18 @@ async function openRouterVideo(png: Buffer): Promise<Buffer> {
   const video = await fetch(content, { headers })
   if (!video.ok) throw new Error(`OpenRouter download failed: ${video.status}`)
   return Buffer.from(await video.arrayBuffer())
+}
+
+/** Seedance orbit clip; one privacy-safe prompt retry when the still is flagged as a real person. */
+async function openRouterVideo(png: Buffer): Promise<Buffer> {
+  try {
+    return await openRouterVideoOnce(png, ORBIT_PROMPT)
+  } catch (e: any) {
+    const message = String(e?.message ?? e)
+    if (!isPrivacyReject(message)) throw e
+    console.warn('[Technique][hologram] orbit privacy reject — retrying with synthetic-mannequin prompt')
+    return openRouterVideoOnce(png, ORBIT_PROMPT_PRIVACY_RETRY)
+  }
 }
 
 async function probeSize(videoPath: string): Promise<{ width: number; height: number } | null> {
@@ -222,12 +254,15 @@ export async function generateHologramOrbit(opts: {
   const meta = await probeVideoStreamMeta(abs)
   const size = await probeSize(abs)
   const durationMs = Math.round((meta?.durationSec ?? 4) * 1000)
-  const frameCount = meta?.nbFrames && meta.nbFrames > 1 ? meta.nbFrames : Math.max(2, Math.round((meta?.fps ?? 24) * (durationMs / 1000)))
-  // Prefer Cloudinary for Modal pose (ngrok free interstitial can block the public URL).
-  let poseUrl: string | null = null
+  const frameCount =
+    meta?.nbFrames && meta.nbFrames > 1
+      ? meta.nbFrames
+      : Math.max(2, Math.round((meta?.fps ?? 24) * (durationMs / 1000)))
+  // Cloudinary URL is durable across Railway redeploys; local /uploads is not.
+  let publicUrl: string | null = null
   if (isCloudinaryConfigured()) {
     try {
-      poseUrl = await uploadBufferToCloudinary(video, {
+      publicUrl = await uploadBufferToCloudinary(video, {
         filenameHint: 'hologram-orbit.mp4',
         resourceType: 'video',
         publicId: `xevo/hologram-orbit/${opts.analysisId}-${Date.now()}`,
@@ -236,15 +271,18 @@ export async function generateHologramOrbit(opts: {
       console.warn('[Technique][hologram] orbit cloudinary upload failed', e?.message)
     }
   }
-  if (!poseUrl) poseUrl = publicFileUrl(rel)
+  if (!publicUrl) publicUrl = publicFileUrl(rel)
+  const poseUrl = publicUrl
+  const orbitVideo = publicUrl || rel
   console.log('[Technique][hologram] orbit video ready', {
     analysisId: opts.analysisId,
     rel,
+    orbitVideo: orbitVideo.slice(0, 160),
+    durable: /^https?:\/\//i.test(orbitVideo),
     bytes: video.length,
     durationMs,
     frameCount,
     size: size ? `${size.width}x${size.height}` : null,
-    poseUrl: poseUrl ? poseUrl.slice(0, 120) : null,
   })
   const orbitFrames = poseUrl
     ? await poseOrbit(poseUrl, opts.analysisId).catch((e) => {
@@ -257,7 +295,7 @@ export async function generateHologramOrbit(opts: {
     frames: orbitFrames.length,
   })
   return {
-    orbitVideo: rel,
+    orbitVideo,
     orbitDurationMs: durationMs,
     orbitFrameCount: frameCount,
     orbitWidth: size?.width ?? 496,
@@ -279,6 +317,17 @@ export function isHologramOrbitConfigured(): boolean {
     console.warn('[Technique][hologram] orbit enabled but OPENROUTER_API_KEY is missing')
   }
   return ok
+}
+
+/** User-facing orbit failure text (stored on hologram_orbit_job.error). */
+export function orbitFailureMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err ?? '')
+  if (isPrivacyReject(message)) {
+    return 'Orbit blocked: the still was flagged as a real person. Try again or regenerate the hologram.'
+  }
+  if (/timed out/i.test(message)) return 'Orbit timed out while generating the video.'
+  if (/OPENROUTER_API_KEY/i.test(message)) return 'Orbit is not configured (missing OpenRouter key).'
+  return 'Failed to build the orbit video'
 }
 
 /** Phones only paint a paused clip when the mp4 index is at the front of the file. */

@@ -107,7 +107,7 @@ import {
   readHologramJob,
   resolveHologramMoment,
 } from './hologram'
-import { generateHologramOrbit, isHologramOrbitConfigured } from './hologramOrbit'
+import { generateHologramOrbit, isHologramOrbitConfigured, orbitFailureMessage } from './hologramOrbit'
 import { runChat, chatContent } from '../lib/chatProvider'
 import {
   llmContentHasJsonObject,
@@ -5005,13 +5005,14 @@ async function startOrbitIfNeeded(
       })
     })
     .catch(async (e: any) => {
-      console.error('[Technique][hologram] orbit error', { analysisId, message: e?.message })
+      const error = orbitFailureMessage(e)
+      console.error('[Technique][hologram] orbit error', { analysisId, message: e?.message, error })
       await writeHologramState(analysisId, {
         hologram_orbit_job: {
           status: 'failed',
           startedAt: orbitStartedAt,
           finishedAt: new Date().toISOString(),
-          error: 'Failed to build the 3D turn',
+          error,
         },
       }).catch(() => {})
     })
@@ -5054,6 +5055,10 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
     orbitWidth: cached?.orbitWidth ?? null,
     orbitHeight: cached?.orbitHeight ?? null,
     orbitFrames: cached?.orbitFrames ?? null,
+    orbitError:
+      orbitStatusOf(metrics) === 'failed'
+        ? (readHologramJob({ hologram_job: metrics.hologram_orbit_job })?.error ?? null)
+        : null,
     proStatus,
     proImage: pro?.image ?? null,
     proKeypoints: pro?.keypoints ?? null,
@@ -5303,13 +5308,14 @@ router.post('/hologram', async (req, res) => {
             hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
           })
         } catch (orbitErr: any) {
-          console.error('[Technique][hologram] orbit error', { analysisId, message: orbitErr?.message })
+          const error = orbitFailureMessage(orbitErr)
+          console.error('[Technique][hologram] orbit error', { analysisId, message: orbitErr?.message, error })
           await writeHologramState(analysisId, {
             hologram_orbit_job: {
               status: 'failed',
               startedAt: orbitStartedAt,
               finishedAt: new Date().toISOString(),
-              error: 'Failed to build the 3D turn',
+              error,
             },
           }).catch(() => {})
         }
