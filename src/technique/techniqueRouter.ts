@@ -4917,10 +4917,9 @@ async function healOrbitFromDisk(
   // still running or the client will stop polling and miss orbitFrames.
   const job = readHologramJob({ hologram_job: metrics.hologram_orbit_job })
   if (job?.status === 'running') return false
-  if (cached.orbitVideo) {
-    const abs = path.join(process.cwd(), cached.orbitVideo.replace(/^\//, ''))
-    if (fs.existsSync(abs)) return false
-  }
+  // Never overwrite an existing orbitVideo (https or /uploads). Old heal treated Cloudinary
+  // URLs as "missing on disk" and clobbered them with a local path.
+  if (cached.orbitVideo) return false
   const rel = findSavedOrbitVideo(analysisId)
   if (!rel) return false
   const abs = path.join(process.cwd(), rel.replace(/^\//, ''))

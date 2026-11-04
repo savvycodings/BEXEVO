@@ -3,7 +3,6 @@ import path from 'path'
 import { execFile } from 'child_process'
 import sharp from 'sharp'
 import ffmpegStatic from 'ffmpeg-static'
-import { isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload'
 import { probeVideoStreamMeta } from './frameExtractor'
 import type { HologramKeypoints, HologramOrbitFrame } from './hologram'
 
@@ -84,7 +83,7 @@ function point(p: MpPoint | undefined): HologramKeypoints[string] | null {
 }
 
 export type HologramOrbit = {
-  /** Durable public URL when Cloudinary is configured; otherwise a local /uploads path. */
+  /** Railway /uploads path (same host as the hologram still). */
   orbitVideo: string
   orbitDurationMs: number
   orbitFrameCount: number
@@ -258,27 +257,13 @@ export async function generateHologramOrbit(opts: {
     meta?.nbFrames && meta.nbFrames > 1
       ? meta.nbFrames
       : Math.max(2, Math.round((meta?.fps ?? 24) * (durationMs / 1000)))
-  // Cloudinary URL is durable across Railway redeploys; local /uploads is not.
-  let publicUrl: string | null = null
-  if (isCloudinaryConfigured()) {
-    try {
-      publicUrl = await uploadBufferToCloudinary(video, {
-        filenameHint: 'hologram-orbit.mp4',
-        resourceType: 'video',
-        publicId: `xevo/hologram-orbit/${opts.analysisId}-${Date.now()}`,
-      })
-    } catch (e: any) {
-      console.warn('[Technique][hologram] orbit cloudinary upload failed', e?.message)
-    }
-  }
-  if (!publicUrl) publicUrl = publicFileUrl(rel)
-  const poseUrl = publicUrl
-  const orbitVideo = publicUrl || rel
+  // Same pattern as the hologram still: serve from Railway /uploads. MediaPipe needs an absolute URL.
+  const poseUrl = publicFileUrl(rel)
+  const orbitVideo = rel
   console.log('[Technique][hologram] orbit video ready', {
     analysisId: opts.analysisId,
-    rel,
-    orbitVideo: orbitVideo.slice(0, 160),
-    durable: /^https?:\/\//i.test(orbitVideo),
+    orbitVideo,
+    poseUrl: poseUrl ? poseUrl.slice(0, 160) : null,
     bytes: video.length,
     durationMs,
     frameCount,
@@ -290,6 +275,9 @@ export async function generateHologramOrbit(opts: {
         return [] as HologramOrbitFrame[]
       })
     : []
+  if (!poseUrl) {
+    console.warn('[Technique][hologram] orbit mediapipe skipped — no public Railway URL (set PUBLIC_VIDEO_BASE_URL)')
+  }
   console.log('[Technique][hologram] orbit mediapipe', {
     analysisId: opts.analysisId,
     frames: orbitFrames.length,
