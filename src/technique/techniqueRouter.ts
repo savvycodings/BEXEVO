@@ -100,13 +100,20 @@ import {
 } from './jointMetrics'
 import {
   generateHologram,
-  HOLOGRAM_PROMPT_RED,
+  HOLOGRAM_PROMPT_ORANGE,
   HologramError,
   isHologramConfigured,
   parseCachedHologram,
   readHologramJob,
   resolveHologramMoment,
 } from './hologram'
+import {
+  findProClip,
+  loadSharedProHologram,
+  proClipId,
+  readProContactFrame,
+  saveSharedProHologram,
+} from './proShotLibrary'
 import { generateHologramOrbit, isHologramOrbitConfigured, orbitFailureMessage } from './hologramOrbit'
 import { runChat, chatContent } from '../lib/chatProvider'
 import {
@@ -5065,10 +5072,37 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
   }
 }
 
-/** Pro-library clip matched to this shot, and the pro's contact frame to render in red. */
+type ProHologramSource =
+  | { kind: 'ready'; videoPath: string; frame: number; clipId: string; strokePreset: string; viewId: string }
+  | { kind: 'needs-contact'; clipId: string }
+
+/**
+ * Curated pro clip for the shot and camera the player submitted.
+ * The still is that clip's own contact frame (ball meeting the racket), not a
+ * fraction of the way through the file. A clip with no measured contact is not guessed.
+ */
 async function resolveProHologramSource(
   metrics: Record<string, unknown>
-): Promise<{ videoPath: string; frame: number } | null> {
+): Promise<ProHologramSource | null> {
+  const shot = metrics.user_shot as { strokePreset?: string; viewId?: string } | undefined
+  const preset = typeof shot?.strokePreset === 'string' ? shot.strokePreset.trim() : ''
+  const viewId = typeof shot?.viewId === 'string' && shot.viewId.trim() ? shot.viewId.trim() : 'front'
+  if (preset) {
+    const clip = findProClip(preset, viewId)
+    if (clip) {
+      const frame = readProContactFrame(clip.id)
+      if (frame == null) return { kind: 'needs-contact', clipId: clip.id }
+      return {
+        kind: 'ready',
+        videoPath: clip.videoPath,
+        frame,
+        clipId: clip.id,
+        strokePreset: clip.strokePreset,
+        viewId: clip.viewId,
+      }
+    }
+  }
+
   const retrieval = metrics.retrieval as
     | { neighbors?: Array<{ train_video_id?: string; train_sample_id?: string }> }
     | undefined
@@ -5087,21 +5121,24 @@ async function resolveProHologramSource(
   if (!videoId) return null
   const video = await db.query.trainVideo.findFirst({
     where: (tv, { eq: _eq }) => _eq(tv.id, videoId),
-    columns: { cloudinaryPublicId: true },
+    columns: { cloudinaryPublicId: true, strokePreset: true },
   })
   if (!video?.cloudinaryPublicId) return null
   const videoPath = resolveVideoPath(video.cloudinaryPublicId)
   if (!fs.existsSync(videoPath)) return null
-  // The pro's own contact frame (the one /joints measures); 45% into the clip when it was never resolved.
   const meta = neighbor.train_sample_id ? await getTrainSampleImpactMeta(neighbor.train_sample_id) : null
+  if (meta?.impactFrame == null) return null
   const last = totalFrames && totalFrames > 1 ? totalFrames - 1 : null
-  const frame =
-    meta?.impactFrame != null
-      ? Math.min(meta.impactFrame, last ?? meta.impactFrame)
-      : last != null
-        ? Math.min(last, Math.round(totalFrames! * 0.45))
-        : 0
-  return { videoPath, frame }
+  const frame = Math.min(meta.impactFrame, last ?? meta.impactFrame)
+  const strokePreset = typeof video.strokePreset === 'string' ? video.strokePreset : preset || 'train'
+  return {
+    kind: 'ready',
+    videoPath,
+    frame,
+    clipId: `train:${videoId}`,
+    strokePreset,
+    viewId: viewId || 'front',
+  }
 }
 
 /** Hologram of the player at ball contact; poll after POST /hologram. */
@@ -5169,29 +5206,68 @@ router.post('/hologram', async (req, res) => {
     if (!analysis) return res.status(404).json({ error: 'Analysis not found' })
 
     const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
+    let proJob = readHologramJob({ hologram_job: metrics.hologram_pro_job })
+    if (proJob?.status !== 'running') {
+      const shot = metrics.user_shot as { strokePreset?: string; viewId?: string } | undefined
+      const preset = typeof shot?.strokePreset === 'string' ? shot.strokePreset.trim() : ''
+      const viewId = typeof shot?.viewId === 'string' && shot.viewId.trim() ? shot.viewId.trim() : 'front'
+      const shared = preset ? await loadSharedProHologram(proClipId(preset, viewId)).catch(() => null) : null
+      if (shared && !parseCachedHologram(metrics.hologram_pro)) {
+        const finishedAt = new Date().toISOString()
+        await writeHologramState(analysisId, {
+          hologram_pro: shared,
+          hologram_pro_job: { status: 'done', startedAt: finishedAt, finishedAt },
+        })
+        metrics.hologram_pro = shared
+        metrics.hologram_pro_job = { status: 'done', startedAt: finishedAt, finishedAt }
+        console.log('[Technique][hologram] pro reused', { analysisId, image: shared.image })
+      }
+    }
     const proCached = parseCachedHologram(metrics.hologram_pro)
-    const proJob = readHologramJob({ hologram_job: metrics.hologram_pro_job })
+    proJob = readHologramJob({ hologram_job: metrics.hologram_pro_job })
     const proStartedAt = new Date().toISOString()
     const proSource =
-      (forceRegenerate === true || !proCached) && proJob?.status !== 'running'
-        ? await resolveProHologramSource(metrics)
-        : null
-    if (proSource) {
+      !proCached && proJob?.status !== 'running' ? await resolveProHologramSource(metrics) : null
+    if (proSource?.kind === 'needs-contact') {
+      console.warn('[Technique][hologram] pro contact frame not measured', { clipId: proSource.clipId })
+      await writeHologramState(analysisId, {
+        hologram_pro_job: {
+          status: 'failed',
+          startedAt: proStartedAt,
+          finishedAt: proStartedAt,
+          error: 'Pro contact frame is not measured for this shot yet',
+        },
+      })
+      metrics.hologram_pro_job = {
+        status: 'failed',
+        startedAt: proStartedAt,
+        finishedAt: proStartedAt,
+        error: 'Pro contact frame is not measured for this shot yet',
+      }
+    } else if (proSource?.kind === 'ready') {
       await writeHologramState(analysisId, {
         hologram_pro_job: { status: 'running', startedAt: proStartedAt },
       })
       metrics.hologram_pro_job = { status: 'running', startedAt: proStartedAt }
+      const source = proSource
       void generateHologram({
         analysisId,
-        videoPath: proSource.videoPath,
-        moment: { frame: proSource.frame },
-        prompt: HOLOGRAM_PROMPT_RED,
+        videoPath: source.videoPath,
+        moment: { frame: source.frame },
+        prompt: HOLOGRAM_PROMPT_ORANGE,
         fileStem: 'pro-hologram',
       })
-        .then((result) => {
-          console.log('[Technique][hologram] pro done', { analysisId, image: result.image })
+        .then(async (result) => {
+          const stored = await saveSharedProHologram({
+            id: source.clipId,
+            strokePreset: source.strokePreset,
+            viewId: source.viewId,
+            videoPath: source.videoPath,
+            result,
+          })
+          console.log('[Technique][hologram] pro done', { analysisId, image: stored.image, clipId: source.clipId })
           return writeHologramState(analysisId, {
-            hologram_pro: result,
+            hologram_pro: stored,
             hologram_pro_job: { status: 'done', startedAt: proStartedAt, finishedAt: new Date().toISOString() },
           })
         })

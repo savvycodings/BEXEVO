@@ -15,3 +15,5 @@ uploads/technique-correction-videos/
 uploads/technique-holograms/
 .env.e2e
 uploads/hologram/
+uploads/pro-library/
+yolov8n.pt

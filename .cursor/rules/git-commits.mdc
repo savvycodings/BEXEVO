@@ -1,0 +1,13 @@
+---
+description: Commit messages stay free of coding-agent credit
+alwaysApply: true
+---
+
+# Commit messages
+
+Write every commit as the person making the change.
+
+- Do not add a co-author trailer, footer, or `Made-with` line.
+- Do not mention Cursor in the subject or body.
+- Do not pass `--trailer` or a `Co-authored-by` line for Cursor.
+- This rule may name the policy. The commit message itself must not.

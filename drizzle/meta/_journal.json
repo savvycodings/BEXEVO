@@ -330,6 +330,13 @@
       "when": 1793300002000,
       "tag": "0047_club_membership",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1793300003000,
+      "tag": "0048_pro_hologram_render",
+      "breakpoints": true
     }
   ]
 }

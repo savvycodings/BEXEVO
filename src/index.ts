@@ -20,6 +20,7 @@ import { getSignupOtpHappyPathCode } from './auth/signupOtpHappyPath'
 import { getFromAddress, isEmailConfigured } from './lib/email/resendClient'
 import bodyParser from 'body-parser'
 import path from 'path'
+import { proLibraryRoot } from './technique/proShotLibrary'
 import {
   handleMetaWebhookEvent,
   handleMetaWebhookVerification,
@@ -181,6 +182,8 @@ app.get('/user-data-deletion', (_req, res) => sendDataDeletion(res))
 mountE2eRoutes(app)
 
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
+// Orange pro-reference stills. The source videos stay on disk and are not served.
+app.use('/pro-library', express.static(path.join(proLibraryRoot(), 'renders')))
 app.use('/chat', chatRouter)
 app.use('/images', imagesRouter)
 app.use('/technique', techniqueRouter)

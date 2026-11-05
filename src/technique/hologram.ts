@@ -68,6 +68,14 @@ export const HOLOGRAM_PROMPT_RED = hologramPrompt({
   avoid: 'pink, salmon, orange',
 })
 
+/** Pro reference: the same hologram, orange instead of blue. No orbit is generated from it. */
+export const HOLOGRAM_PROMPT_ORANGE = hologramPrompt({
+  main: 'vivid orange #FF6A00',
+  glow: 'orange',
+  accent: 'amber',
+  avoid: 'blue, cyan, turquoise, red, pink, pale yellow',
+})
+
 /** Qwen invents extra balls, glowing orbs and a floorless void without this. */
 export const HOLOGRAM_NEGATIVE_PROMPT =
   'two balls, second ball, extra ball, multiple balls, duplicate ball, ball on the floor, floating orbs, ' +

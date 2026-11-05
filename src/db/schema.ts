@@ -1219,3 +1219,24 @@ export const clubMembership = pgTable(
     uniqueIndex("club_membership_user_main_idx").on(table.userId).where(sql`"isMain"`),
   ]
 );
+
+/**
+ * One orange Nano Banana still per pro library clip (shot + camera). Reused for every
+ * player who submits that shot, so the contact-frame render is not sent again.
+ */
+export const proHologramRender = pgTable(
+  "pro_hologram_render",
+  {
+    id: text("id").primaryKey(),
+    strokePreset: text("strokePreset").notNull(),
+    viewId: text("viewId").notNull(),
+    videoPath: text("videoPath").notNull(),
+    contactFrame: integer("contactFrame"),
+    image: text("image"),
+    frameImage: text("frameImage"),
+    keypoints: jsonb("keypoints"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [index("pro_hologram_render_shot_view_idx").on(table.strokePreset, table.viewId)]
+);
