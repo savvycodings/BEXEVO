@@ -106,13 +106,19 @@ import {
   parseCachedHologram,
   readHologramJob,
   resolveHologramMoment,
+  type HologramJob,
 } from './hologram'
 import {
   findProClip,
   loadSharedProHologram,
   proClipId,
+  proLibraryRoot,
+  proOrbitDiskPath,
+  proOrbitPublicPath,
+  proStoredFile,
   readProContactFrame,
   saveSharedProHologram,
+  saveSharedProOrbit,
 } from './proShotLibrary'
 import { generateHologramOrbit, isHologramOrbitConfigured, orbitFailureMessage } from './hologramOrbit'
 import { runChat, chatContent } from '../lib/chatProvider'
@@ -5035,15 +5041,47 @@ function orbitStatusOf(metrics: Record<string, unknown>): 'idle' | 'running' | '
   return 'idle'
 }
 
+/** Still + Seedance for one pro clip can run past the player's 10 minute stale window. */
+const PRO_JOB_STALE_MS = 20 * 60_000
+
+function proJobOf(metrics: Record<string, unknown>): HologramJob | null {
+  const raw = metrics.hologram_pro_job
+  if (!raw || typeof raw !== 'object') return null
+  const job = raw as Partial<HologramJob>
+  if (job.status !== 'running' && job.status !== 'done' && job.status !== 'failed') return null
+  const startedAt = typeof job.startedAt === 'string' ? job.startedAt : ''
+  if (job.status === 'running') {
+    const age = Date.now() - Date.parse(startedAt)
+    if (!Number.isFinite(age) || age > PRO_JOB_STALE_MS) {
+      return { status: 'failed', startedAt, error: 'Pro reference did not finish. Please try again.' }
+    }
+  }
+  return {
+    status: job.status,
+    startedAt,
+    ...(typeof job.finishedAt === 'string' ? { finishedAt: job.finishedAt } : {}),
+    ...(typeof job.error === 'string' ? { error: job.error } : {}),
+  }
+}
+
+function proStatusOf(metrics: Record<string, unknown>): 'idle' | 'running' | 'done' | 'failed' | 'unavailable' {
+  const pro = parseCachedHologram(metrics.hologram_pro)
+  if (pro?.orbitVideo) return 'done'
+  const job = proJobOf(metrics)
+  if (job?.status === 'running') return 'running'
+  if (job?.error === 'unavailable') return 'unavailable'
+  if (job?.status === 'failed') return 'failed'
+  return 'idle'
+}
+
 function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>) {
   const cached = parseCachedHologram(metrics.hologram)
   const job = readHologramJob(metrics)
   const pro = parseCachedHologram(metrics.hologram_pro)
-  const proJob = readHologramJob({ hologram_job: metrics.hologram_pro_job })
+  const proJob = proJobOf(metrics)
   const status =
     job?.status === 'running' ? 'running' : cached ? 'done' : job?.status === 'failed' ? 'failed' : 'idle'
-  const proStatus =
-    proJob?.status === 'running' ? 'running' : pro ? 'done' : proJob?.status === 'failed' ? 'failed' : 'idle'
+  const proStatus = proStatusOf(metrics)
   return {
     analysisId,
     status,
@@ -5068,7 +5106,195 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
     proStatus,
     proImage: pro?.image ?? null,
     proKeypoints: pro?.keypoints ?? null,
+    proOrbitVideo: pro?.orbitVideo ?? null,
+    proOrbitDurationMs: pro?.orbitDurationMs ?? null,
+    proOrbitFrameCount: pro?.orbitFrameCount ?? null,
+    proOrbitWidth: pro?.orbitWidth ?? null,
+    proOrbitHeight: pro?.orbitHeight ?? null,
+    proOrbitFrames: pro?.orbitFrames ?? null,
     proError: proStatus === 'failed' ? (proJob?.error ?? null) : null,
+  }
+}
+
+/** One Seedance job per pro clip, even if several players open that shot together. */
+const proClipLocks = new Set<string>()
+
+/**
+ * Orange contact-frame hologram, then the Seedance orbit of that frame.
+ * Saved once per shot and camera. The phone is not told it is done until the video exists.
+ */
+async function ensureProHologram(
+  analysisId: string,
+  metrics: Record<string, unknown>,
+  analysisStatus: string | null
+): Promise<void> {
+  if (parseCachedHologram(metrics.hologram_pro)?.orbitVideo) return
+  const shot = metrics.user_shot as { strokePreset?: string; viewId?: string } | undefined
+  const preset = typeof shot?.strokePreset === 'string' ? shot.strokePreset.trim() : ''
+  const viewId = typeof shot?.viewId === 'string' && shot.viewId.trim() ? shot.viewId.trim() : 'front'
+  const startedAt = new Date().toISOString()
+  if (!preset) {
+    if (analysisStatus === 'completed' || analysisStatus === 'failed') {
+      await writeHologramState(analysisId, {
+        hologram_pro_job: { status: 'failed', startedAt, finishedAt: startedAt, error: 'unavailable' },
+      })
+      metrics.hologram_pro_job = { status: 'failed', startedAt, finishedAt: startedAt, error: 'unavailable' }
+    }
+    return
+  }
+  const clipId = proClipId(preset, viewId)
+  if (proClipLocks.has(clipId)) {
+    if (proJobOf(metrics)?.status !== 'running') {
+      await writeHologramState(analysisId, { hologram_pro_job: { status: 'running', startedAt } })
+      metrics.hologram_pro_job = { status: 'running', startedAt }
+    }
+    return
+  }
+  proClipLocks.add(clipId)
+  let started = false
+  try {
+    const shared = await loadSharedProHologram(clipId).catch((e) => {
+      console.warn('[Technique][hologram] pro cache read failed', e?.message)
+      return null
+    })
+    if (shared?.orbitVideo) {
+      await writeHologramState(analysisId, {
+        hologram_pro: shared,
+        hologram_pro_job: { status: 'done', startedAt, finishedAt: startedAt },
+      })
+      metrics.hologram_pro = shared
+      metrics.hologram_pro_job = { status: 'done', startedAt, finishedAt: startedAt }
+      console.log('[Technique][hologram] pro reused', { analysisId, clipId, video: shared.orbitVideo })
+      return
+    }
+    const job = proJobOf(metrics)
+    if (
+      job?.status === 'failed' &&
+      job.error !== 'unavailable' &&
+      !/did not finish/i.test(job.error ?? '')
+    ) {
+      return
+    }
+
+    const source = await resolveProHologramSource(metrics)
+    if (!source) {
+      console.warn('[Technique][hologram] pro clip missing', { analysisId, preset, viewId, root: proLibraryRoot() })
+      if (job?.error !== 'unavailable') {
+        await writeHologramState(analysisId, {
+          hologram_pro_job: { status: 'failed', startedAt, finishedAt: startedAt, error: 'unavailable' },
+        })
+        metrics.hologram_pro_job = { status: 'failed', startedAt, finishedAt: startedAt, error: 'unavailable' }
+      }
+      return
+    }
+    if (source.kind === 'needs-contact') {
+      console.warn('[Technique][hologram] pro contact frame not measured', { clipId: source.clipId })
+      await writeHologramState(analysisId, {
+        hologram_pro_job: {
+          status: 'failed',
+          startedAt,
+          finishedAt: startedAt,
+          error: 'Pro contact frame is not measured for this shot yet',
+        },
+      })
+      metrics.hologram_pro_job = {
+        status: 'failed',
+        startedAt,
+        finishedAt: startedAt,
+        error: 'Pro contact frame is not measured for this shot yet',
+      }
+      return
+    }
+    if (!isHologramOrbitConfigured()) {
+      await writeHologramState(analysisId, {
+        hologram_pro_job: {
+          status: 'failed',
+          startedAt,
+          finishedAt: startedAt,
+          error: 'Orbit is not configured (missing OpenRouter key).',
+        },
+      })
+      metrics.hologram_pro_job = {
+        status: 'failed',
+        startedAt,
+        finishedAt: startedAt,
+        error: 'Orbit is not configured (missing OpenRouter key).',
+      }
+      return
+    }
+
+    await writeHologramState(analysisId, { hologram_pro_job: { status: 'running', startedAt } })
+    metrics.hologram_pro_job = { status: 'running', startedAt }
+    const ready = source
+    started = true
+    void (async () => {
+      try {
+        let still = shared?.image ? shared : null
+        if (!still) {
+          const rendered = await generateHologram({
+            analysisId,
+            videoPath: ready.videoPath,
+            moment: { frame: ready.frame },
+            prompt: HOLOGRAM_PROMPT_ORANGE,
+            fileStem: 'pro-hologram',
+          })
+          still = await saveSharedProHologram({
+            id: ready.clipId,
+            strokePreset: ready.strokePreset,
+            viewId: ready.viewId,
+            videoPath: ready.videoPath,
+            result: rendered,
+          })
+          console.log('[Technique][hologram] pro still ready', { analysisId, clipId: ready.clipId, image: still.image })
+        }
+        const again = await loadSharedProHologram(ready.clipId).catch(() => null)
+        if (again?.orbitVideo) {
+          await writeHologramState(analysisId, {
+            hologram_pro: again,
+            hologram_pro_job: { status: 'done', startedAt, finishedAt: new Date().toISOString() },
+          })
+          return
+        }
+        const imageDisk = proStoredFile(still.image)
+        if (!imageDisk || !fs.existsSync(imageDisk)) throw new Error('Orange hologram file is missing')
+        console.log('[Technique][hologram] pro orbit start', { analysisId, clipId: ready.clipId, frame: ready.frame })
+        const orbit = await generateHologramOrbit({
+          analysisId: `${analysisId}-pro`,
+          imagePath: imageDisk,
+          look: 'orange',
+          output: { absolutePath: proOrbitDiskPath(ready.clipId), publicPath: proOrbitPublicPath(ready.clipId) },
+        })
+        const stored = await saveSharedProOrbit(ready.clipId, orbit)
+        if (!stored?.orbitVideo) throw new Error('Pro orbit was not stored')
+        console.log('[Technique][hologram] pro orbit done', {
+          analysisId,
+          clipId: ready.clipId,
+          video: stored.orbitVideo,
+          frames: stored.orbitFrames?.length ?? 0,
+        })
+        await writeHologramState(analysisId, {
+          hologram_pro: stored,
+          hologram_pro_job: { status: 'done', startedAt, finishedAt: new Date().toISOString() },
+        })
+      } catch (e: any) {
+        const error = /Orange hologram|Nano|OpenRouter submit|pro hologram/i.test(String(e?.message))
+          ? 'Failed to generate the pro hologram'
+          : orbitFailureMessage(e)
+        console.error('[Technique][hologram] pro error', { analysisId, clipId: ready.clipId, message: e?.message, error })
+        await writeHologramState(analysisId, {
+          hologram_pro_job: {
+            status: 'failed',
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            error,
+          },
+        }).catch(() => {})
+      } finally {
+        proClipLocks.delete(clipId)
+      }
+    })()
+  } finally {
+    if (!started) proClipLocks.delete(clipId)
   }
 }
 
@@ -5155,6 +5381,7 @@ router.get('/analysis/:id/hologram', async (req, res) => {
     const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
     const cached = parseCachedHologram(metrics.hologram)
     if (cached) await healOrbitFromDisk(analysis.id, cached, metrics)
+    await ensureProHologram(analysis.id, metrics, analysis.status)
     const body = hologramStatusBody(analysis.id, metrics)
     if (body.orbitVideo || body.status === 'running' || body.orbitStatus === 'running') {
       console.log('[Technique][hologram] status', {
@@ -5206,83 +5433,7 @@ router.post('/hologram', async (req, res) => {
     if (!analysis) return res.status(404).json({ error: 'Analysis not found' })
 
     const metrics = (analysis.metrics ?? {}) as Record<string, unknown>
-    let proJob = readHologramJob({ hologram_job: metrics.hologram_pro_job })
-    if (proJob?.status !== 'running') {
-      const shot = metrics.user_shot as { strokePreset?: string; viewId?: string } | undefined
-      const preset = typeof shot?.strokePreset === 'string' ? shot.strokePreset.trim() : ''
-      const viewId = typeof shot?.viewId === 'string' && shot.viewId.trim() ? shot.viewId.trim() : 'front'
-      const shared = preset ? await loadSharedProHologram(proClipId(preset, viewId)).catch(() => null) : null
-      if (shared && !parseCachedHologram(metrics.hologram_pro)) {
-        const finishedAt = new Date().toISOString()
-        await writeHologramState(analysisId, {
-          hologram_pro: shared,
-          hologram_pro_job: { status: 'done', startedAt: finishedAt, finishedAt },
-        })
-        metrics.hologram_pro = shared
-        metrics.hologram_pro_job = { status: 'done', startedAt: finishedAt, finishedAt }
-        console.log('[Technique][hologram] pro reused', { analysisId, image: shared.image })
-      }
-    }
-    const proCached = parseCachedHologram(metrics.hologram_pro)
-    proJob = readHologramJob({ hologram_job: metrics.hologram_pro_job })
-    const proStartedAt = new Date().toISOString()
-    const proSource =
-      !proCached && proJob?.status !== 'running' ? await resolveProHologramSource(metrics) : null
-    if (proSource?.kind === 'needs-contact') {
-      console.warn('[Technique][hologram] pro contact frame not measured', { clipId: proSource.clipId })
-      await writeHologramState(analysisId, {
-        hologram_pro_job: {
-          status: 'failed',
-          startedAt: proStartedAt,
-          finishedAt: proStartedAt,
-          error: 'Pro contact frame is not measured for this shot yet',
-        },
-      })
-      metrics.hologram_pro_job = {
-        status: 'failed',
-        startedAt: proStartedAt,
-        finishedAt: proStartedAt,
-        error: 'Pro contact frame is not measured for this shot yet',
-      }
-    } else if (proSource?.kind === 'ready') {
-      await writeHologramState(analysisId, {
-        hologram_pro_job: { status: 'running', startedAt: proStartedAt },
-      })
-      metrics.hologram_pro_job = { status: 'running', startedAt: proStartedAt }
-      const source = proSource
-      void generateHologram({
-        analysisId,
-        videoPath: source.videoPath,
-        moment: { frame: source.frame },
-        prompt: HOLOGRAM_PROMPT_ORANGE,
-        fileStem: 'pro-hologram',
-      })
-        .then(async (result) => {
-          const stored = await saveSharedProHologram({
-            id: source.clipId,
-            strokePreset: source.strokePreset,
-            viewId: source.viewId,
-            videoPath: source.videoPath,
-            result,
-          })
-          console.log('[Technique][hologram] pro done', { analysisId, image: stored.image, clipId: source.clipId })
-          return writeHologramState(analysisId, {
-            hologram_pro: stored,
-            hologram_pro_job: { status: 'done', startedAt: proStartedAt, finishedAt: new Date().toISOString() },
-          })
-        })
-        .catch(async (e: any) => {
-          console.error('[Technique][hologram] pro error', { analysisId, message: e?.message })
-          await writeHologramState(analysisId, {
-            hologram_pro_job: {
-              status: 'failed',
-              startedAt: proStartedAt,
-              finishedAt: new Date().toISOString(),
-              error: 'Failed to generate the pro hologram',
-            },
-          }).catch(() => {})
-        })
-    }
+    await ensureProHologram(analysisId, metrics, analysis.status)
     const cached = parseCachedHologram(metrics.hologram)
     const requestFrame =
       typeof contactFrame === 'number' && Number.isFinite(contactFrame) ? Math.round(contactFrame) : null

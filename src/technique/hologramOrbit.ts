@@ -16,11 +16,27 @@ const ORBIT_PROMPT =
   'Electric royal blue fine horizontal scan-line hologram, bald featureless mannequin head, no face, no clothes, one racket, one ball touching the racket face. ' +
   'Pure black background, glossy black floor, blue concentric rings under the feet.'
 
-/** Extra wording when Seedance rejects the still as a real person (privacy). */
-const ORBIT_PROMPT_PRIVACY_RETRY =
-  ORBIT_PROMPT +
+/** Same orbit, in the pro-reference orange, of the pro's contact frame. */
+const ORBIT_PROMPT_ORANGE =
+  'One continuous camera orbit, clockwise only, constant speed, exactly one full 360-degree revolution in this 4 second clip. ' +
+  'The camera keeps going the same direction the whole time. It does not reverse, rewind, or turn back. ' +
+  'It starts on this exact view, passes the player\'s side, continues until the back of the head and the back of the body are clearly visible, ' +
+  'continues to the other side, and only then arrives back at this starting view by finishing the circle. ' +
+  'The holographic player is a frozen statue. Zero body motion. The hands, arms, racket, head, and feet never move. ' +
+  'Do not push, raise, or lower the hand. Do not bring the other hand onto the racket. The pose in every frame is this exact pose, only the camera angle changes. ' +
+  'Vivid orange #FF6A00 fine horizontal scan-line hologram, bald featureless mannequin head, no face, no clothes, one racket, one ball touching the racket face. ' +
+  'Pure black background, glossy black floor, orange concentric rings under the feet. No blue, no cyan, no red.'
+
+const ORBIT_PRIVACY_SUFFIX =
   ' CRITICAL: This is a fully synthetic CGI mannequin hologram, not a photograph of a real human. ' +
   'No real person, no identifiable face, no biometric likeness — only a featureless digital wireframe statue.'
+
+export type HologramOrbitLook = 'blue' | 'orange'
+
+function orbitPrompt(look: HologramOrbitLook, privacyRetry: boolean): string {
+  const base = look === 'orange' ? ORBIT_PROMPT_ORANGE : ORBIT_PROMPT
+  return privacyRetry ? base + ORBIT_PRIVACY_SUFFIX : base
+}
 
 /** MediaPipe joint name -> the hologram overlay name. Neck is filled from the shoulders. */
 const JOINTS: Record<string, string> = {
@@ -184,14 +200,14 @@ async function openRouterVideoOnce(png: Buffer, prompt: string): Promise<Buffer>
 }
 
 /** Seedance orbit clip; one privacy-safe prompt retry when the still is flagged as a real person. */
-async function openRouterVideo(png: Buffer): Promise<Buffer> {
+async function openRouterVideo(png: Buffer, look: HologramOrbitLook): Promise<Buffer> {
   try {
-    return await openRouterVideoOnce(png, ORBIT_PROMPT)
+    return await openRouterVideoOnce(png, orbitPrompt(look, false))
   } catch (e: any) {
     const message = String(e?.message ?? e)
     if (!isPrivacyReject(message)) throw e
     console.warn('[Technique][hologram] orbit privacy reject — retrying with synthetic-mannequin prompt')
-    return openRouterVideoOnce(png, ORBIT_PROMPT_PRIVACY_RETRY)
+    return openRouterVideoOnce(png, orbitPrompt(look, true))
   }
 }
 
@@ -240,16 +256,20 @@ async function poseOrbit(videoUrl: string, analysisId: string): Promise<Hologram
 export async function generateHologramOrbit(opts: {
   analysisId: string
   imagePath: string
+  /** Blue is the player's orbit. Orange is the shared pro-reference orbit. */
+  look?: HologramOrbitLook
+  /** Write the mp4 here when it should be reused (the pro library), not stored per analysis. */
+  output?: { absolutePath: string; publicPath: string }
 }): Promise<HologramOrbit> {
   const still = fs.readFileSync(opts.imagePath)
   const padded = await padPortrait(still)
-  const video = await openRouterVideo(padded)
-  const dir = path.dirname(opts.imagePath)
+  const video = await openRouterVideo(padded, opts.look ?? 'blue')
   const name = `orbit-${Date.now()}.mp4`
-  const abs = path.join(dir, name)
+  const abs = opts.output?.absolutePath ?? path.join(path.dirname(opts.imagePath), name)
+  const rel = opts.output?.publicPath ?? `/uploads/technique-holograms/${opts.analysisId}/${name}`
+  fs.mkdirSync(path.dirname(abs), { recursive: true })
   fs.writeFileSync(abs, video)
   await moveIndexToFront(abs)
-  const rel = `/uploads/technique-holograms/${opts.analysisId}/${name}`
   const meta = await probeVideoStreamMeta(abs)
   const size = await probeSize(abs)
   const durationMs = Math.round((meta?.durationSec ?? 4) * 1000)

@@ -337,6 +337,13 @@
       "when": 1793300003000,
       "tag": "0048_pro_hologram_render",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1793300004000,
+      "tag": "0049_pro_hologram_orbit",
+      "breakpoints": true
     }
   ]
 }

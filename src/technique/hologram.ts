@@ -68,7 +68,7 @@ export const HOLOGRAM_PROMPT_RED = hologramPrompt({
   avoid: 'pink, salmon, orange',
 })
 
-/** Pro reference: the same hologram, orange instead of blue. No orbit is generated from it. */
+/** Pro reference: the same hologram, orange instead of blue. Seedance orbits this still. */
 export const HOLOGRAM_PROMPT_ORANGE = hologramPrompt({
   main: 'vivid orange #FF6A00',
   glow: 'orange',

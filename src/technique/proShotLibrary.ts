@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
-import type { HologramKeypoints, HologramResult } from './hologram'
+import type { HologramKeypoints, HologramOrbitFrame, HologramResult } from './hologram'
+import type { HologramOrbit } from './hologramOrbit'
 
 /** Camera ids the shot picker sends. `behind` is the sheet's back camera. */
 export const PRO_LIBRARY_VIEWS = [
@@ -41,6 +42,14 @@ function renderStem(id: string): string {
 
 export function proRenderPublicPath(id: string): string {
   return `/pro-library/${renderStem(id)}.png`
+}
+
+export function proOrbitPublicPath(id: string): string {
+  return `/pro-library/${renderStem(id)}.mp4`
+}
+
+export function proOrbitDiskPath(id: string): string {
+  return path.join(proLibraryRoot(), 'renders', `${renderStem(id)}.mp4`)
 }
 
 function renderDiskPath(id: string, kind: 'image' | 'frame'): string {
@@ -93,7 +102,7 @@ export function readProContactFrame(id: string): number | null {
   return null
 }
 
-function publicFileOnDisk(publicPath: string): string | null {
+export function proStoredFile(publicPath: string): string | null {
   if (publicPath.startsWith('/pro-library/')) {
     return path.join(proLibraryRoot(), 'renders', path.basename(publicPath))
   }
@@ -112,15 +121,27 @@ export async function loadSharedProHologram(id: string): Promise<HologramResult 
     await db.select().from(proHologramRender).where(eq(proHologramRender.id, id)).limit(1)
   )[0]
   if (!row?.image || !row.frameImage) return null
-  const imageDisk = publicFileOnDisk(row.image)
-  const frameDisk = publicFileOnDisk(row.frameImage)
+  const imageDisk = proStoredFile(row.image)
+  const frameDisk = proStoredFile(row.frameImage)
   if (!imageDisk || !frameDisk || !fs.existsSync(imageDisk) || !fs.existsSync(frameDisk)) return null
+  const orbitDisk = row.orbitVideo ? proStoredFile(row.orbitVideo) : null
+  const orbitReady = Boolean(orbitDisk && fs.existsSync(orbitDisk))
   return {
     image: row.image,
     frameImage: row.frameImage,
     contactMs: null,
     frame: row.contactFrame,
     keypoints: (row.keypoints as HologramKeypoints | null) ?? null,
+    ...(orbitReady
+      ? {
+          orbitVideo: row.orbitVideo,
+          orbitDurationMs: row.orbitDurationMs,
+          orbitFrameCount: row.orbitFrameCount,
+          orbitWidth: row.orbitWidth,
+          orbitHeight: row.orbitHeight,
+          orbitFrames: Array.isArray(row.orbitFrames) ? (row.orbitFrames as HologramOrbitFrame[]) : null,
+        }
+      : {}),
   }
 }
 
@@ -136,8 +157,8 @@ export async function saveSharedProHologram(opts: {
   fs.mkdirSync(dir, { recursive: true })
   const imageDisk = renderDiskPath(opts.id, 'image')
   const frameDisk = renderDiskPath(opts.id, 'frame')
-  const srcImage = publicFileOnDisk(opts.result.image)
-  const srcFrame = publicFileOnDisk(opts.result.frameImage)
+  const srcImage = proStoredFile(opts.result.image)
+  const srcFrame = proStoredFile(opts.result.frameImage)
   if (!srcImage || !srcFrame || !fs.existsSync(srcImage) || !fs.existsSync(srcFrame)) {
     throw new Error('Orange hologram files are missing')
   }
@@ -168,4 +189,24 @@ export async function saveSharedProHologram(opts: {
   if (existing[0]) await db.update(proHologramRender).set(values).where(eq(proHologramRender.id, opts.id))
   else await db.insert(proHologramRender).values(values)
   return saved
+}
+
+/** Attach the shared Seedance clip. The mp4 is already at the public pro-library path. */
+export async function saveSharedProOrbit(id: string, orbit: HologramOrbit): Promise<HologramResult | null> {
+  const { db } = await import('../db')
+  const { proHologramRender } = await import('../db/schema')
+  const { eq } = await import('drizzle-orm')
+  await db
+    .update(proHologramRender)
+    .set({
+      orbitVideo: orbit.orbitVideo,
+      orbitDurationMs: orbit.orbitDurationMs,
+      orbitFrameCount: orbit.orbitFrameCount,
+      orbitWidth: orbit.orbitWidth,
+      orbitHeight: orbit.orbitHeight,
+      orbitFrames: orbit.orbitFrames,
+      updatedAt: new Date(),
+    })
+    .where(eq(proHologramRender.id, id))
+  return loadSharedProHologram(id)
 }

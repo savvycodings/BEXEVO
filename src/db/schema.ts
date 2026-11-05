@@ -1221,8 +1221,8 @@ export const clubMembership = pgTable(
 );
 
 /**
- * One orange Nano Banana still per pro library clip (shot + camera). Reused for every
- * player who submits that shot, so the contact-frame render is not sent again.
+ * One orange Nano Banana still and its Seedance orbit per pro library clip (shot + camera).
+ * Reused for every player who submits that shot, so the contact frame is not sent again.
  */
 export const proHologramRender = pgTable(
   "pro_hologram_render",
@@ -1235,6 +1235,13 @@ export const proHologramRender = pgTable(
     image: text("image"),
     frameImage: text("frameImage"),
     keypoints: jsonb("keypoints"),
+    /** Shared Seedance orbit of the orange contact still. One video per shot and camera. */
+    orbitVideo: text("orbitVideo"),
+    orbitDurationMs: integer("orbitDurationMs"),
+    orbitFrameCount: integer("orbitFrameCount"),
+    orbitWidth: integer("orbitWidth"),
+    orbitHeight: integer("orbitHeight"),
+    orbitFrames: jsonb("orbitFrames"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
   },

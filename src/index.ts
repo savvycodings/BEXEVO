@@ -182,7 +182,7 @@ app.get('/user-data-deletion', (_req, res) => sendDataDeletion(res))
 mountE2eRoutes(app)
 
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
-// Orange pro-reference stills. The source videos stay on disk and are not served.
+// Orange pro-reference stills and their shared orbit videos. Source clips stay private.
 app.use('/pro-library', express.static(path.join(proLibraryRoot(), 'renders')))
 app.use('/chat', chatRouter)
 app.use('/images', imagesRouter)
@@ -200,6 +200,7 @@ app.use('/signup', signupRequestLogger, signupVerificationRouter)
 const port = Number(process.env.PORT) || 3050
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server started on port ${port} (0.0.0.0)`)
+  console.log('[ProLibrary] root', proLibraryRoot())
   console.log('[Email] Resend configured', {
     ready: isEmailConfigured(),
     from: getFromAddress(),
