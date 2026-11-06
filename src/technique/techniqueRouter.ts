@@ -2340,8 +2340,9 @@ router.get('/analysis/:id/pose-overlay', async (req, res) => {
 })
 
 /**
- * Smart 3D joint views: racket-side shoulder / elbow / wrist / torso / knee at ball contact, the
- * player vs the top retrieval pro at the pro's own contact frame (time-aligned frame as fallback).
+ * Smart 3D joint views: racket-side shoulder / elbow / wrist / torso / knee at ball contact.
+ * The pro side is the library clip of the same declared shot and camera, at that clip's measured
+ * contact frame. A different shot, a different camera, or a guessed frame is left blank.
  */
 router.get('/analysis/:id/joints', async (req, res) => {
   try {
@@ -2380,29 +2381,44 @@ router.get('/analysis/:id/joints', async (req, res) => {
     const side: JointSide =
       profileTextToDominantHand(profileRow?.dominantHand ?? null) === 'left-handed' ? 'LEFT' : 'RIGHT'
 
+    const userShot = metrics.user_shot as { strokePreset?: string; viewId?: string } | undefined
+    const wantedPreset = userShot?.strokePreset?.trim() || null
+    const wantedView = userShot?.viewId?.trim().toLowerCase() || null
     const retrievalBlock = metrics.retrieval as
-      | { neighbors?: Array<{ train_sample_id: string; stroke_label?: string; stroke_name?: string }> }
+      | {
+          neighbors?: Array<{
+            train_sample_id: string
+            stroke_label?: string
+            stroke_name?: string
+            stroke_preset?: string
+            view_profile?: string | null
+          }>
+        }
       | undefined
-    const topNeighbor = retrievalBlock?.neighbors?.[0]
+    const neighbors = retrievalBlock?.neighbors ?? []
+    const matched = neighbors.find((n) => {
+      if (!n.train_sample_id) return false
+      if (wantedPreset && n.stroke_preset !== wantedPreset) return false
+      if (wantedView && String(n.view_profile ?? '').trim().toLowerCase() !== wantedView) return false
+      return true
+    })
     let proLm: JointLandmarks | null = null
     let proSource: { trainSampleId: string; strokeLabel: string | null; frame: number; contactAligned: boolean } | null =
       null
-    if (topNeighbor?.train_sample_id) {
-      const seq = await getTrainSamplePoseSequence(topNeighbor.train_sample_id)
-      if (seq?.length) {
-        const meta = await getTrainSampleImpactMeta(topNeighbor.train_sample_id)
-        const proFrame =
-          meta?.impactFrame != null
-            ? nearestByFrame(seq, meta.impactFrame, (f) => f.frame_idx)
-            : pickAlignedProPoseFrame(userRow?.frame ?? impactFrame, totalFrames, seq)
-        if (proFrame?.landmarks) {
-          proLm = proFrame.landmarks
-          proSource = {
-            trainSampleId: topNeighbor.train_sample_id,
-            strokeLabel: topNeighbor.stroke_label?.trim() || topNeighbor.stroke_name?.trim() || null,
-            frame: proFrame.frame_idx,
-            contactAligned: meta?.impactFrame != null,
-          }
+    if (matched?.train_sample_id) {
+      const seq = await getTrainSamplePoseSequence(matched.train_sample_id)
+      const meta = seq?.length ? await getTrainSampleImpactMeta(matched.train_sample_id) : null
+      const proFrame =
+        seq?.length && meta?.impactFrame != null
+          ? nearestByFrame(seq, meta.impactFrame, (f) => f.frame_idx)
+          : null
+      if (proFrame?.landmarks) {
+        proLm = proFrame.landmarks
+        proSource = {
+          trainSampleId: matched.train_sample_id,
+          strokeLabel: matched.stroke_label?.trim() || matched.stroke_name?.trim() || null,
+          frame: proFrame.frame_idx,
+          contactAligned: true,
         }
       }
     }
