@@ -1,0 +1,13 @@
+node_modules
+uploads
+.git
+dist
+.verify-out
+verify-out
+tmp
+*.pt
+.env
+.env.*
+!.env.example
+!.env.railway.example
+!.env.e2e.example
