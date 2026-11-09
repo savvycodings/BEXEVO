@@ -1,7 +1,8 @@
 import fs from 'fs'
 import path from 'path'
-import type { HologramKeypoints, HologramOrbitFrame, HologramResult } from './hologram'
+import type { HologramKeypoints, HologramOrbitFrame, HologramPartId, HologramResult } from './hologram'
 import type { HologramOrbit } from './hologramOrbit'
+import { HOLOGRAM_PART_IDS } from './hologramGrid'
 
 /** Camera ids the shot picker sends. `behind` is the sheet's back camera. */
 export const PRO_LIBRARY_VIEWS = [
@@ -112,6 +113,17 @@ export function proStoredFile(publicPath: string): string | null {
   return null
 }
 
+function loadSharedProParts(id: string): Partial<Record<HologramPartId, string>> | null {
+  const dir = path.join(proLibraryRoot(), 'renders')
+  const stem = renderStem(id)
+  const parts: Partial<Record<HologramPartId, string>> = {}
+  for (const part of HOLOGRAM_PART_IDS) {
+    const disk = path.join(dir, `${stem}-part-${part}.png`)
+    if (fs.existsSync(disk)) parts[part] = `/pro-library/${stem}-part-${part}.png`
+  }
+  return Object.keys(parts).length ? parts : null
+}
+
 /** Stored orange still. Missing file means it has to be rendered again. */
 export async function loadSharedProHologram(id: string): Promise<HologramResult | null> {
   const { db } = await import('../db')
@@ -126,12 +138,14 @@ export async function loadSharedProHologram(id: string): Promise<HologramResult 
   if (!imageDisk || !frameDisk || !fs.existsSync(imageDisk) || !fs.existsSync(frameDisk)) return null
   const orbitDisk = row.orbitVideo ? proStoredFile(row.orbitVideo) : null
   const orbitReady = Boolean(orbitDisk && fs.existsSync(orbitDisk))
+  const parts = loadSharedProParts(id)
   return {
     image: row.image,
     frameImage: row.frameImage,
     contactMs: null,
     frame: row.contactFrame,
     keypoints: (row.keypoints as HologramKeypoints | null) ?? null,
+    ...(parts ? { parts } : {}),
     ...(orbitReady
       ? {
           orbitVideo: row.orbitVideo,
@@ -166,7 +180,21 @@ export async function saveSharedProHologram(opts: {
   fs.copyFileSync(srcFrame, frameDisk)
   const image = proRenderPublicPath(opts.id)
   const frameImage = `/pro-library/${renderStem(opts.id)}-frame.png`
-  const saved: HologramResult = { ...opts.result, image, frameImage }
+  const stem = renderStem(opts.id)
+  const parts: Partial<Record<HologramPartId, string>> = {}
+  for (const part of HOLOGRAM_PART_IDS) {
+    const srcPart = opts.result.parts?.[part] ? proStoredFile(opts.result.parts[part]!) : null
+    if (!srcPart || !fs.existsSync(srcPart)) continue
+    const dest = path.join(dir, `${stem}-part-${part}.png`)
+    fs.copyFileSync(srcPart, dest)
+    parts[part] = `/pro-library/${stem}-part-${part}.png`
+  }
+  const saved: HologramResult = {
+    ...opts.result,
+    image,
+    frameImage,
+    ...(Object.keys(parts).length ? { parts } : { parts: undefined }),
+  }
   const { db } = await import('../db')
   const { proHologramRender } = await import('../db/schema')
   const { eq } = await import('drizzle-orm')

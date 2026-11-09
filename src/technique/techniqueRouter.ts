@@ -5019,16 +5019,23 @@ async function startOrbitIfNeeded(
         })
         return
       }
+      const orbitFrames =
+        orbit.orbitFrames.length > 0
+          ? orbit.orbitFrames
+          : latest.keypoints
+            ? [{ frame: 0, keypoints: latest.keypoints }]
+            : []
       console.log('[Technique][hologram] orbit done', {
         analysisId,
         still: latest.image ?? live.image,
         video: orbit.orbitVideo,
-        frames: orbit.orbitFrames.length,
+        frames: orbitFrames.length,
+        seededFromStill: orbit.orbitFrames.length === 0 && orbitFrames.length > 0,
         durationMs: orbit.orbitDurationMs,
         size: `${orbit.orbitWidth}x${orbit.orbitHeight}`,
       })
       await writeHologramState(analysisId, {
-        hologram: { ...latest, ...orbit },
+        hologram: { ...latest, ...orbit, orbitFrames },
         hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
       })
     })
@@ -5108,6 +5115,8 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
     contactMs: cached?.contactMs ?? null,
     frame: cached?.frame ?? null,
     keypoints: cached?.keypoints ?? null,
+    parts: cached?.parts ?? null,
+    gridImage: cached?.gridImage ?? null,
     orbitStatus: orbitStatusOf(metrics),
     orbitVideo: cached?.orbitVideo ?? null,
     orbitDurationMs: cached?.orbitDurationMs ?? null,
@@ -5122,6 +5131,7 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
     proStatus,
     proImage: pro?.image ?? null,
     proKeypoints: pro?.keypoints ?? null,
+    proParts: pro?.parts ?? null,
     proOrbitVideo: pro?.orbitVideo ?? null,
     proOrbitDurationMs: pro?.orbitDurationMs ?? null,
     proOrbitFrameCount: pro?.orbitFrameCount ?? null,
@@ -5492,12 +5502,18 @@ router.post('/hologram', async (req, res) => {
         : typeof metrics.video_fps === 'number' && metrics.video_fps > 1
           ? metrics.video_fps
           : undefined
+    const racketSideRaw = String(
+      (metrics as { stroke_side?: { dominant_hand?: string } })?.stroke_side?.dominant_hand ?? ''
+    ).toLowerCase()
+    const racketSide =
+      racketSideRaw === 'left' ? 'LEFT' : racketSideRaw === 'right' ? 'RIGHT' : null
     void generateHologram({
       analysisId,
       videoPath,
       moment,
       poseData: metrics.pose_data,
       fpsHint,
+      racketSide,
     })
       .then(async (result) => {
         console.log('[Technique][hologram] done', { analysisId, image: result.image, elapsedMs: Date.now() - routeT0 })
@@ -5537,16 +5553,25 @@ router.post('/hologram', async (req, res) => {
             imagePath,
           })
           const orbit = await generateHologramOrbit({ analysisId, imagePath })
+          // Modal sometimes returns 0 frames for /uploads orbits; keep the contact still
+          // pose so the player layer still draws MediaPipe lines like the pro library.
+          const orbitFrames =
+            orbit.orbitFrames.length > 0
+              ? orbit.orbitFrames
+              : result.keypoints
+                ? [{ frame: 0, keypoints: result.keypoints }]
+                : []
           console.log('[Technique][hologram] orbit done', {
             analysisId,
             still: result.image,
             video: orbit.orbitVideo,
-            frames: orbit.orbitFrames.length,
+            frames: orbitFrames.length,
+            seededFromStill: orbit.orbitFrames.length === 0 && orbitFrames.length > 0,
             durationMs: orbit.orbitDurationMs,
             size: `${orbit.orbitWidth}x${orbit.orbitHeight}`,
           })
           await writeHologramState(analysisId, {
-            hologram: { ...result, ...keepOrbit, ...orbit },
+            hologram: { ...result, ...keepOrbit, ...orbit, orbitFrames },
             hologram_orbit_job: { status: 'done', startedAt: orbitStartedAt, finishedAt: new Date().toISOString() },
           })
         } catch (orbitErr: any) {

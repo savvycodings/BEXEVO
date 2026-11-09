@@ -9,6 +9,15 @@ import { extractFrame, extractFrameByTimestamp } from './frameExtractor'
 import { withNgrokHeaders } from '../lib/ngrokFetch'
 import { isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload'
 import { comfyQueuePrompt, comfyUploadImage, comfyViewToBuffer, comfyWaitForOutputImage } from './comfyClient'
+import {
+  buildHologramGrid,
+  hologramGridPromptSuffix,
+  HOLOGRAM_PART_IDS,
+  sliceHologramGrid,
+  type HologramPartId,
+} from './hologramGrid'
+
+export type { HologramPartId }
 
 /**
  * Electric-blue wireframe look (commit 7b4d153). The contact frame alone goes in — a style image
@@ -116,6 +125,13 @@ export type HologramResult = {
   frame: number | null
   /** Contact skeleton from the render's SDPose pass; same framing as `image`. */
   keypoints: HologramKeypoints | null
+  /**
+   * Close-up hologram cells from the Nano Banana 3×3 board (full-body is `image`).
+   * Used when the player taps a body part in Smart 3D.
+   */
+  parts?: Partial<Record<HologramPartId, string>> | null
+  /** Optional path to the edited 3×3 board (debug / future unpacks). */
+  gridImage?: string | null
   /** Seedance orbit of the still. Scrubbing it is the 3D view. */
   orbitVideo?: string | null
   orbitDurationMs?: number | null
@@ -230,6 +246,16 @@ export function readHologramJob(metrics: Record<string, unknown>): HologramJob |
   }
 }
 
+function parseStoredParts(raw: unknown): Partial<Record<HologramPartId, string>> | null {
+  if (!raw || typeof raw !== 'object') return null
+  const out: Partial<Record<HologramPartId, string>> = {}
+  for (const id of HOLOGRAM_PART_IDS) {
+    const v = (raw as Record<string, unknown>)[id]
+    if (typeof v === 'string' && v.trim()) out[id] = v.trim()
+  }
+  return Object.keys(out).length ? out : null
+}
+
 export function parseCachedHologram(raw: unknown): HologramResult | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
@@ -238,12 +264,15 @@ export function parseCachedHologram(raw: unknown): HologramResult | null {
   if (!image || !frameImage) return null
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null)
   const orbitFrames = parseStoredOrbitFrames(o.orbitFrames)
+  const parts = parseStoredParts(o.parts)
   return {
     image,
     frameImage,
     contactMs: num(o.contactMs),
     frame: num(o.frame),
     keypoints: parseStoredKeypoints(o.keypoints),
+    ...(parts ? { parts } : {}),
+    ...(typeof o.gridImage === 'string' && o.gridImage.trim() ? { gridImage: o.gridImage.trim() } : {}),
     ...(typeof o.orbitVideo === 'string' && o.orbitVideo.trim() ? { orbitVideo: o.orbitVideo.trim() } : {}),
     ...(num(o.orbitDurationMs) != null ? { orbitDurationMs: num(o.orbitDurationMs) } : {}),
     ...(num(o.orbitFrameCount) != null ? { orbitFrameCount: num(o.orbitFrameCount) } : {}),
@@ -819,7 +848,7 @@ async function comfyExtractKeypoints(png: Buffer): Promise<HologramKeypoints | n
   }
 }
 
-/** Impact frame -> square crop -> hologram still; both PNGs land under /uploads/technique-holograms. */
+/** Impact frame -> (optional 3×3 MediaPipe board) -> hologram still(s) under /uploads/technique-holograms. */
 export async function generateHologram(opts: {
   analysisId: string
   videoPath: string
@@ -832,6 +861,8 @@ export async function generateHologram(opts: {
   poseData?: unknown
   /** FPS hint when mapping contactMs -> pose frame. */
   fpsHint?: number
+  /** Hitting side so elbow/wrist/racket cells prefer the racket arm. */
+  racketSide?: 'LEFT' | 'RIGHT' | null
 }): Promise<HologramResult> {
   if (!fs.existsSync(opts.videoPath)) throw new HologramError(404, 'Video file missing on server')
   const raw =
@@ -850,35 +881,85 @@ export async function generateHologram(opts: {
     })
   }
   const { buffer: frame, crop } = await squareCrop(raw, box)
-  const prompt = opts.prompt ?? HOLOGRAM_PROMPT
+  const basePrompt = opts.prompt ?? HOLOGRAM_PROMPT
+  const landmarks = opts.poseData
+    ? pickPoseLandmarksForHologram(opts.poseData, opts.moment, opts.fpsHint)
+    : null
 
-  let hologram: Buffer
-  let keypoints: HologramKeypoints | null = null
-  if (provider === 'openrouter') {
-    hologram = await openRouterImageEdit(prompt, frame)
-    // Pose the *edited* still — crop-projected analysis pose will not match Nano Banana framing.
-    keypoints = await comfyExtractKeypoints(hologram)
-    if (!keypoints) keypoints = await poseHologramStill(hologram, opts.analysisId)
-  } else if (provider === 'openai') {
-    hologram = await gptImageEdit(prompt, [{ name: 'frame.png', data: frame }])
-    keypoints = await comfyExtractKeypoints(hologram)
-    if (!keypoints) keypoints = await poseHologramStill(hologram, opts.analysisId)
-  } else {
-    ;({ image: hologram, keypoints } = await comfyImageEdit(prompt, frame))
-  }
-
-  if (!keypoints && opts.poseData) {
-    const lm = pickPoseLandmarksForHologram(opts.poseData, opts.moment, opts.fpsHint)
-    if (lm) {
-      keypoints = mapMediaPipeToHologramKeypoints(lm, crop)
-      console.log('[Technique][hologram] mediapipe crop fallback', {
-        joints: keypoints ? Object.keys(keypoints).length : 0,
+  // OpenRouter / OpenAI get the 3×3 board when MediaPipe can place the close-ups.
+  // Comfy keeps the single full-body crop (its workflows are not board-aware).
+  const useGrid =
+    Boolean(landmarks) && (provider === 'openrouter' || provider === 'openai')
+  let editInput = frame
+  let gridPrompt = basePrompt
+  let filledParts: HologramPartId[] = []
+  if (useGrid && landmarks) {
+    try {
+      const built = await buildHologramGrid({
+        sourceFrame: raw,
+        fullBody: frame,
+        landmarks,
+        fullBodyCrop: crop,
+        racketSide: opts.racketSide,
       })
+      editInput = built.grid
+      filledParts = built.filledParts
+      gridPrompt = basePrompt + hologramGridPromptSuffix()
+      console.log('[Technique][hologram] grid built', {
+        analysisId: opts.analysisId,
+        filledParts: built.filledParts,
+        side: built.side,
+        bytes: editInput.length,
+      })
+    } catch (e: any) {
+      console.warn('[Technique][hologram] grid build failed, using full-body still', e?.message)
     }
   }
 
-  // Keypoints come from posing the edited still (same 0..1 space as the PNG). Do not remap —
-  // overview joints already prove MediaPipe coords paint correctly when the pose is on that image.
+  let edited: Buffer
+  let keypoints: HologramKeypoints | null = null
+  if (provider === 'openrouter') {
+    edited = await openRouterImageEdit(gridPrompt, editInput)
+  } else if (provider === 'openai') {
+    edited = await gptImageEdit(gridPrompt, [{ name: 'frame.png', data: editInput }])
+  } else {
+    ;({ image: edited, keypoints } = await comfyImageEdit(basePrompt, frame))
+  }
+
+  let hologram = edited
+  let partBuffers: Partial<Record<HologramPartId, Buffer>> = {}
+  let gridOut: Buffer | null = null
+  if (useGrid && editInput !== frame) {
+    try {
+      const sliced = await sliceHologramGrid(edited, SIZE)
+      hologram = sliced.full
+      partBuffers = sliced.parts
+      gridOut = sliced.normalizedGrid
+      console.log('[Technique][hologram] grid sliced', {
+        analysisId: opts.analysisId,
+        parts: Object.keys(partBuffers),
+        filledParts,
+      })
+    } catch (e: any) {
+      console.warn('[Technique][hologram] grid slice failed, keeping whole edit as full body', e?.message)
+      hologram = edited
+      partBuffers = {}
+      gridOut = null
+    }
+  }
+
+  // Pose the *full-body* hologram cell — orbit and Smart 3D markers use that framing.
+  if (provider === 'openrouter' || provider === 'openai') {
+    keypoints = await comfyExtractKeypoints(hologram)
+    if (!keypoints) keypoints = await poseHologramStill(hologram, opts.analysisId)
+  }
+
+  if (!keypoints && landmarks) {
+    keypoints = mapMediaPipeToHologramKeypoints(landmarks, crop)
+    console.log('[Technique][hologram] mediapipe crop fallback', {
+      joints: keypoints ? Object.keys(keypoints).length : 0,
+    })
+  }
 
   const dir = path.join(HOLOGRAM_UPLOAD_ROOT, opts.analysisId)
   fs.mkdirSync(dir, { recursive: true })
@@ -889,12 +970,31 @@ export async function generateHologram(opts: {
   const imageName = `${stem}-${stamp}.png`
   fs.writeFileSync(path.join(dir, frameName), frame)
   fs.writeFileSync(path.join(dir, imageName), hologram)
+
+  const publicBase = `/uploads/technique-holograms/${opts.analysisId}`
+  const parts: Partial<Record<HologramPartId, string>> = {}
+  for (const id of HOLOGRAM_PART_IDS) {
+    const buf = partBuffers[id]
+    if (!buf?.length) continue
+    const partName = `${stem}-part-${id}-${stamp}.png`
+    fs.writeFileSync(path.join(dir, partName), buf)
+    parts[id] = `${publicBase}/${partName}`
+  }
+  let gridImage: string | undefined
+  if (gridOut?.length) {
+    const gridName = `${stem}-grid-${stamp}.png`
+    fs.writeFileSync(path.join(dir, gridName), gridOut)
+    gridImage = `${publicBase}/${gridName}`
+  }
+
   return {
-    image: `/uploads/technique-holograms/${opts.analysisId}/${imageName}`,
-    frameImage: `/uploads/technique-holograms/${opts.analysisId}/${frameName}`,
+    image: `${publicBase}/${imageName}`,
+    frameImage: `${publicBase}/${frameName}`,
     contactMs: 'contactMs' in opts.moment ? opts.moment.contactMs : null,
     frame: 'frame' in opts.moment ? opts.moment.frame : null,
     keypoints,
+    ...(Object.keys(parts).length ? { parts } : {}),
+    ...(gridImage ? { gridImage } : {}),
   }
 }
 
