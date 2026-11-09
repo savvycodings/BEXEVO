@@ -21,6 +21,7 @@ import { getFromAddress, isEmailConfigured } from './lib/email/resendClient'
 import bodyParser from 'body-parser'
 import path from 'path'
 import { proLibraryRoot } from './technique/proShotLibrary'
+import { streamProLibrarySource } from './technique/proLibrarySourceStream'
 import {
   handleMetaWebhookEvent,
   handleMetaWebhookVerification,
@@ -182,7 +183,9 @@ app.get('/user-data-deletion', (_req, res) => sendDataDeletion(res))
 mountE2eRoutes(app)
 
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
-// Orange pro-reference stills and their shared orbit videos. Source clips stay private.
+// Filmed pro clip for Save & Track / Compare (not the orange hologram).
+app.get('/pro-library/source/:preset/:view', streamProLibrarySource)
+// Orange pro-reference stills and their shared orbit videos.
 app.use('/pro-library', express.static(path.join(proLibraryRoot(), 'renders')))
 app.use('/chat', chatRouter)
 app.use('/images', imagesRouter)
