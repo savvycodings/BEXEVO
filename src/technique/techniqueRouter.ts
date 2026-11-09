@@ -2378,8 +2378,12 @@ router.get('/analysis/:id/joints', async (req, res) => {
       where: (up, { eq: _eq }) => _eq(up.userId, userId),
       columns: { dominantHand: true },
     })
+    const strokeSide = metrics.stroke_side as { dominant_hand?: string } | undefined
+    const sideFromStroke =
+      strokeSide?.dominant_hand === 'left' ? 'LEFT' : strokeSide?.dominant_hand === 'right' ? 'RIGHT' : null
     const side: JointSide =
-      profileTextToDominantHand(profileRow?.dominantHand ?? null) === 'left-handed' ? 'LEFT' : 'RIGHT'
+      sideFromStroke ??
+      (profileTextToDominantHand(profileRow?.dominantHand ?? null) === 'left-handed' ? 'LEFT' : 'RIGHT')
 
     const userShot = metrics.user_shot as { strokePreset?: string; viewId?: string } | undefined
     const wantedPreset = userShot?.strokePreset?.trim() || null
@@ -2396,12 +2400,21 @@ router.get('/analysis/:id/joints', async (req, res) => {
         }
       | undefined
     const neighbors = retrievalBlock?.neighbors ?? []
-    const matched = neighbors.find((n) => {
-      if (!n.train_sample_id) return false
-      if (wantedPreset && n.stroke_preset !== wantedPreset) return false
-      if (wantedView && String(n.view_profile ?? '').trim().toLowerCase() !== wantedView) return false
-      return true
-    })
+    // Prefer the same camera as the player's shot, then any same-stroke neighbor, then any pose.
+    // Skipping this fallback left joints with "no pro" even when the orange library clip existed.
+    const matched =
+      neighbors.find((n) => {
+        if (!n.train_sample_id) return false
+        if (wantedPreset && n.stroke_preset !== wantedPreset) return false
+        if (wantedView && String(n.view_profile ?? '').trim().toLowerCase() !== wantedView) return false
+        return true
+      }) ??
+      neighbors.find((n) => {
+        if (!n.train_sample_id) return false
+        if (wantedPreset && n.stroke_preset !== wantedPreset) return false
+        return true
+      }) ??
+      neighbors.find((n) => Boolean(n.train_sample_id))
     let proLm: JointLandmarks | null = null
     let proSource: { trainSampleId: string; strokeLabel: string | null; frame: number; contactAligned: boolean } | null =
       null
@@ -2411,14 +2424,18 @@ router.get('/analysis/:id/joints', async (req, res) => {
       const proFrame =
         seq?.length && meta?.impactFrame != null
           ? nearestByFrame(seq, meta.impactFrame, (f) => f.frame_idx)
-          : null
+          : seq?.length
+            ? nearestByFrame(seq, Math.round((seq.length - 1) * 0.6), (f) => f.frame_idx) ??
+              seq[Math.floor(seq.length * 0.6)] ??
+              null
+            : null
       if (proFrame?.landmarks) {
         proLm = proFrame.landmarks
         proSource = {
           trainSampleId: matched.train_sample_id,
           strokeLabel: matched.stroke_label?.trim() || matched.stroke_name?.trim() || null,
           frame: proFrame.frame_idx,
-          contactAligned: true,
+          contactAligned: meta?.impactFrame != null,
         }
       }
     }

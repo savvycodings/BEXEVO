@@ -31,16 +31,43 @@ type Landmarks = Record<string, MpLandmark | undefined>
 
 const VIS_MIN = 0.35
 
-/** How tight the window is vs the full-body square (higher = closer). */
+/**
+ * How tight the window is vs the full-body square (higher = closer).
+ * Tuned so Nano Banana gets real close-ups, not half-body panels.
+ */
 const PART_ZOOM: Record<HologramPartId, number> = {
-  head: 2.6,
-  shoulder: 2.4,
-  elbow: 3,
-  wrist: 3,
-  torso: 2.1,
-  knee: 2.5,
-  feet: 2.5,
-  racket: 3,
+  head: 4.2,
+  shoulder: 3.8,
+  elbow: 4.8,
+  wrist: 5.2,
+  torso: 3.2,
+  knee: 4.2,
+  feet: 4.2,
+  racket: 5.2,
+}
+
+/** Extra landmarks used to shrink the crop around the joint cluster. */
+function partLandmarkNames(part: HologramPartId, side: 'LEFT' | 'RIGHT'): string[] {
+  switch (part) {
+    case 'head':
+      return ['NOSE', 'LEFT_EYE', 'RIGHT_EYE', 'LEFT_EAR', 'RIGHT_EAR']
+    case 'shoulder':
+      return ['LEFT_SHOULDER', 'RIGHT_SHOULDER', `${side}_ELBOW`]
+    case 'elbow':
+      return [`${side}_SHOULDER`, `${side}_ELBOW`, `${side}_WRIST`]
+    case 'wrist':
+      return [`${side}_ELBOW`, `${side}_WRIST`, `${side}_INDEX`, `${side}_PINKY`]
+    case 'torso':
+      return ['LEFT_SHOULDER', 'RIGHT_SHOULDER', 'LEFT_HIP', 'RIGHT_HIP']
+    case 'knee':
+      return ['LEFT_HIP', 'RIGHT_HIP', 'LEFT_KNEE', 'RIGHT_KNEE', 'LEFT_ANKLE', 'RIGHT_ANKLE']
+    case 'feet':
+      return ['LEFT_ANKLE', 'RIGHT_ANKLE', 'LEFT_HEEL', 'RIGHT_HEEL', 'LEFT_FOOT_INDEX', 'RIGHT_FOOT_INDEX']
+    case 'racket':
+      return [`${side}_WRIST`, `${side}_INDEX`, `${side}_PINKY`, `${side}_THUMB`]
+    default:
+      return []
+  }
 }
 
 function scoreOf(p: MpLandmark | undefined): number {
@@ -140,7 +167,34 @@ async function blackCell(): Promise<Buffer> {
 }
 
 /**
- * Square window centred on (cx,cy) in the source frame, sized as fullBody.side / zoom.
+ * Prefer a window that hugs the part's landmark cluster; fall back to fullBody/zoom.
+ * Always tighter than the old half-body crops that looked "too far away".
+ */
+function partCropSide(
+  landmarks: Landmarks,
+  part: HologramPartId,
+  hitSide: 'LEFT' | 'RIGHT',
+  fullBodySide: number,
+  srcW: number,
+  srcH: number
+): number {
+  const fromZoom = Math.round(fullBodySide / Math.max(1.2, PART_ZOOM[part]))
+  const pts = partLandmarkNames(part, hitSide)
+    .map((n) => lm(landmarks, n))
+    .filter((p): p is MpLandmark => Boolean(p && typeof p.x === 'number' && typeof p.y === 'number'))
+  if (pts.length >= 2) {
+    const xs = pts.map((p) => p.x! * srcW)
+    const ys = pts.map((p) => p.y! * srcH)
+    const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys))
+    // ~2.4× the joint cluster, but never looser than the zoom floor.
+    const fromSpan = Math.round(Math.max(span * 2.4, 48))
+    return Math.max(40, Math.min(fromZoom, fromSpan, Math.min(srcW, srcH)))
+  }
+  return Math.max(40, Math.min(fromZoom, Math.min(srcW, srcH)))
+}
+
+/**
+ * Square window centred on (cx,cy) in the source frame.
  * Clamped inside the frame; empty when the window would be tiny.
  */
 async function zoomCell(
@@ -149,12 +203,10 @@ async function zoomCell(
   srcH: number,
   cx: number,
   cy: number,
-  fullBodySide: number,
-  zoom: number
+  sidePx: number
 ): Promise<Buffer> {
-  const side = Math.max(32, Math.round(fullBodySide / Math.max(1.2, zoom)))
   const maxSide = Math.min(srcW, srcH)
-  const sideC = Math.min(side, maxSide)
+  const sideC = Math.min(Math.max(32, Math.round(sidePx)), maxSide)
   const px = cx * srcW
   const py = cy * srcH
   const left = Math.min(Math.max(0, Math.round(px - sideC / 2)), srcW - sideC)
@@ -204,17 +256,8 @@ export async function buildHologramGrid(opts: {
       cells.push(await blackCell())
       continue
     }
-    cells.push(
-      await zoomCell(
-        opts.sourceFrame,
-        srcW,
-        srcH,
-        center.x,
-        center.y,
-        opts.fullBodyCrop.side,
-        PART_ZOOM[part]
-      )
-    )
+    const cropSide = partCropSide(opts.landmarks, part, side, opts.fullBodyCrop.side, srcW, srcH)
+    cells.push(await zoomCell(opts.sourceFrame, srcW, srcH, center.x, center.y, cropSide))
     filledParts.push(part)
   }
 

@@ -87,14 +87,54 @@ export function mediapipeFramesToOrbit(
     const frame = typeof row.frame === 'number' && Number.isFinite(row.frame) ? Math.round(row.frame) : index
     out.push({ frame, keypoints })
   })
-  return out
+  return densifyOrbitFrames(out)
+}
+
+/**
+ * Fill short detection dropouts so scrubbing does not blank for a few frames.
+ * Large holes (typical on the holographic back) are left empty — inventing a back pose
+ * from two front samples would lie. Max gap filled: 8 frames.
+ */
+export function densifyOrbitFrames(frames: HologramOrbitFrame[]): HologramOrbitFrame[] {
+  if (frames.length < 2) return frames
+  const sorted = [...frames].sort((a, b) => a.frame - b.frame)
+  const byFrame = new Map<number, HologramKeypoints>()
+  for (const row of sorted) byFrame.set(row.frame, row.keypoints)
+  const maxFill = 8
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i]!
+    const b = sorted[i + 1]!
+    const gap = b.frame - a.frame
+    if (gap <= 1 || gap > maxFill) continue
+    for (let f = a.frame + 1; f < b.frame; f++) {
+      if (byFrame.has(f)) continue
+      const t = (f - a.frame) / gap
+      const keys = new Set([...Object.keys(a.keypoints), ...Object.keys(b.keypoints)])
+      const keypoints: HologramKeypoints = {}
+      for (const name of keys) {
+        const A = a.keypoints[name]
+        const B = b.keypoints[name]
+        if (!A || !B) continue
+        keypoints[name] = {
+          x: +(A.x + (B.x - A.x) * t).toFixed(4),
+          y: +(A.y + (B.y - A.y) * t).toFixed(4),
+          score: +Math.min(A.score, B.score).toFixed(3),
+        }
+      }
+      if (Object.keys(keypoints).length) byFrame.set(f, keypoints)
+    }
+  }
+  return [...byFrame.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([frame, keypoints]) => ({ frame, keypoints }))
 }
 
 function point(p: MpPoint | undefined): HologramKeypoints[string] | null {
   if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return null
   if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return null
   const score = typeof p.visibility === 'number' ? p.visibility : typeof p.score === 'number' ? p.score : 1
-  if (!Number.isFinite(score) || score < 0.3) return null
+  // Orbit backs are often low-confidence; keep them so the scrub doesn't go blank mid-turn.
+  if (!Number.isFinite(score) || score < 0.12) return null
   return { x: +p.x.toFixed(4), y: +p.y.toFixed(4), score: +score.toFixed(3) }
 }
 
@@ -298,10 +338,22 @@ export async function generateHologramOrbit(opts: {
   if (!poseUrl) {
     console.warn('[Technique][hologram] orbit mediapipe skipped — no public Railway URL (set PUBLIC_VIDEO_BASE_URL)')
   }
+  const coverage =
+    frameCount > 0 ? Math.round((orbitFrames.length / frameCount) * 100) : 0
   console.log('[Technique][hologram] orbit mediapipe', {
     analysisId: opts.analysisId,
     frames: orbitFrames.length,
+    frameCount,
+    coveragePct: coverage,
+    firstFrame: orbitFrames[0]?.frame ?? null,
+    lastFrame: orbitFrames[orbitFrames.length - 1]?.frame ?? null,
   })
+  if (coverage > 0 && coverage < 40) {
+    console.warn(
+      '[Technique][hologram] orbit mediapipe sparse — holographic backs often fail person detection',
+      { analysisId: opts.analysisId, coveragePct: coverage }
+    )
+  }
   return {
     orbitVideo,
     orbitDurationMs: durationMs,
