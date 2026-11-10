@@ -185,6 +185,8 @@ mountE2eRoutes(app)
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
 // Filmed pro clip for Save & Track / Compare (not the orange hologram).
 app.get('/pro-library/source/:preset/:view', streamProLibrarySource)
+// CoreShots labeled impact stills (Seedance input / interim pro contact PNG).
+app.use('/pro-library/impact', express.static(path.join(proLibraryRoot(), 'impact')))
 // Orange pro-reference stills and their shared orbit videos.
 app.use('/pro-library', express.static(path.join(proLibraryRoot(), 'renders')))
 app.use('/chat', chatRouter)

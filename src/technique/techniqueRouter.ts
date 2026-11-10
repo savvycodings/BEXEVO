@@ -110,6 +110,7 @@ import {
 } from './hologram'
 import {
   findProClip,
+  findProImpactStill,
   loadSharedProHologram,
   proClipId,
   proLibraryRoot,
@@ -118,6 +119,7 @@ import {
   proStoredFile,
   readProContactFrame,
   saveSharedProHologram,
+  saveSharedProImpactStill,
   saveSharedProOrbit,
 } from './proShotLibrary'
 import { generateHologramOrbit, isHologramOrbitConfigured, orbitFailureMessage } from './hologramOrbit'
@@ -5163,8 +5165,9 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
 const proClipLocks = new Set<string>()
 
 /**
- * Orange contact-frame hologram, then the Seedance orbit of that frame.
- * Saved once per shot and camera. The phone is not told it is done until the video exists.
+ * Orange contact still → Seedance orbit, once per shot and camera.
+ * Prefers a CoreShots impact PNG (no Nano Banana). Falls back to video frame + Banana.
+ * The phone is not told it is done until the orbit video exists.
  */
 async function ensureProHologram(
   analysisId: string,
@@ -5219,8 +5222,9 @@ async function ensureProHologram(
       return
     }
 
-    const source = await resolveProHologramSource(metrics)
-    if (!source) {
+    const impact = findProImpactStill(preset, viewId)
+    const source = impact ? null : await resolveProHologramSource(metrics)
+    if (!impact && !source) {
       console.warn('[Technique][hologram] pro clip missing', { analysisId, preset, viewId, root: proLibraryRoot() })
       if (job?.error !== 'unavailable') {
         await writeHologramState(analysisId, {
@@ -5230,7 +5234,7 @@ async function ensureProHologram(
       }
       return
     }
-    if (source.kind === 'needs-contact') {
+    if (!impact && source?.kind === 'needs-contact') {
       console.warn('[Technique][hologram] pro contact frame not measured', { clipId: source.clipId })
       await writeHologramState(analysisId, {
         hologram_pro_job: {
@@ -5268,12 +5272,28 @@ async function ensureProHologram(
 
     await writeHologramState(analysisId, { hologram_pro_job: { status: 'running', startedAt } })
     metrics.hologram_pro_job = { status: 'running', startedAt }
-    const ready = source
+    const ready = !impact && source?.kind === 'ready' ? source : null
     started = true
     void (async () => {
       try {
         let still = shared?.image ? shared : null
-        if (!still) {
+        if (impact) {
+          if (!still) {
+            still = await saveSharedProImpactStill({
+              id: impact.id,
+              strokePreset: impact.strokePreset,
+              viewId: impact.viewId,
+              imagePath: impact.imagePath,
+            })
+            console.log('[Technique][hologram] pro impact still ready', {
+              analysisId,
+              clipId: impact.id,
+              image: still.image,
+            })
+          }
+          // Interim: show the impact PNG on this analysis while Seedance runs.
+          await writeHologramState(analysisId, { hologram_pro: still })
+        } else if (!still && ready) {
           const rendered = await generateHologram({
             analysisId,
             videoPath: ready.videoPath,
@@ -5290,7 +5310,9 @@ async function ensureProHologram(
           })
           console.log('[Technique][hologram] pro still ready', { analysisId, clipId: ready.clipId, image: still.image })
         }
-        const again = await loadSharedProHologram(ready.clipId).catch(() => null)
+        if (!still) throw new Error('Pro contact still is missing')
+        const orbitClipId = impact?.id ?? ready!.clipId
+        const again = await loadSharedProHologram(orbitClipId).catch(() => null)
         if (again?.orbitVideo) {
           await writeHologramState(analysisId, {
             hologram_pro: again,
@@ -5298,20 +5320,25 @@ async function ensureProHologram(
           })
           return
         }
-        const imageDisk = proStoredFile(still.image)
+        const imageDisk = impact?.imagePath ?? proStoredFile(still.image)
         if (!imageDisk || !fs.existsSync(imageDisk)) throw new Error('Orange hologram file is missing')
-        console.log('[Technique][hologram] pro orbit start', { analysisId, clipId: ready.clipId, frame: ready.frame })
+        console.log('[Technique][hologram] pro orbit start', {
+          analysisId,
+          clipId: orbitClipId,
+          source: impact ? 'impact-png' : 'banana',
+          frame: impact ? readProContactFrame(orbitClipId) : ready?.frame,
+        })
         const orbit = await generateHologramOrbit({
           analysisId: `${analysisId}-pro`,
           imagePath: imageDisk,
           look: 'orange',
-          output: { absolutePath: proOrbitDiskPath(ready.clipId), publicPath: proOrbitPublicPath(ready.clipId) },
+          output: { absolutePath: proOrbitDiskPath(orbitClipId), publicPath: proOrbitPublicPath(orbitClipId) },
         })
-        const stored = await saveSharedProOrbit(ready.clipId, orbit)
+        const stored = await saveSharedProOrbit(orbitClipId, orbit)
         if (!stored?.orbitVideo) throw new Error('Pro orbit was not stored')
         console.log('[Technique][hologram] pro orbit done', {
           analysisId,
-          clipId: ready.clipId,
+          clipId: orbitClipId,
           video: stored.orbitVideo,
           frames: stored.orbitFrames?.length ?? 0,
         })
@@ -5320,10 +5347,15 @@ async function ensureProHologram(
           hologram_pro_job: { status: 'done', startedAt, finishedAt: new Date().toISOString() },
         })
       } catch (e: any) {
-        const error = /Orange hologram|Nano|OpenRouter submit|pro hologram/i.test(String(e?.message))
+        const error = /Orange hologram|Nano|OpenRouter submit|pro hologram|Impact still/i.test(String(e?.message))
           ? 'Failed to generate the pro hologram'
           : orbitFailureMessage(e)
-        console.error('[Technique][hologram] pro error', { analysisId, clipId: ready.clipId, message: e?.message, error })
+        console.error('[Technique][hologram] pro error', {
+          analysisId,
+          clipId,
+          message: e?.message,
+          error,
+        })
         await writeHologramState(analysisId, {
           hologram_pro_job: {
             status: 'failed',

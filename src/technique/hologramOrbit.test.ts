@@ -20,3 +20,16 @@ test('mediapipeFramesToOrbit keeps image-space joints and builds the neck', () =
   assert.deepEqual(frames[0].keypoints.neck, { x: 0.5, y: 0.4, score: 0.7 })
   assert.equal(frames[0].keypoints.left_wrist, undefined)
 })
+
+test('mediapipeFramesToOrbit reads frame_idx from train_modal rows', () => {
+  const frames = mediapipeFramesToOrbit([
+    {
+      frame_idx: 12,
+      landmarks: {
+        LEFT_SHOULDER: { x: 0.4, y: 0.4, visibility: 0.9 },
+        RIGHT_SHOULDER: { x: 0.6, y: 0.4, visibility: 0.9 },
+      },
+    },
+  ])
+  assert.equal(frames[0]?.frame, 12)
+})

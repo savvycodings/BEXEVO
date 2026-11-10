@@ -62,7 +62,7 @@ type MpPoint = { x?: number; y?: number; visibility?: number; score?: number }
  * Coordinates stay in that frame's 0..1 space so the markers sit on the picture.
  */
 export function mediapipeFramesToOrbit(
-  poseData: Array<{ frame?: number; landmarks?: Record<string, MpPoint> | null }> | null | undefined
+  poseData: Array<{ frame?: number; frame_idx?: number; landmarks?: Record<string, MpPoint> | null }> | null | undefined
 ): HologramOrbitFrame[] {
   if (!Array.isArray(poseData)) return []
   const out: HologramOrbitFrame[] = []
@@ -84,8 +84,15 @@ export function mediapipeFramesToOrbit(
       }
     }
     if (!Object.keys(keypoints).length) return
-    const frame = typeof row.frame === 'number' && Number.isFinite(row.frame) ? Math.round(row.frame) : index
-    out.push({ frame, keypoints })
+    // modal_app uses `frame`; train_modal_app uses `frame_idx`. Never fall back to array
+    // index when a real index exists — that desyncs Smart 3D dots from the orbit mesh.
+    const raw =
+      typeof row.frame === 'number' && Number.isFinite(row.frame)
+        ? row.frame
+        : typeof row.frame_idx === 'number' && Number.isFinite(row.frame_idx)
+          ? row.frame_idx
+          : index
+    out.push({ frame: Math.round(raw), keypoints })
   })
   return densifyOrbitFrames(out)
 }
@@ -148,17 +155,35 @@ export type HologramOrbit = {
   orbitFrames: HologramOrbitFrame[]
 }
 
-/** Square hologram still -> 9:16 black pad, matching the Seedance framing that completed the turn. */
+/**
+ * Square hologram still → 9:16 black pad (Seedance framing).
+ * Full-bleed CoreShots impact PNGs are already 9:16; center-crop to square first so the
+ * orbit matches Nano Banana stills and Smart 3D's square-stage cover crop.
+ */
 async function padPortrait(png: Buffer): Promise<Buffer> {
   const meta = await sharp(png).metadata()
   const w = meta.width ?? 0
   const h = meta.height ?? 0
   if (!w || !h) throw new Error('Hologram still has no dimensions')
-  const targetH = Math.round((w * 16) / 9)
-  if (targetH <= h) return png
-  const pad = targetH - h
+  let square = png
+  if (Math.abs(w - h) > 2) {
+    const side = Math.min(w, h)
+    const left = Math.floor((w - side) / 2)
+    const top = Math.floor((h - side) / 2)
+    square = await sharp(png)
+      .extract({ left, top, width: side, height: side })
+      .resize(1024, 1024, { fit: 'fill' })
+      .png()
+      .toBuffer()
+  }
+  const sq = await sharp(square).metadata()
+  const sw = sq.width ?? 0
+  const targetH = Math.round((sw * 16) / 9)
+  const sh = sq.height ?? 0
+  if (!sw || !sh || targetH <= sh) return square
+  const pad = targetH - sh
   const top = Math.floor(pad / 2)
-  return sharp(png)
+  return sharp(square)
     .extend({ top, bottom: pad - top, left: 0, right: 0, background: { r: 0, g: 0, b: 0, alpha: 1 } })
     .png()
     .toBuffer()

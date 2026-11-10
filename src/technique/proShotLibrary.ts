@@ -58,6 +58,39 @@ function renderDiskPath(id: string, kind: 'image' | 'frame'): string {
   return path.join(proLibraryRoot(), 'renders', name)
 }
 
+/** Labeled CoreShots impact still on the volume (`impact/{preset}__{view}.png`). */
+export function proImpactStillDiskPath(id: string): string {
+  return path.join(proLibraryRoot(), 'impact', `${renderStem(id)}.png`)
+}
+
+export function proImpactStillPublicPath(id: string): string {
+  return `/pro-library/impact/${renderStem(id)}.png`
+}
+
+const IMPACT_EXTS = ['.png', '.PNG', '.jpg', '.JPG', '.jpeg', '.JPEG', '.webp', '.WEBP']
+
+/** Curated impact contact still for this shot and camera, when present on disk. */
+export function findProImpactStill(
+  strokePreset: string,
+  viewId: string
+): { id: string; strokePreset: string; viewId: string; imagePath: string } | null {
+  const preset = strokePreset.trim()
+  const view = viewId.trim()
+  if (!preset || !view) return null
+  const id = proClipId(preset, view)
+  const stemPath = proImpactStillDiskPath(id)
+  if (fs.existsSync(stemPath)) {
+    return { id, strokePreset: preset, viewId: view, imagePath: stemPath }
+  }
+  const dir = path.join(proLibraryRoot(), 'impact')
+  for (const ext of IMPACT_EXTS) {
+    if (ext === '.png') continue
+    const alt = path.join(dir, `${renderStem(id)}${ext}`)
+    if (fs.existsSync(alt)) return { id, strokePreset: preset, viewId: view, imagePath: alt }
+  }
+  return null
+}
+
 /** The curated clip for this shot and camera, when the file is on disk. */
 export function findProClip(strokePreset: string, viewId: string): ProLibraryClip | null {
   const preset = strokePreset.trim()
@@ -104,6 +137,9 @@ export function readProContactFrame(id: string): number | null {
 }
 
 export function proStoredFile(publicPath: string): string | null {
+  if (publicPath.startsWith('/pro-library/impact/')) {
+    return path.join(proLibraryRoot(), 'impact', path.basename(publicPath))
+  }
   if (publicPath.startsWith('/pro-library/')) {
     return path.join(proLibraryRoot(), 'renders', path.basename(publicPath))
   }
@@ -111,6 +147,60 @@ export function proStoredFile(publicPath: string): string | null {
     return path.join(process.cwd(), publicPath.replace(/^\//, ''))
   }
   return null
+}
+
+/**
+ * Register a CoreShots impact PNG as the shared pro contact still (no Nano Banana).
+ * Copies into renders/ so /pro-library/{stem}.png serves it while/after Seedance.
+ */
+export async function saveSharedProImpactStill(opts: {
+  id: string
+  strokePreset: string
+  viewId: string
+  imagePath: string
+  videoPath?: string | null
+}): Promise<HologramResult> {
+  if (!fs.existsSync(opts.imagePath)) throw new Error('Impact still file is missing')
+  const dir = path.join(proLibraryRoot(), 'renders')
+  fs.mkdirSync(dir, { recursive: true })
+  const imageDisk = renderDiskPath(opts.id, 'image')
+  const frameDisk = renderDiskPath(opts.id, 'frame')
+  fs.copyFileSync(opts.imagePath, imageDisk)
+  fs.copyFileSync(opts.imagePath, frameDisk)
+  const image = proRenderPublicPath(opts.id)
+  const frameImage = `/pro-library/${renderStem(opts.id)}-frame.png`
+  const contactFrame = readProContactFrame(opts.id)
+  const clip = findProClip(opts.strokePreset, opts.viewId)
+  const videoPath = opts.videoPath?.trim() || clip?.videoPath || `impact:${opts.id}`
+  const saved: HologramResult = {
+    image,
+    frameImage,
+    contactMs: null,
+    frame: contactFrame,
+    keypoints: null,
+  }
+  const { db } = await import('../db')
+  const { proHologramRender } = await import('../db/schema')
+  const { eq } = await import('drizzle-orm')
+  const values = {
+    id: opts.id,
+    strokePreset: opts.strokePreset,
+    viewId: opts.viewId,
+    videoPath,
+    contactFrame,
+    image,
+    frameImage,
+    keypoints: null,
+    updatedAt: new Date(),
+  }
+  const existing = await db
+    .select({ id: proHologramRender.id })
+    .from(proHologramRender)
+    .where(eq(proHologramRender.id, opts.id))
+    .limit(1)
+  if (existing[0]) await db.update(proHologramRender).set(values).where(eq(proHologramRender.id, opts.id))
+  else await db.insert(proHologramRender).values(values)
+  return saved
 }
 
 function loadSharedProParts(id: string): Partial<Record<HologramPartId, string>> | null {
