@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { BodyMeasurements } from "../profile/bodyMeasurements";
+import type { Racket } from "../profile/racket";
 
 export type TechniqueCorrectionImage = {
   frame: number;
@@ -297,6 +298,8 @@ export const userProfile = pgTable("user_profile", {
   weightKg: real("weightKg"),
   /** Manual calibration measurements in cm (see src/profile/bodyMeasurements.ts). */
   bodyMeasurements: jsonb("bodyMeasurements").$type<BodyMeasurements>(),
+  /** Racket Information from Profile Edit (see src/profile/racket.ts). */
+  racket: jsonb("racket").$type<Racket>(),
   coachStudentRole: text("coachStudentRole").default("none"),
   gender: text("gender"),
   dominantHand: text("dominantHand"),
