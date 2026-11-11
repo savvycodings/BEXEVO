@@ -344,6 +344,13 @@
       "when": 1793300004000,
       "tag": "0049_pro_hologram_orbit",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1794433769550,
+      "tag": "0050_body_measurements",
+      "breakpoints": true
     }
   ]
 }

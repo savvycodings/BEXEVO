@@ -12,6 +12,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { BodyMeasurements } from "../profile/bodyMeasurements";
 
 export type TechniqueCorrectionImage = {
   frame: number;
@@ -294,6 +295,8 @@ export const userProfile = pgTable("user_profile", {
   heightCm: real("heightCm"),
   /** Body mass in kilograms (optional; used for labelled energy estimates). */
   weightKg: real("weightKg"),
+  /** Manual calibration measurements in cm (see src/profile/bodyMeasurements.ts). */
+  bodyMeasurements: jsonb("bodyMeasurements").$type<BodyMeasurements>(),
   coachStudentRole: text("coachStudentRole").default("none"),
   gender: text("gender"),
   dominantHand: text("dominantHand"),
