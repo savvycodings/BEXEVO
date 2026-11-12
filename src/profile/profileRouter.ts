@@ -25,6 +25,8 @@ import gamificationRouter from "../gamification/gamificationRouter";
 import { onFriendLinked } from "../gamification/service";
 import { adminHubPasswordValid, roleAfterCoachRevoke } from "./coachRole";
 import { visibleSpecialties } from "../coach/coachSpecialties";
+import { mergeBodyMeasurements, parseBodyMeasurements } from "./bodyMeasurements";
+import { mergeRacket, parseRacket } from "./racket";
 
 const router = express.Router();
 router.use(express.json());
@@ -829,6 +831,62 @@ router.post("/player-details", async (req, res) => {
   } catch (e: any) {
     console.error("[Profile] player details update error", e);
     return res.status(500).json({ error: "Failed to update player details" });
+  }
+});
+
+/**
+ * Partial update of the calibration measurements (cm). Keys sent overwrite, null clears,
+ * keys left out stay as they are. Responds with the full stored set.
+ */
+router.post("/body-measurements", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const parsed = parseBodyMeasurements(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+    const existing = await db.query.userProfile.findFirst({
+      where: (p, { eq: _eq }) => _eq(p.userId, userId),
+      columns: { bodyMeasurements: true },
+    });
+    if (!existing) return res.status(404).json({ error: "Profile not found" });
+
+    const bodyMeasurements = mergeBodyMeasurements(existing.bodyMeasurements, parsed.value);
+    await db
+      .update(userProfile)
+      .set({ bodyMeasurements, updatedAt: new Date() })
+      .where(eq(userProfile.userId, userId));
+
+    return res.json({ ok: true, bodyMeasurements });
+  } catch (e: any) {
+    console.error("[Profile] body measurements update error", e);
+    return res.status(500).json({ error: "Failed to update body measurements" });
+  }
+});
+
+/** Partial update of the player's racket; same rules as /body-measurements. */
+router.post("/racket", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const parsed = parseRacket(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+    const existing = await db.query.userProfile.findFirst({
+      where: (p, { eq: _eq }) => _eq(p.userId, userId),
+      columns: { racket: true },
+    });
+    if (!existing) return res.status(404).json({ error: "Profile not found" });
+
+    const racket = mergeRacket(existing.racket, parsed.value);
+    await db.update(userProfile).set({ racket, updatedAt: new Date() }).where(eq(userProfile.userId, userId));
+
+    return res.json({ ok: true, racket });
+  } catch (e: any) {
+    console.error("[Profile] racket update error", e);
+    return res.status(500).json({ error: "Failed to update racket" });
   }
 });
 
