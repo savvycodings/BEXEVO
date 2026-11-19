@@ -30,6 +30,7 @@ import { getPrivacyPolicyHtml } from './privacyPolicyHtml'
 import { getDataDeletionHtml } from './dataDeletionHtml'
 import { warnIfXevoModelMismatch } from './lib/xevoLlm'
 import { assertFakesAllowed, mountE2eRoutes, watchOutboundFetch } from './e2e/fakes'
+import drillsMediaRouter from './drills/drillsMediaRouter'
 
 // Refuse e2e fakes in production before anything else starts.
 try {
@@ -53,6 +54,7 @@ app.use(cors({
     'Accept',
     'X-Requested-With',
     'X-Admin-Train-Secret',
+    'X-Drills-Upload-Secret',
     'X-Xevo-Admin-Hub-Password',
     'ngrok-skip-browser-warning',
   ],
@@ -183,6 +185,8 @@ app.get('/user-data-deletion', (_req, res) => sendDataDeletion(res))
 mountE2eRoutes(app)
 
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
+// Drill progression videos (Railway bucket via DRILLS_S3_*).
+app.use('/drills', drillsMediaRouter)
 // Filmed pro clip for Save & Track / Compare (not the orange hologram).
 app.get('/pro-library/source/:preset/:view', streamProLibrarySource)
 // CoreShots labeled impact stills (Seedance input / interim pro contact PNG).
