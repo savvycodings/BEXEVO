@@ -1,5 +1,5 @@
 /**
- * Upload bandeja + remate-plano progression mp4s to production BEXEVO.
+ * Upload all drillsMEDIA progression mp4s to production BEXEVO.
  *
  * Usage (PowerShell):
  *   $env:DRILLS_UPLOAD_SECRET="..."
@@ -20,6 +20,7 @@ if (!SECRET) {
 }
 
 const FILES = [
+  // Bandeja
   {
     key: 'bandeja/01-primary.mp4',
     file: path.join(
@@ -48,6 +49,7 @@ const FILES = [
       'Bandeja__Bandeja/04-golpe-final-extras__final-shot-extras/video/Golpe final Bandeja.mp4'
     ),
   },
+  // Remate plano / Flat smash
   {
     key: 'remate-plano/01-primary.mp4',
     file: path.join(
@@ -83,6 +85,30 @@ const FILES = [
       'Remate plano__Flat smash/04-golpe-final-extras__final-shot-extras/video/Remate plano terminacion slomo.mp4'
     ),
   },
+  // Remate liftado / Topsin smash
+  {
+    key: 'remate-liftado/01-primary.mp4',
+    file: path.join(
+      ROOT,
+      'Remate liftado__Topsin smash/01-primera-progresion__primary-progression/video/Remate liftado.mp4'
+    ),
+  },
+  // Volea de derecha / Forehand volley
+  {
+    key: 'volea-derecha/01-primary.mp4',
+    file: path.join(
+      ROOT,
+      'Volea de derecha__Forehand volley/01-primera-progresion__primary-progression/video/Muestra sin pala.mp4'
+    ),
+  },
+  // Volea de revés (cortada) / Backhand volley (slice)
+  {
+    key: 'volea-reves/01-primary.mp4',
+    file: path.join(
+      ROOT,
+      'Volea de reves (cortada)__Backhand volley (slice)/01-primera-progresion__primary-progression/video/Entreno manos juntas.mp4'
+    ),
+  },
 ]
 
 async function uploadOne({ key, file }) {
@@ -114,4 +140,4 @@ async function uploadOne({ key, file }) {
 for (const item of FILES) {
   await uploadOne(item)
 }
-console.log('Done')
+console.log(`Done — ${FILES.length} videos`)

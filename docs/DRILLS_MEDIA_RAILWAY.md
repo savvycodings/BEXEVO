@@ -4,8 +4,10 @@
 
 - Railway bucket: `xevo-drills`
 - Object keys: `drills/{shot}/{file}.mp4` (e.g. `drills/bandeja/01-primary.mp4`)
+- Shots currently uploaded: `bandeja`, `remate-plano`, `remate-liftado`, `volea-derecha`, `volea-reves`
 - Public stream (via BEXEVO): `GET /drills/media/{shot}/{file}`
   - Example: `https://bexevo-production.up.railway.app/drills/media/bandeja/01-primary.mp4`
+- Bulk upload: `node scripts/upload-drills-media.mjs` (needs `DRILLS_UPLOAD_SECRET`)
 
 ## Env on BEXEVO
 
