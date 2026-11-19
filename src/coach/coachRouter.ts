@@ -23,9 +23,9 @@ import {
 } from "../db";
 import { sendCoachReviewReadyEmail } from "../lib/email/sendCoachReviewReadyEmail";
 import {
+  headlineScoreFromAnalysis,
   storedAiBreakdownToPercent,
   storedAiConfidenceToPercent,
-  storedAiScoreToPercent,
 } from "../technique/techniqueScoreScale";
 import { deriveHumanShotLabelFromMetrics } from "../train/trainShotDisplay";
 import { onCoachReviewCompleted } from "../gamification/service";
@@ -331,7 +331,7 @@ router.get("/review/:id", async (req, res) => {
 
     const ai = (analysis?.metrics as Record<string, unknown> | null | undefined)
       ?.ai_analysis as Record<string, unknown> | undefined;
-    const scorePercent = storedAiScoreToPercent(ai);
+    const scorePercent = headlineScoreFromAnalysis(ai);
     const breakdown = storedAiBreakdownToPercent(ai);
     const confidence = storedAiConfidenceToPercent(ai);
     const rating = typeof ai?.rating === "string" ? ai.rating : null;
@@ -736,7 +736,7 @@ router.get("/submissions", async (req, res) => {
         techniqueVideoId: r.techniqueVideoId,
         techniqueAnalysisId: r.techniqueAnalysisId ?? null,
         shotLabel: deriveShotLabelFromAnalysis(analysis),
-        score: storedAiScoreToPercent(ai),
+        score: headlineScoreFromAnalysis(ai),
       };
     });
 
@@ -845,7 +845,7 @@ router.get("/students/:studentUserId/uploads", async (req, res) => {
           videoPath: `/technique/video/${r.techniqueVideoId}`,
           title,
           subtitle: null as string | null,
-          score: storedAiScoreToPercent(ai),
+          score: headlineScoreFromAnalysis(ai),
           lastScore: null as number | null,
           commentCount,
           goodCommentCount: goodCount,

@@ -1,3 +1,5 @@
+import { averagePhysicalMetrics, parsePhysicalMetrics } from "./physicalMetrics";
+
 /**
  * Technique analyses historically stored `ai_analysis.score` on a 0–10 scale.
  * New analyses set `score_scale: "percent"` and use 0–100.
@@ -15,6 +17,18 @@ export function storedAiScoreToPercent(ai: Record<string, unknown> | null | unde
     return Math.round(Math.max(0, Math.min(100, score * 10)))
   }
   return Math.round(Math.max(0, Math.min(100, score)))
+}
+
+/**
+ * User-facing ring / list score: average of the five physical metrics when present.
+ * Falls back to calibrated pillar overall (`ai_analysis.score`) for older rows.
+ */
+export function headlineScoreFromAnalysis(
+  ai: Record<string, unknown> | null | undefined
+): number | null {
+  const pm = parsePhysicalMetrics(ai?.physical_metrics)
+  if (pm) return averagePhysicalMetrics(pm)
+  return storedAiScoreToPercent(ai)
 }
 
 function normalize0to100(value: unknown): number | null {

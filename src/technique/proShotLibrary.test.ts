@@ -74,3 +74,23 @@ test('findProImpactStill falls back to jpeg when png is absent', () => {
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('findProImpactStill skips empty png placeholders and uses jpeg', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pro-impact-empty-'))
+  const impact = path.join(root, 'impact')
+  fs.mkdirSync(impact, { recursive: true })
+  const png = path.join(impact, 'bandeja__front.png')
+  const jpg = path.join(impact, 'bandeja__front.jpg')
+  fs.writeFileSync(png, '')
+  fs.writeFileSync(jpg, 'jpg')
+  const prev = process.env.PRO_LIBRARY_ROOT
+  process.env.PRO_LIBRARY_ROOT = root
+  try {
+    const still = findProImpactStill('bandeja', 'front')
+    assert.equal(still?.imagePath, jpg)
+  } finally {
+    if (prev == null) delete process.env.PRO_LIBRARY_ROOT
+    else process.env.PRO_LIBRARY_ROOT = prev
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

@@ -6,6 +6,10 @@ import ffmpegStatic from 'ffmpeg-static'
 import { probeVideoStreamMeta } from './frameExtractor'
 import type { HologramKeypoints, HologramOrbitFrame } from './hologram'
 
+const ORBIT_RACKET =
+  'The player holds exactly one padel racket (not tennis): a thick short-handled paddle with a solid face full of ' +
+  'drilled round holes — no strings, no string bed, no mesh, no gut, no tennis racket. One ball touches that solid face.'
+
 const ORBIT_PROMPT =
   'One continuous camera orbit, clockwise only, constant speed, exactly one full 360-degree revolution in this 4 second clip. ' +
   'The camera keeps going the same direction the whole time. It does not reverse, rewind, or turn back. ' +
@@ -13,28 +17,33 @@ const ORBIT_PROMPT =
   'continues to the other side, and only then arrives back at this starting view by finishing the circle. ' +
   'The holographic player is a frozen statue. Zero body motion. The hands, arms, racket, head, and feet never move. ' +
   'Do not push, raise, or lower the hand. Do not bring the other hand onto the racket. The pose in every frame is this exact pose, only the camera angle changes. ' +
-  'Electric royal blue fine horizontal scan-line hologram, bald featureless mannequin head, no face, no clothes, one racket, one ball touching the racket face. ' +
-  'Pure black background, glossy black floor, blue concentric rings under the feet.'
+  'Electric royal blue fine horizontal scan-line hologram, bald featureless mannequin head, no face, no clothes. ' +
+  ORBIT_RACKET +
+  ' Pure black background, glossy black floor, blue concentric rings under the feet.'
 
-/** Same orbit, in the pro-reference orange, of the pro's contact frame. */
-const ORBIT_PROMPT_ORANGE =
+/** Same orbit as the player blue look, in metallic cool white for Ideal Form. */
+const ORBIT_PROMPT_WHITE =
   'One continuous camera orbit, clockwise only, constant speed, exactly one full 360-degree revolution in this 4 second clip. ' +
   'The camera keeps going the same direction the whole time. It does not reverse, rewind, or turn back. ' +
   'It starts on this exact view, passes the player\'s side, continues until the back of the head and the back of the body are clearly visible, ' +
   'continues to the other side, and only then arrives back at this starting view by finishing the circle. ' +
   'The holographic player is a frozen statue. Zero body motion. The hands, arms, racket, head, and feet never move. ' +
   'Do not push, raise, or lower the hand. Do not bring the other hand onto the racket. The pose in every frame is this exact pose, only the camera angle changes. ' +
-  'Vivid orange #FF6A00 fine horizontal scan-line hologram, bald featureless mannequin head, no face, no clothes, one racket, one ball touching the racket face. ' +
-  'Pure black background, glossy black floor, orange concentric rings under the feet. No blue, no cyan, no red.'
+  'Metallic cool white #F5F7FA fine horizontal scan-line hologram with platinum silver highlights, bald featureless mannequin head, no face, no clothes. ' +
+  ORBIT_RACKET +
+  ' Pure black background, glossy black floor, silver-white concentric rings under the feet. No orange, no amber, no blue, no cyan, no red.'
+
+/** @deprecated Ideal Form is white; kept for older call sites that still pass `orange`. */
+const ORBIT_PROMPT_ORANGE = ORBIT_PROMPT_WHITE
 
 const ORBIT_PRIVACY_SUFFIX =
   ' CRITICAL: This is a fully synthetic CGI mannequin hologram, not a photograph of a real human. ' +
   'No real person, no identifiable face, no biometric likeness — only a featureless digital wireframe statue.'
 
-export type HologramOrbitLook = 'blue' | 'orange'
+export type HologramOrbitLook = 'blue' | 'white' | 'orange'
 
 function orbitPrompt(look: HologramOrbitLook, privacyRetry: boolean): string {
-  const base = look === 'orange' ? ORBIT_PROMPT_ORANGE : ORBIT_PROMPT
+  const base = look === 'white' || look === 'orange' ? ORBIT_PROMPT_WHITE : ORBIT_PROMPT
   return privacyRetry ? base + ORBIT_PRIVACY_SUFFIX : base
 }
 

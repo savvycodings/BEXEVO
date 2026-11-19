@@ -8,8 +8,8 @@ import {
   userAchievement,
 } from "../db";
 import {
+  headlineScoreFromAnalysis,
   storedAiBreakdownToPercent,
-  storedAiScoreToPercent,
 } from "../technique/techniqueScoreScale";
 
 const VALID_TRAIN_CATEGORY = new Set([
@@ -231,7 +231,7 @@ function analysisFromRow(row: {
     id: row.id,
     createdAt: row.createdAt,
     dateKey: localDateKey(row.createdAt),
-    score: storedAiScoreToPercent(ai),
+    score: headlineScoreFromAnalysis(ai),
     techniqueScore: storedAiBreakdownToPercent(ai).technique,
     rating: typeof ai?.rating === "string" ? ai.rating : null,
     category: trainCategoryFromMetrics(row.metrics),

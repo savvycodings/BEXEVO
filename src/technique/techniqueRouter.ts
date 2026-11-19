@@ -100,7 +100,8 @@ import {
 } from './jointMetrics'
 import {
   generateHologram,
-  HOLOGRAM_PROMPT_ORANGE,
+  generateHologramFromStill,
+  HOLOGRAM_PROMPT_WHITE,
   HologramError,
   isHologramConfigured,
   parseCachedHologram,
@@ -119,7 +120,6 @@ import {
   proStoredFile,
   readProContactFrame,
   saveSharedProHologram,
-  saveSharedProImpactStill,
   saveSharedProOrbit,
 } from './proShotLibrary'
 import { generateHologramOrbit, isHologramOrbitConfigured, orbitFailureMessage } from './hologramOrbit'
@@ -139,9 +139,9 @@ import {
   applyProLibraryTierScoreConstraint,
 } from './scoreCalibration'
 import {
+  headlineScoreFromAnalysis,
   storedAiBreakdownToPercent,
   storedAiConfidenceToPercent,
-  storedAiScoreToPercent,
 } from './techniqueScoreScale'
 import {
   applyUserClipImpactToMetrics,
@@ -207,7 +207,11 @@ import {
   buildCorrectionFrameInsight,
   orderFrameInsights,
 } from './correctionFrameInsights'
-import { normalizePhysicalMetricsOnAnalysis, parsePhysicalMetrics } from './physicalMetrics'
+import {
+  averagePhysicalMetrics,
+  normalizePhysicalMetricsOnAnalysis,
+  parsePhysicalMetrics,
+} from './physicalMetrics'
 import { shotCardFields } from './activityShotFields'
 import { sanitizeAiAnalysisNarrativePlaceholders } from './sanitizeAiAnalysisNarrative'
 import { normalizeCorrectionsForClient } from './correctionImageStorage'
@@ -1070,7 +1074,7 @@ router.get('/physical-history', async (req, res) => {
       items.push({
         analysisId: row.id,
         createdAt: row.createdAt.toISOString(),
-        score: storedAiScoreToPercent(ai),
+        score: averagePhysicalMetrics(pm),
         physicalMetrics: {
           stability: pm.stability,
           power: pm.power,
@@ -1201,7 +1205,7 @@ router.get('/activities', async (req, res) => {
       const metrics = a.metrics as Record<string, unknown> | null | undefined
       const ai = metrics?.ai_analysis as Record<string, unknown> | undefined
       const en = ai?.en as Record<string, unknown> | undefined
-      const scorePercent = storedAiScoreToPercent(ai)
+      const scorePercent = headlineScoreFromAnalysis(ai)
       const breakdown = storedAiBreakdownToPercent(ai)
       const confidence = storedAiConfidenceToPercent(ai)
       const rating = typeof ai?.rating === 'string' ? String(ai.rating) : null
@@ -2248,7 +2252,7 @@ router.get('/analysis/:id', async (req, res) => {
     const ai = (metricsObj?.ai_analysis as Record<string, unknown> | undefined) ?? undefined
     const aiSummary = ai
       ? {
-          score: storedAiScoreToPercent(ai),
+          score: headlineScoreFromAnalysis(ai),
           rating: typeof ai.rating === 'string' ? ai.rating : null,
           ...storedAiBreakdownToPercent(ai),
           confidence: storedAiConfidenceToPercent(ai),
@@ -5165,8 +5169,8 @@ function hologramStatusBody(analysisId: string, metrics: Record<string, unknown>
 const proClipLocks = new Set<string>()
 
 /**
- * Orange contact still → Seedance orbit, once per shot and camera.
- * Prefers a CoreShots impact PNG (no Nano Banana). Falls back to video frame + Banana.
+ * Ideal Form: white Banana still → Seedance white orbit, once per shot and camera.
+ * Prefers a CoreShots impact PNG as the Banana source (Excel impact stills). Falls back to video frame.
  * The phone is not told it is done until the orbit video exists.
  */
 async function ensureProHologram(
@@ -5277,28 +5281,35 @@ async function ensureProHologram(
     void (async () => {
       try {
         let still = shared?.image ? shared : null
-        if (impact) {
-          if (!still) {
-            still = await saveSharedProImpactStill({
-              id: impact.id,
-              strokePreset: impact.strokePreset,
-              viewId: impact.viewId,
-              imagePath: impact.imagePath,
-            })
-            console.log('[Technique][hologram] pro impact still ready', {
-              analysisId,
-              clipId: impact.id,
-              image: still.image,
-            })
-          }
-          // Interim: show the impact PNG on this analysis while Seedance runs.
+        // Prefer a white Banana still. Impact PNGs are filmed photos — Seedance alone stays photoreal.
+        if (impact && (!still || !proStoredFile(still.image))) {
+          const rendered = await generateHologramFromStill({
+            analysisId,
+            imagePath: impact.imagePath,
+            prompt: HOLOGRAM_PROMPT_WHITE,
+            fileStem: 'pro-hologram',
+            frame: readProContactFrame(impact.id),
+          })
+          const clip = findProClip(impact.strokePreset, impact.viewId)
+          still = await saveSharedProHologram({
+            id: impact.id,
+            strokePreset: impact.strokePreset,
+            viewId: impact.viewId,
+            videoPath: clip?.videoPath || `impact:${impact.id}`,
+            result: rendered,
+          })
+          console.log('[Technique][hologram] pro white still from impact', {
+            analysisId,
+            clipId: impact.id,
+            image: still.image,
+          })
           await writeHologramState(analysisId, { hologram_pro: still })
         } else if (!still && ready) {
           const rendered = await generateHologram({
             analysisId,
             videoPath: ready.videoPath,
             moment: { frame: ready.frame },
-            prompt: HOLOGRAM_PROMPT_ORANGE,
+            prompt: HOLOGRAM_PROMPT_WHITE,
             fileStem: 'pro-hologram',
           })
           still = await saveSharedProHologram({
@@ -5309,6 +5320,9 @@ async function ensureProHologram(
             result: rendered,
           })
           console.log('[Technique][hologram] pro still ready', { analysisId, clipId: ready.clipId, image: still.image })
+          await writeHologramState(analysisId, { hologram_pro: still })
+        } else if (still) {
+          await writeHologramState(analysisId, { hologram_pro: still })
         }
         if (!still) throw new Error('Pro contact still is missing')
         const orbitClipId = impact?.id ?? ready!.clipId
@@ -5320,18 +5334,19 @@ async function ensureProHologram(
           })
           return
         }
-        const imageDisk = impact?.imagePath ?? proStoredFile(still.image)
-        if (!imageDisk || !fs.existsSync(imageDisk)) throw new Error('Orange hologram file is missing')
+        // Always Seedance from the white Banana still — never the raw impact photograph.
+        const imageDisk = proStoredFile(still.image)
+        if (!imageDisk || !fs.existsSync(imageDisk)) throw new Error('Ideal Form hologram file is missing')
         console.log('[Technique][hologram] pro orbit start', {
           analysisId,
           clipId: orbitClipId,
-          source: impact ? 'impact-png' : 'banana',
+          source: impact ? 'impact-banana' : 'banana',
           frame: impact ? readProContactFrame(orbitClipId) : ready?.frame,
         })
         const orbit = await generateHologramOrbit({
           analysisId: `${analysisId}-pro`,
           imagePath: imageDisk,
-          look: 'orange',
+          look: 'white',
           output: { absolutePath: proOrbitDiskPath(orbitClipId), publicPath: proOrbitPublicPath(orbitClipId) },
         })
         const stored = await saveSharedProOrbit(orbitClipId, orbit)

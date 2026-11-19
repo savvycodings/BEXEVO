@@ -37,8 +37,17 @@ export function proClipId(strokePreset: string, viewId: string): string {
   return `${strokePreset}:${viewId}`
 }
 
-function renderStem(id: string): string {
+/** Clip id on disk (`forehand_volley:front` → `forehand_volley__front`). */
+function clipStem(id: string): string {
   return id.replace(/:/g, '__')
+}
+
+/** Bump when Ideal Form look changes (colourway / racket) so stale disk/DB caches are not reused. */
+const PRO_HOLOGRAM_LOOK = 'white_banana_v1'
+
+/** Hologram still/orbit stem — includes look so white does not reuse orange files. */
+function renderStem(id: string): string {
+  return `${clipStem(id)}__${PRO_HOLOGRAM_LOOK}`
 }
 
 export function proRenderPublicPath(id: string): string {
@@ -60,14 +69,22 @@ function renderDiskPath(id: string, kind: 'image' | 'frame'): string {
 
 /** Labeled CoreShots impact still on the volume (`impact/{preset}__{view}.png`). */
 export function proImpactStillDiskPath(id: string): string {
-  return path.join(proLibraryRoot(), 'impact', `${renderStem(id)}.png`)
+  return path.join(proLibraryRoot(), 'impact', `${clipStem(id)}.png`)
 }
 
 export function proImpactStillPublicPath(id: string): string {
-  return `/pro-library/impact/${renderStem(id)}.png`
+  return `/pro-library/impact/${clipStem(id)}.png`
 }
 
 const IMPACT_EXTS = ['.png', '.PNG', '.jpg', '.JPG', '.jpeg', '.JPEG', '.webp', '.WEBP']
+
+function impactFileOk(file: string): boolean {
+  try {
+    return fs.existsSync(file) && fs.statSync(file).size > 0
+  } catch {
+    return false
+  }
+}
 
 /** Curated impact contact still for this shot and camera, when present on disk. */
 export function findProImpactStill(
@@ -79,14 +96,15 @@ export function findProImpactStill(
   if (!preset || !view) return null
   const id = proClipId(preset, view)
   const stemPath = proImpactStillDiskPath(id)
-  if (fs.existsSync(stemPath)) {
+  // Prefer a real PNG; skip 0-byte placeholders that block the JPG fallback on Railway.
+  if (impactFileOk(stemPath)) {
     return { id, strokePreset: preset, viewId: view, imagePath: stemPath }
   }
   const dir = path.join(proLibraryRoot(), 'impact')
   for (const ext of IMPACT_EXTS) {
     if (ext === '.png') continue
-    const alt = path.join(dir, `${renderStem(id)}${ext}`)
-    if (fs.existsSync(alt)) return { id, strokePreset: preset, viewId: view, imagePath: alt }
+    const alt = path.join(dir, `${clipStem(id)}${ext}`)
+    if (impactFileOk(alt)) return { id, strokePreset: preset, viewId: view, imagePath: alt }
   }
   return null
 }
@@ -95,13 +113,34 @@ export function findProImpactStill(
 export function findProClip(strokePreset: string, viewId: string): ProLibraryClip | null {
   const preset = strokePreset.trim()
   const view = viewId.trim()
-  if (!preset || !view) return null
+  if (!preset) return null
   const dir = path.join(proLibraryRoot(), preset)
-  for (const ext of VIDEO_EXTS) {
-    const videoPath = path.join(dir, `${view}${ext}`)
-    if (fs.existsSync(videoPath)) {
-      return { id: proClipId(preset, view), strokePreset: preset, viewId: view, videoPath }
+  if (!fs.existsSync(dir)) {
+    // Case-insensitive folder match (Excel sheets often differ in casing from the app preset).
+    const root = proLibraryRoot()
+    if (!fs.existsSync(root)) return null
+    const match = fs.readdirSync(root).find((name) => name.toLowerCase() === preset.toLowerCase())
+    if (!match) return null
+    return findProClip(match, view || 'front')
+  }
+  const tryView = (v: string): ProLibraryClip | null => {
+    for (const ext of VIDEO_EXTS) {
+      const videoPath = path.join(dir, `${v}${ext}`)
+      if (fs.existsSync(videoPath)) {
+        return { id: proClipId(preset, v), strokePreset: preset, viewId: v, videoPath }
+      }
     }
+    return null
+  }
+  if (view) {
+    const exact = tryView(view)
+    if (exact) return exact
+  }
+  // Compare / Save & Track: fall back so a missing camera angle still plays the shot's pro clip.
+  for (const fallback of ['front', 'side', 'behind', ...PRO_LIBRARY_VIEWS]) {
+    if (fallback === view) continue
+    const hit = tryView(fallback)
+    if (hit) return hit
   }
   return null
 }
@@ -214,7 +253,7 @@ function loadSharedProParts(id: string): Partial<Record<HologramPartId, string>>
   return Object.keys(parts).length ? parts : null
 }
 
-/** Stored orange still. Missing file means it has to be rendered again. */
+/** Stored Ideal Form still (metallic white). Missing / stale look means it has to be rendered again. */
 export async function loadSharedProHologram(id: string): Promise<HologramResult | null> {
   const { db } = await import('../db')
   const { proHologramRender } = await import('../db/schema')
@@ -223,6 +262,9 @@ export async function loadSharedProHologram(id: string): Promise<HologramResult 
     await db.select().from(proHologramRender).where(eq(proHologramRender.id, id)).limit(1)
   )[0]
   if (!row?.image || !row.frameImage) return null
+  // Ignore pre-white (orange) cache rows so Seedance / Banana re-run in the new look.
+  const expectedImage = proRenderPublicPath(id)
+  if (row.image !== expectedImage) return null
   const imageDisk = proStoredFile(row.image)
   const frameDisk = proStoredFile(row.frameImage)
   if (!imageDisk || !frameDisk || !fs.existsSync(imageDisk) || !fs.existsSync(frameDisk)) return null
@@ -249,7 +291,7 @@ export async function loadSharedProHologram(id: string): Promise<HologramResult 
   }
 }
 
-/** Keep the orange still so the next player with this shot does not call Nano Banana. */
+/** Keep the Ideal Form still so the next player with this shot does not call Nano Banana. */
 export async function saveSharedProHologram(opts: {
   id: string
   strokePreset: string
@@ -264,7 +306,7 @@ export async function saveSharedProHologram(opts: {
   const srcImage = proStoredFile(opts.result.image)
   const srcFrame = proStoredFile(opts.result.frameImage)
   if (!srcImage || !srcFrame || !fs.existsSync(srcImage) || !fs.existsSync(srcFrame)) {
-    throw new Error('Orange hologram files are missing')
+    throw new Error('Ideal Form hologram files are missing')
   }
   fs.copyFileSync(srcImage, imageDisk)
   fs.copyFileSync(srcFrame, frameDisk)

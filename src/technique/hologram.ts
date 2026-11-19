@@ -50,9 +50,10 @@ function hologramPrompt(c: HologramPalette): string {
     'Highly realistic human anatomy, accurate muscular structure, natural body proportions, anatomically correct ' +
     'hands and bare feet. No clothing, no shirt, no shorts, no waistband or hem line, no socks, no shoes and no ' +
     'accessories except the padel racket. The head is a smooth, bald, featureless mannequin head: no face, no ' +
-    `hair, no cap. The racket is made of the same ${c.glow} holographic linework with a solid perforated face, no ` +
-    'strings. Clearly defined silhouette and sharp digital linework, controlled subtle glow, minimal bloom, high ' +
-    'contrast and crisp details. ' +
+    `hair, no cap. The racket is a padel racket (not tennis): short thick handle, teardrop or round head, made of the ` +
+    `same ${c.glow} holographic linework with a solid perforated face full of drilled round holes — no strings, no ` +
+    'string bed, no mesh, no gut, no tennis racket. Clearly defined silhouette and sharp digital linework, controlled ' +
+    'subtle glow, minimal bloom, high contrast and crisp details. ' +
     'Remove the whole court, walls, fence, net, people and lights: pure black background, glossy black reflective ' +
     `floor, subtle concentric ${c.glow} holographic rings beneath the feet and a realistic ${c.glow} floor ` +
     'reflection. There is no text anywhere in the image. Cinematic studio lighting, ultra-detailed 3D render, sharp ' +
@@ -77,20 +78,46 @@ export const HOLOGRAM_PROMPT_RED = hologramPrompt({
   avoid: 'pink, salmon, orange',
 })
 
-/** Pro reference: the same hologram, orange instead of blue. Seedance orbits this still. */
-export const HOLOGRAM_PROMPT_ORANGE = hologramPrompt({
-  main: 'vivid orange #FF6A00',
-  glow: 'orange',
-  accent: 'amber',
-  avoid: 'blue, cyan, turquoise, red, pink, pale yellow',
-})
+/**
+ * Ideal Form / pro reference: same scan-line hologram as the player blue, in metallic white.
+ * Kept as `HOLOGRAM_PROMPT_ORANGE` export name only where old imports still expect it.
+ */
+export const HOLOGRAM_PROMPT_WHITE =
+  'Turn the padel player in the photo into a full-body, anatomically realistic 3D holographic human figure at ' +
+  'the moment of hitting the ball. Keep the exact pose, body proportions, camera angle and framing of the photo; ' +
+  'only the look changes, and the entire figure stays visible from head to feet. The whole body is a futuristic ' +
+  'holographic wireframe made of thousands of extremely fine, crisp horizontal digital scan lines, with subtle ' +
+  'mesh details and tiny luminous particles. ' +
+  'STRICT COLOUR PALETTE: metallic cool white #F5F7FA is the dominant colour across the entire holographic body, ' +
+  'outlines, scan lines and light effects — the same material language as the electric-blue player hologram, but ' +
+  'in silver-white. Use only closely related platinum, soft silver and subtle cool-grey highlights. ' +
+  'Avoid orange, amber, copper, gold, yellow, blue, cyan, turquoise, red, pink or warm beige; keep a clean ' +
+  'metallic white holographic appearance. Consistent holographic material and colour throughout the body. ' +
+  'Highly realistic human anatomy, accurate muscular structure, natural body proportions, anatomically correct ' +
+  'hands and bare feet. No clothing, no shirt, no shorts, no waistband or hem line, no socks, no shoes and no ' +
+  'accessories except the padel racket. The head is a smooth, bald, featureless mannequin head: no face, no ' +
+  'hair, no cap. The racket is a padel racket (not tennis): short thick handle, teardrop or round head, made of the ' +
+  'same silver-white holographic linework with a solid perforated face full of drilled round holes — no strings, no ' +
+  'string bed, no mesh, no gut, no tennis racket. Clearly defined silhouette and sharp digital linework, controlled ' +
+  'subtle glow, minimal bloom, high contrast and crisp details. ' +
+  'Remove the whole court, walls, fence, net, people and lights: pure black background, glossy black reflective ' +
+  'floor, subtle concentric silver-white holographic rings beneath the feet and a realistic cool-white floor ' +
+  'reflection. There is no text anywhere in the image. Cinematic studio lighting, ultra-detailed 3D render, sharp ' +
+  'focus, futuristic scientific visualization, premium technology aesthetic. ' +
+  'This is the moment of contact: exactly one small glowing ball touching the face of the racket. ' +
+  'No other ball anywhere.'
+
+/** @deprecated Use HOLOGRAM_PROMPT_WHITE — Ideal Form is metallic white, not orange. */
+export const HOLOGRAM_PROMPT_ORANGE = HOLOGRAM_PROMPT_WHITE
 
 /** Qwen invents extra balls, glowing orbs and a floorless void without this. */
 export const HOLOGRAM_NEGATIVE_PROMPT =
   'two balls, second ball, extra ball, multiple balls, duplicate ball, ball on the floor, floating orbs, ' +
-  'glowing spheres near the head, figure floating with no floor, padel court, glass walls, fence, net, court ' +
+  'glowing spheres near the head, figure floating with no floor, padel court, glass walls, fence, court ' +
   'lines, ceiling lights, spectators, text, letters, logos, banners, advertising, ' +
-  'pale blue, light blue, turquoise, excessive cyan, white glowing body, excessive bloom, blurry scan lines, ' +
+  'tennis racket, tennis racquet, string bed, strings, gut strings, woven mesh face, open throat tennis frame, ' +
+  'orange body, amber hologram, copper, gold, yellow scan lines, vivid orange, #FF6A00, ' +
+  'pale blue, light blue, turquoise, excessive cyan, excessive bloom, blurry scan lines, ' +
   'soft focus, low detail, clothing, shorts, waistband, shoes, socks, cap, hat, hair, face, eyes, cropped feet, ' +
   'cropped head, distorted anatomy, extra fingers, deformed hands, cartoon, solid opaque skin, gray background'
 
@@ -995,6 +1022,65 @@ export async function generateHologram(opts: {
     keypoints,
     ...(Object.keys(parts).length ? { parts } : {}),
     ...(gridImage ? { gridImage } : {}),
+  }
+}
+
+/**
+ * CoreShots impact PNG (or any still) → Nano Banana white Ideal Form hologram.
+ * Used so Seedance orbits a metallic-white mannequin, not the filmed pro photo.
+ */
+export async function generateHologramFromStill(opts: {
+  analysisId: string
+  imagePath: string
+  prompt?: string
+  fileStem?: string
+  frame?: number | null
+}): Promise<HologramResult> {
+  if (!fs.existsSync(opts.imagePath)) throw new HologramError(404, 'Impact still file missing on server')
+  const raw = fs.readFileSync(opts.imagePath)
+  if (!raw.length) throw new Error('Impact still is empty')
+  let box: PlayerBox | null = null
+  const comfyBase = String(process.env.COMFYUI_BASE_URL ?? '').trim()
+  const provider = hologramProvider()
+  if (comfyBase) {
+    box = await detectPlayerBox(comfyBase, raw, randomUUID()).catch((e) => {
+      console.warn('[Technique][hologram] player detection failed on impact still', e?.message)
+      return null
+    })
+  }
+  const { buffer: frame } = await squareCrop(raw, box)
+  const basePrompt = opts.prompt ?? HOLOGRAM_PROMPT_WHITE
+
+  let edited: Buffer
+  let keypoints: HologramKeypoints | null = null
+  if (provider === 'openrouter') {
+    edited = await openRouterImageEdit(basePrompt, frame)
+  } else if (provider === 'openai') {
+    edited = await gptImageEdit(basePrompt, [{ name: 'frame.png', data: frame }])
+  } else {
+    ;({ image: edited, keypoints } = await comfyImageEdit(basePrompt, frame))
+  }
+
+  if (provider === 'openrouter' || provider === 'openai') {
+    keypoints = await comfyExtractKeypoints(edited)
+    if (!keypoints) keypoints = await poseHologramStill(edited, opts.analysisId)
+  }
+
+  const dir = path.join(HOLOGRAM_UPLOAD_ROOT, opts.analysisId)
+  fs.mkdirSync(dir, { recursive: true })
+  const stamp = Date.now()
+  const stem = opts.fileStem ?? 'pro-hologram'
+  const frameName = `${stem}-impact-${stamp}.png`
+  const imageName = `${stem}-${stamp}.png`
+  fs.writeFileSync(path.join(dir, frameName), frame)
+  fs.writeFileSync(path.join(dir, imageName), edited)
+  const publicBase = `/uploads/technique-holograms/${opts.analysisId}`
+  return {
+    image: `${publicBase}/${imageName}`,
+    frameImage: `${publicBase}/${frameName}`,
+    contactMs: null,
+    frame: typeof opts.frame === 'number' ? opts.frame : null,
+    keypoints,
   }
 }
 

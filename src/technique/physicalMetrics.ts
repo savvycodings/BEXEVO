@@ -62,4 +62,15 @@ export function normalizePhysicalMetricsOnAnalysis(
   return metrics;
 }
 
+/** Equal-weight mean of the five movement scores — the user-facing headline / ring score. */
+export function averagePhysicalMetrics(
+  metrics: Pick<
+    TechniquePhysicalMetrics,
+    "stability" | "power" | "agility" | "reactions" | "acceleration"
+  >
+): number {
+  const sum = METRIC_KEYS.reduce((total, key) => total + metrics[key], 0);
+  return Math.round(sum / METRIC_KEYS.length);
+}
+
 export { METRIC_KEYS };

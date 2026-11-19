@@ -4,13 +4,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { shotCardFields } from "./activityShotFields";
 
-test("shotCardFields returns stability/power/agility only", () => {
+test("shotCardFields returns all five physical metrics", () => {
   const f = shotCardFields({
     ai_analysis: {
       physical_metrics: { stability: 82, power: 71, agility: 64, reactions: 70, acceleration: 60 },
     },
   });
-  assert.deepEqual(f.physicalMetrics, { stability: 82, power: 71, agility: 64 });
+  assert.deepEqual(f.physicalMetrics, {
+    stability: 82,
+    power: 71,
+    agility: 64,
+    reactions: 70,
+    acceleration: 60,
+  });
 });
 
 test("shotCardFields returns null metrics when missing or invalid", () => {

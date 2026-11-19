@@ -1,9 +1,16 @@
 import { trainCategoryFromMetrics } from "../gamification/stats";
 import { parsePhysicalMetrics } from "./physicalMetrics";
 
-export type ShotCardMetrics = { stability: number; power: number; agility: number };
+/** All five movement scores — clients average these for the headline ring. */
+export type ShotCardMetrics = {
+  stability: number;
+  power: number;
+  agility: number;
+  reactions: number;
+  acceleration: number;
+};
 
-/** Extra per-item fields for the Shots list cards: shot category and the three card sub-scores. */
+/** Extra per-item fields for the Shots list cards: shot category and physical metrics. */
 export function shotCardFields(metrics: unknown): {
   category: string | null;
   physicalMetrics: ShotCardMetrics | null;
@@ -13,6 +20,14 @@ export function shotCardFields(metrics: unknown): {
   const pm = parsePhysicalMetrics(ai?.physical_metrics);
   return {
     category: trainCategoryFromMetrics(m),
-    physicalMetrics: pm ? { stability: pm.stability, power: pm.power, agility: pm.agility } : null,
+    physicalMetrics: pm
+      ? {
+          stability: pm.stability,
+          power: pm.power,
+          agility: pm.agility,
+          reactions: pm.reactions,
+          acceleration: pm.acceleration,
+        }
+      : null,
   };
 }

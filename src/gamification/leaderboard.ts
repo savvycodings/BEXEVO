@@ -7,7 +7,7 @@ import {
   userGamification,
   userProfile,
 } from "../db";
-import { storedAiScoreToPercent } from "../technique/techniqueScoreScale";
+import { headlineScoreFromAnalysis } from "../technique/techniqueScoreScale";
 import { acceptedFriendIds } from "../friends/friendsService";
 
 export type LeaderboardScope = "global" | "country" | "city" | "friends";
@@ -74,7 +74,7 @@ export async function averageScoresForUsers(
   for (const row of rows) {
     const ai = (row.metrics as Record<string, unknown> | null | undefined)
       ?.ai_analysis as Record<string, unknown> | undefined;
-    const score = storedAiScoreToPercent(ai);
+    const score = headlineScoreFromAnalysis(ai);
     if (score == null) continue;
     const prev = sums.get(row.userId) ?? { total: 0, count: 0 };
     prev.total += score;

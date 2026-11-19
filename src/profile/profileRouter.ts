@@ -18,8 +18,8 @@ import {
   coachStudentChatMessage,
 } from "../db";
 import {
+  headlineScoreFromAnalysis,
   storedAiBreakdownToPercent,
-  storedAiScoreToPercent,
 } from "../technique/techniqueScoreScale";
 import gamificationRouter from "../gamification/gamificationRouter";
 import { onFriendLinked } from "../gamification/service";
@@ -162,12 +162,12 @@ function trainCategoryFromTechniqueMetrics(metrics: unknown): string | null {
   return null;
 }
 
-/** Latest AI technique score as 0–100 for aggregates (legacy analyses scaled from 0–10). */
+/** Headline 0–100 for aggregates: avg of five physical metrics when present. */
 function scorePercentFromTechniqueMetrics(metrics: unknown): number | null {
   if (!metrics || typeof metrics !== "object") return null;
   const m = metrics as Record<string, unknown>;
   const ai = m.ai_analysis as Record<string, unknown> | undefined;
-  return storedAiScoreToPercent(ai);
+  return headlineScoreFromAnalysis(ai);
 }
 
 /** Profile + coach roster: per-train-category averages from technique_analysis (retrieval shot category). */
@@ -1016,7 +1016,7 @@ router.get("/coach-students", async (req, res) => {
     for (const row of scoreRows) {
       const metrics = row.metrics as Record<string, unknown> | null | undefined;
       const ai = metrics?.ai_analysis as Record<string, unknown> | undefined;
-      const scorePct = storedAiScoreToPercent(ai);
+      const scorePct = headlineScoreFromAnalysis(ai);
       if (scorePct == null || !Number.isFinite(scorePct)) continue;
       const cur = scoreAgg.get(row.userId) ?? {
         thisSum: 0,
